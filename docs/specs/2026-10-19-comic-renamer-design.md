@@ -387,7 +387,7 @@ our output is the entire metadata record** — nothing else is ever read.
 | `Series.name` = **leaf folder name only**; ancestors never read | Emit flat `<Series>/<Book>.<ext>`. Nesting is organisational for humans and invisible to Komga. |
 | `Book.name` = filename without extension; `BookMetadata.title` = that | The filename *is* the displayed title. |
 | `number`/`numberSort` assigned **positionally** after a natural sort | Filename sort order *is* reading order. Volume must precede subtitle. |
-| Natural sort compares digit runs numerically | Zero-padding is genuinely unnecessary: `Vol. 2` precedes `Vol. 10`. *Padding anyway is still worth considering for `ls` and every other tool that sorts lexically — owner's call.* |
+| Natural sort compares digit runs numerically | Komga does not need zero-padding — `Vol. 2` precedes `Vol. 10` unpadded. **We pad anyway** (D37), because every other tool sorts lexically. |
 | A volume-numbered file with no issue number is an ordinary book | **No "Special" bucket.** Our entire corpus shelves normally. This is why Komga is the launch target. |
 | Colon, apostrophe, `#` | No parsing or display effect; they land verbatim in the title. Filesystem and transport only — `:` is legal on Linux but breaks over SMB, `#` is harmlessly percent-encoded in the stored URL. |
 | One-shots are **folder**-triggered | Library option `oneshotsDirectory`, case-insensitive substring match on the full path. Never emit into such a path unintentionally. |
@@ -429,11 +429,18 @@ One narrower note: an **unlocked** title follows a rename, while a title the use
 hand-edited in Komga's UI is locked and will not update. Only hand-curated
 libraries are affected.
 
-Naming rules, as decided by the owner: volume always abbreviated `Vol. N`, not
-zero-padded; subtitle separator ` - `; real-title oddities preserved, so
-`Zomnibus` stays `Zomnibus`. Casing comes from the corpus, which also corrects
-by hand: it returns `The Complete ElfQuest` and `Nemesis: Rogues' Gallery`,
-both more accurate than the hand-written fixtures.
+Naming rules, as decided by the owner: volume always abbreviated `Vol. NN`,
+**zero-padded** (D37); subtitle separator ` - `; real-title oddities preserved,
+so `Zomnibus` stays `Zomnibus`. Casing comes from the corpus, which also corrects
+by hand: it returns `The Complete ElfQuest` and `Nemesis: Rogues' Gallery`, both
+more accurate than the hand-written fixtures.
+
+**Padding width is per series, taken from the corpus.** All files in a folder
+belong to one series, so the width is the digit count of that series' highest
+volume — `issue_count`, which the resolver already reads — with a floor of two.
+A nine-volume series gets `Vol. 01`–`Vol. 09`; a 34-volume manga run gets
+`Vol. 01`–`Vol. 34`; a 120-volume run gets `Vol. 001`. A fixed two-digit width
+would silently break lexical order at volume 100, and manga runs reach it.
 
 ### 6.9 The plan
 
@@ -1330,3 +1337,12 @@ Linux server. Komga compares through ICU collators with
 `CANONICAL_DECOMPOSITION`, so the forms are equal. The demonstrated APFS
 case-folding and normalisation *collision* on the filesystem is unaffected and
 still a Phase 1 blocker (D2); NFC output remains a hard invariant. §6.10.
+
+**D37 — Volume numbers are zero-padded after all, to a per-series width.**
+Owner's call, reversing the earlier unpadded choice. Komga genuinely does not
+need it — its comparator reads digit runs numerically — but `ls`, Finder, every
+file manager and most scripts sort lexically, and under those `Vol. 10` precedes
+`Vol. 2`. Width is the digit count of the series' highest volume, read from the
+corpus `issue_count` the resolver already has, floored at two. Per-series rather
+than fixed, because a fixed two digits breaks silently at volume 100 and manga
+runs pass it. §6.8.1.
