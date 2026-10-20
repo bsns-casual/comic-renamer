@@ -11,3 +11,6 @@ corpus/cache/
 
 # macOS
 .DS_Store
+
+# OMC operational state
+.omc/
