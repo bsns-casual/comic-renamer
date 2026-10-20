@@ -1,0 +1,66 @@
+name: verify
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  corpus:
+    name: corpus manifest valid and its pin resolves
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Manifest fields
+        run: python3 scripts/check-manifest.py
+
+      # The pinned artifact must exist and hash to what we claim. This does NOT
+      # compare against upstream's newest dump: a newer upstream release is the
+      # normal state between refreshes and must not turn unrelated pull requests
+      # red. That comparison lives in corpus-refresh.yml.
+      - name: Pinned artifact downloads and matches its hash
+        run: |
+          set -euo pipefail
+          URL=$(python3 -c 'import json;print(json.load(open("corpus/manifest.json"))["url"])')
+          WANT=$(python3 -c 'import json;print(json.load(open("corpus/manifest.json"))["sha256"])')
+          WANT_SIZE=$(python3 -c 'import json;print(json.load(open("corpus/manifest.json"))["sizeBytes"])')
+          curl -sfL "$URL" -o corpus.zip
+          GOT=$(sha256sum corpus.zip | cut -d' ' -f1)
+          GOT_SIZE=$(stat -c %s corpus.zip)
+          echo "expected $WANT ($WANT_SIZE bytes)"
+          echo "actual   $GOT ($GOT_SIZE bytes)"
+          test "$WANT" = "$GOT"
+          test "$WANT_SIZE" = "$GOT_SIZE"
+
+      - name: Corpus binary is not committed
+        run: |
+          set -euo pipefail
+          if git ls-files | grep -qE '^corpus/.*\.(sqlite|zip)$'; then
+            echo "::error::corpus binary is committed - see CLAUDE.md invariant 4"
+            exit 1
+          fi
+          echo "no corpus binary tracked"
+
+  fixtures:
+    name: held-out fixtures well-formed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/check-fixtures.py
+
+  licence:
+    name: code licence is MIT
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: LICENSE is MIT
+        run: |
+          set -euo pipefail
+          head -1 LICENSE | grep -q 'MIT License'
+          echo "MIT confirmed"
+
+# Phase 1 adds the gate that matters most here: the held-out coverage
+# measurement, which needs the resolver to exist. Until then see CLAUDE.md,
+# "One gate is not yet real" -- the silent-false-positive rate is unmeasured
+# and must not be claimed by this workflow or anything else.

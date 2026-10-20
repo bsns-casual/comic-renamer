@@ -1,0 +1,51 @@
+name: corpus-refresh
+
+# Monthly check for a newer Grand Comics Database dump. Opens a pull request
+# bumping corpus/manifest.json; never pushes to the default branch. A corpus
+# bump changes resolution behaviour for every user, so it needs the coverage
+# delta and a human merge. See design 6.5 and decision D19.
+
+on:
+  schedule:
+    - cron: '17 6 3 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare pin against upstream
+        id: cmp
+        run: python3 scripts/corpus-check.py --write >> "$GITHUB_OUTPUT"
+
+      - name: Validate the rewritten manifest
+        if: steps.cmp.outputs.changed == 'true'
+        run: python3 scripts/check-manifest.py
+
+      - name: Open bump pull request
+        if: steps.cmp.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEW_DATE: ${{ steps.cmp.outputs.new_date }}
+          OLD_DATE: ${{ steps.cmp.outputs.old_date }}
+        run: |
+          set -euo pipefail
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout -b "corpus/bump-${NEW_DATE}"
+          git add corpus/manifest.json
+          git commit -q -m "corpus: bump GCD dump ${OLD_DATE} -> ${NEW_DATE}"
+          git push -q origin "corpus/bump-${NEW_DATE}"
+          gh pr create \
+            --title "corpus: bump GCD dump ${OLD_DATE} to ${NEW_DATE}" \
+            --body-file .github/corpus-bump-pr-body.md
+
+      - name: Already current
+        if: steps.cmp.outputs.changed != 'true'
+        run: echo "corpus is current at ${{ steps.cmp.outputs.old_date }}"

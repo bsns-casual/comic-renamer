@@ -1,0 +1,13 @@
+# The corpus binary is never committed — see CLAUDE.md invariant 4.
+# corpus/manifest.json pins it; the tool fetches and hash-verifies on first use.
+corpus/*.sqlite
+corpus/*.sqlite-*
+corpus/*.zip
+corpus/cache/
+
+# Rust
+/target/
+**/*.rs.bk
+
+# macOS
+.DS_Store
