@@ -372,6 +372,63 @@ that are illegal or dangerous in filenames — `Nemesis: Rogues' Gallery` has bo
 a colon, which is forbidden on Windows and renders as `/` in Finder, and an
 apostrophe. Sanitising is first-party code's job, not the data's.
 
+### 6.8.1 The Komga preset, specified
+
+Researched against the source, not the docs, because the behaviour that matters
+is undocumented.
+
+**Komga has no filename parser.** Its metadata providers are ComicInfo.xml
+(CBZ/CBR only), EPUB OPF, Mylar `series.json`, ISBN barcode, local artwork and
+one-shot. There is no PDF provider and no filename provider. **For a PDF corpus
+our output is the entire metadata record** — nothing else is ever read.
+
+| Komga behaviour | Consequence for the preset |
+|---|---|
+| `Series.name` = **leaf folder name only**; ancestors never read | Emit flat `<Series>/<Book>.<ext>`. Nesting is organisational for humans and invisible to Komga. |
+| `Book.name` = filename without extension; `BookMetadata.title` = that | The filename *is* the displayed title. |
+| `number`/`numberSort` assigned **positionally** after a natural sort | Filename sort order *is* reading order. Volume must precede subtitle. |
+| Natural sort compares digit runs numerically | Zero-padding is genuinely unnecessary: `Vol. 2` precedes `Vol. 10`. *Padding anyway is still worth considering for `ls` and every other tool that sorts lexically — owner's call.* |
+| A volume-numbered file with no issue number is an ordinary book | **No "Special" bucket.** Our entire corpus shelves normally. This is why Komga is the launch target. |
+| Colon, apostrophe, `#` | No parsing or display effect; they land verbatim in the title. Filesystem and transport only — `:` is legal on Linux but breaks over SMB, `#` is harmlessly percent-encoded in the stored URL. |
+| One-shots are **folder**-triggered | Library option `oneshotsDirectory`, case-insensitive substring match on the full path. Never emit into such a path unintentionally. |
+| Collections and read lists | From ComicInfo `SeriesGroup` / `AlternateSeries`, both **CBZ/CBR only** — so for PDFs they are UI/API only and out of scope. |
+| PDF is rendered server-side to page images | No embedded metadata read. Confirms the filename-only constraint from the other direction. |
+| Unreadable file | Media status *Error* or *Unsupported*; the book still appears but will not open. |
+
+Preset effort: **small.** The real work is the pre-flight below.
+
+### 6.8.2 Komga pre-flight — required, not advisory
+
+**A rename is a delete-plus-add, not an update.** Komga keys books by exact file
+path. It rematches renamed files by **file size, then file hash**, and on a match
+restores media analysis, read progress, read lists, collections and user
+thumbnails.
+
+**Hashing must already be on before the rename. Enabling it afterwards cannot
+help.** `tryRestoreBooks` only considers deleted records that already carry a
+hash, and `tryRestoreSeries` requires every deleted book to carry one. Switching
+hashing on hashes books by reading their *current* path — which after a rename no
+longer exists, so a deleted record can never acquire a hash retroactively. A
+second trap: `emptyTrashAfterScan` purges deleted records immediately, making
+restore impossible whatever the hash setting.
+
+So, before renaming into an existing Komga library:
+
+```
+GET /api/v1/libraries
+  assert hashFiles === true
+  assert emptyTrashAfterScan === false
+  if hashing was only just enabled, let the hash tasks drain first
+```
+
+`hashFiles` defaults to **true** and `emptyTrashAfterScan` to **false**, so the
+common case passes — but a user who changed either loses read progress silently,
+and silence is the problem. Refuse rather than warn.
+
+One narrower note: an **unlocked** title follows a rename, while a title the user
+hand-edited in Komga's UI is locked and will not update. Only hand-curated
+libraries are affected.
+
 Naming rules, as decided by the owner: volume always abbreviated `Vol. N`, not
 zero-padded; subtitle separator ` - `; real-title oddities preserved, so
 `Zomnibus` stays `Zomnibus`. Casing comes from the corpus, which also corrects
@@ -571,9 +628,15 @@ attacker-controlled filenames (§6.11).
 APFS, `Hellboy/` and `hellboy/` fold into one directory and the second write
 silently overwrites the first; NFC and NFD spellings of one title do the same,
 and `readdir` then returns the NFC form so the tool cannot observe what it did.
-Under `--move` that destroys the only copy. The mirror failure is worse: on a
-Linux ext4 Komga server those same variants become **two separate series**, so
-identical data produces different libraries on the laptop and on the server.
+Under `--move` that destroys the only copy. The filesystem half of this is demonstrated and stands. **The Komga half does
+not, and an earlier draft overstated it.** Komga sorts and matches through ICU
+collators configured with `CANONICAL_DECOMPOSITION`, registered as SQLite
+collations, so NFC and NFD compare *equal* — the two forms do not produce two
+series. APFS is normalisation-preserving and NFC from macOS survives the copy
+intact. What remains true is narrower: the stored path URL is matched by exact
+string equality, so changing an existing file's normalisation reads as
+delete-plus-add, which is the §6.8.2 restore problem rather than a duplication
+problem.
 
 **Detection alone is not sufficient — the move path needs an atomic no-clobber
 primitive.** A same-volume move is `rename(2)`, which **silently overwrites** an
@@ -1239,3 +1302,31 @@ the seven total errors across 2,223 rows came from silently accepting a record
 in another language when no English one matched, resolving `noragami_vol1`–`vol6`
 to the Japanese original and producing a Japanese-script folder name. No match
 in the requested language means `review`. §6.3.
+
+**D34 — The Komga preset is specified, and Komga is validated.** Researched
+against source rather than documentation. It passes §9's validation test that
+Kavita fails: a volume-numbered file with no issue number is an ordinary book and
+there is no "Special" bucket. Three findings shape the preset: Komga has **no
+filename parser at all**, so for PDFs our output is the entire metadata record;
+`Series.name` is the leaf folder only, so emit flat `<Series>/<Book>.<ext>`; and
+numbering is **positional** after a natural sort, so filename sort order is
+reading order and volume must precede subtitle. Zero-padding is confirmed
+unnecessary for Komga, though possibly still wanted for other tools — owner's
+call. §6.8.1.
+
+**D35 — A Komga pre-flight check is required before renaming into an existing
+library.** A rename is delete-plus-add; Komga restores read progress, read lists
+and collections only by matching file size then hash, and **hashing enabled after
+the fact cannot help** — a deleted record can never acquire a hash because
+hashing reads the file's current path. `emptyTrashAfterScan` purges the records
+outright. Assert `hashFiles === true` and `emptyTrashAfterScan === false` via
+`GET /api/v1/libraries` and **refuse**, not warn. Both defaults are already safe,
+so this only bites users who changed them — silently, which is the problem.
+§6.8.2.
+
+**D36 — Correction: NFC/NFD does not split a Komga series in two.** An earlier
+draft claimed identical data would produce different libraries on macOS and on a
+Linux server. Komga compares through ICU collators with
+`CANONICAL_DECOMPOSITION`, so the forms are equal. The demonstrated APFS
+case-folding and normalisation *collision* on the filesystem is unaffected and
+still a Phase 1 blocker (D2); NFC output remains a hard invariant. §6.10.
