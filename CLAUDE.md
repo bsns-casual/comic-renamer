@@ -76,8 +76,9 @@ Dated `YYYY-MM-DD-<topic>.md`.
 
 ## State
 
-Design approved. **Phase 0 is complete. Phase 1 Task 1 is complete** — the
-workspace skeleton compiles; every body is `todo!()`.
+Design approved. **Phase 0 is complete. Phase 1 Tasks 1-9 are complete** —
+the library is built up to and including the syscall layer. Tasks 10-15 are
+untouched.
 
 ```
 done   repo harness, CI, corpus manifest            (this file, .github/, corpus/)
@@ -85,40 +86,61 @@ done   D23  cloning a placeholder hydrates it -- move stays the default
 done   D26  ground truth, 2,223 verified rows; the gate is measured at 0.48%
 done   D34  Komga convention, specified from source (sections 6.8.1, 6.8.2)
 done   T1   workspace skeleton; `cargo check --workspace --all-targets` clean
+done   T2   normalise + residue          T6   Komga preset
+done   T3   corpus, verified fetch       T7   JSONL plan + checksum
+done   T4   Layer B overrides            T8   sparse fixtures + TreeGuard
+done   T5   resolver ladder              T9   no-clobber syscalls + collisions
 ```
+
+**77 tests pass** (`cargo test --workspace`). Two environment notes: `cargo`
+lives in `~/.cargo/bin` and is not on a non-interactive shell's PATH, and
+clippy is not installed, so no lint run has happened.
 
 The Phase 1 plan is written and survived three adversarial reviews:
 `docs/plans/2026-10-20-phase-1-implementation.md`, 15 tasks.
 
 ### Pick up here
 
-**Task 2 — normalisation and residue.** Pure functions, no I/O, unit tests
-in-module. Signatures are already declared in `crates/core/src/normalize.rs` and
-`residue.rs`; read them there, not from the plan's prose.
+**The Task 9 adversarial review, before anything else.** T9 is the syscall
+layer, one of the two places this project stops for a fresh pair of eyes.
 
-**Two of the plan's example tests need a one-line adjustment when you write
-them.** Both are illustrative snippets that never faced a compiler:
+A ledger with every ruling made along the way is at
+`.superpowers/sdd/2026-10-20-phase-1-implementation/progress.md` (git-ignored).
+Five interface changes the skeleton did not carry:
 
-- Task 2's `key_variants` assertion works only because the skeleton returns a
-  `BTreeSet<String>` — `Vec<String>::contains` will not take a `&str`.
-- Task 6's `pad` assertion compares a 4-tuple of `String` against a 4-tuple of
-  `&str`, which does not compile: std implements tuple `PartialEq` only between
-  identical types. Add `.as_str()` per element.
+- `Manifest` was snake_case with `deny_unknown_fields` and could not parse
+  `corpus/manifest.json` at all. Now camelCase with the four missing fields,
+  and a test reads the real file.
+- `resolve` takes `source_folder`, or Layer B is unreachable — the plan's own
+  step 3 says it must.
+- `Basis` gains `Publisher`. A row narrowed by a folder-name guess was
+  reporting `unambiguous` on the user's review surface.
+- `stream_verified` takes `dest_root`. Walking every ancestor for symlinks
+  refused every destination, because `/var` is itself a symlink on macOS.
+- `collisions` is public; the plan's tests call it directly.
 
-**Execution method: native**, per the recommendation that survived review —
-`cargo check`/`cargo test` as the per-task gate, one fresh whole-branch review
-at the end. **Still stop for a fresh adversarial review after Task 9 (syscalls)
-and Task 12 (`apply` execution)**, the two places a mistake costs files rather
-than time.
+**Two open risks the review should settle**, both in `corpus.rs`:
 
-**First usable artifact is Task 10, not Task 15.** `scan` is read-only by
-construction and produces a plan of the real 31.2 GiB bundle. Run `cargo run --
-scan …` against the live library there, before `apply` exists.
+1. `ensure_corpus` installs the fetched bytes verbatim, but the pinned URL is a
+   `.zip` while `sizeBytes`/`sha256` appear to pin the *unzipped* sqlite. A
+   real fetch needs an unzip step that does not exist, and no archive crate is
+   in the plan's pinned stack. First bites at T14.
+2. The corpus schema — table `series` with
+   `name/name_key/publisher/language/year_began/issue_count`, version in
+   `PRAGMA user_version` — is **defined by this code and never checked against
+   the real paperbunkr-gcd-data release.** Tests build it locally, so they
+   cannot catch a mismatch.
 
-**`tests/common/mod.rs` was deliberately left out of Task 1.** Cargo does not
-treat a file in a `tests/` subdirectory as a target, so a `todo!()` skeleton
-there is the one thing `cargo check` cannot verify — exactly the drift Task 1
-exists to prevent. Task 8 creates it alongside the first test that uses it.
+**Execution method: native** — `cargo check`/`cargo test` as the per-task gate.
+**Still stop for a fresh adversarial review after Task 12 (`apply`
+execution)**, the other place a mistake costs files rather than time.
+
+After the review: T10 `scan`, the first usable artifact. It is read-only by
+construction, so run `cargo run -- scan …` against the live 31.2 GiB bundle
+before `apply` exists.
+
+`tests/common/mod.rs` arrived at T5 rather than T8 — T5 is the first test that
+needed a shared fixture. T8 added the sparse generators and `TreeGuard` to it.
 
 Phase 0b — the 13-app research spike — runs *parallel* to Phase 1 and gates
 Phase 2 only. Nothing in Phase 1 waits on it.
