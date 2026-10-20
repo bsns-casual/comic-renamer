@@ -125,8 +125,16 @@ pub struct PlanRow {
 
 impl PlanRow {
     /// Rebuilds the resolver result so `apply` can recompute the destination.
+    /// D14: the recomputation reads these fields, never `destination_preview`.
     pub fn resolved(&self) -> Resolved {
-        todo!()
+        Resolved {
+            series: self.series.clone(),
+            volume: self.volume,
+            subtitle: self.subtitle.clone(),
+            run: self.run,
+            status: self.status.clone(),
+            record: self.record.clone(),
+        }
     }
 }
 
