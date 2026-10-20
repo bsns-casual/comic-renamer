@@ -244,7 +244,12 @@ cost of getting this wrong: it inflates the apparent `ready` rate from 40% to
 
 Resolution, in order:
 
-1. Filter to the user's language (default `en`). **Hard filter.**
+1. Filter to the user's language (default `en`). **Hard filter — and when no
+   record matches the language, the row goes to `review`, it does not fall back
+   to any language.** Measured: a silent fallback caused 6 of the 7 total errors
+   across 2,223 graded rows, resolving `noragami_vol1`–`vol6` to the Japanese
+   original `ノラガミ [Noragami]` from 講談社 instead of the Kodansha USA edition —
+   which would have produced a Japanese-script folder name.
 2. Prefer the publisher **inferred from the source folder name**.
    `HumbleDarkHorseAnniversaryBundle` squashes to contain `darkhorse`, matching
    the corpus `publisher` column. Free signal, but **worth only ~7 points at
@@ -262,11 +267,11 @@ Resolution, in order:
 5. Still ambiguous → `review`, listing every candidate with publisher, year and
    run length. **Never silently pick.**
 
-**Step 4 may not promote a row to `ready` until it is validated.** It is doing
-more work than everything else combined, on an unproven prior, which is exactly
-the shape §4 forbids. Until the labelled sample (D26) measures its error rate,
-step 4 marks rows `review`: `ready` is then ~32%, against ~71% once it is
-trusted. That 39-point swing is what the labelling session buys.
+**Step 4 is validated and may promote to `ready`: 0 errors in 658 graded rows.**
+It was held on probation until measured, because it decides more rows than
+everything else combined on an unproven prior. The measurement (§7) cleared it
+outright — it is the *lowest*-error basis of the three, which is the opposite of
+what was feared. Re-validate it on any corpus bump.
 
 "Prefer the earliest edition," which an earlier draft listed, is **withdrawn**:
 on a title shared by unrelated books it systematically picks the oldest obscure
@@ -772,22 +777,44 @@ A real held-out set now exists and is committed as **a text file of filenames
 only** — `fixtures/heldout-filenames.txt`, 2,714 names across three publishers,
 supplied by the owner. No comics, no binaries, 70 KB.
 
-**Measured: 92.3% series located, 4.7% ambiguous.** Phase 1 must match or beat
-both.
+**The gate is real, and it is measured against ground truth rather than
+estimated.** `fixtures/humble-ground-truth.tsv` holds **2,223 verified
+filename→title pairs across 38 comic bundles**, extracted from the maintainer's
+own Humble Bundle library, where each download is published alongside its real
+human-readable title. No hand labelling was required and none is planned.
 
-**Not measured, and the document previously claimed otherwise: the silent false
-positive rate.** A silent false positive is a *confident wrong answer*, and
-detecting one requires knowing the right answer. `heldout-filenames.txt` is
-unlabelled, so what was actually measured is that **detected** failures routed to
-`review` — a weaker and different claim. A gate that cannot fail gates nothing,
-and this one currently cannot.
+Measured over all 2,223 rows, with the publisher hint firing on 752 of them:
 
-**Establishing it is a Phase 0 deliverable, and the sample now exists:**
-`fixtures/label-sample-200.txt`. It is **deliberately not a uniform sample.**
-140 of its 200 rows were decided by §6.3's step-4 heuristic, because that is
-where a silent false positive would hide — it decides 39 of the 71 points of
-`ready` on an unproven prior. The remaining 60 cover the two safer bases as a
-control. Once that exists, the gate becomes real
+```
+ready                     66.1%
+ambiguous -> review        9.6%
+subtitle -> review        12.5%
+not located               11.8%
+
+of ready rows:
+  correct                 99.52%
+  WRONG (silent FP)        0.48%   <- the gate
+
+by basis            ready   wrong   error
+  unambiguous         742       7   0.94%
+  volume-count         70       0   0.00%
+  shortest-run         658       0   0.00%
+```
+
+**Phase 1 must hold the silent-false-positive rate at or below 0.5% and the
+ready rate at or above 66%.** A ready-rate regression is a disappointment; a
+silent-wrongness regression is a defect that blocks merge.
+
+**Grade carefully — most apparent errors are grading artifacts.** A first pass
+reported 2.65% and all ten sampled failures were the grader's fault: Humble
+writes `&` where the corpus writes "and", prefixes promotional items with
+"Free Issue" including a zero-width character, and inserts `Vol 1:` mid-title.
+Comparison must expand punctuation on **both** sides, strip promotional
+prefixes and embedded volume markers, and accept a match against any such
+normalisation. The real rate is 0.48%, five times lower than the naive one.
+
+`fixtures/label-sample-200.txt` remains as a 200-row spot-check for a human who
+wants to audit the automated grading; it is no longer on the critical path. Once that exists, the gate becomes real
 and the rule stands: **a located-rate regression is a disappointment; a
 silent-false-positive regression is a defect that blocks merge.** Until it
 exists, no claim about silent wrongness may be made in the README, the PR
@@ -1188,3 +1215,27 @@ an unproven prior is the shape anti-goal §4 exists to prevent. §6.3.
 reference bundle suggested it was decisive (5 ambiguous → 1). Across 2,714
 held-out files it resolves 7.4% and leaves 28.9% ambiguous within a single
 publisher. Still worth having, no longer load-bearing. §6.3.
+
+**D31 — Ground truth comes from the maintainer's Humble library, not hand
+labelling.** Humble's order API publishes each download beside its real
+human-readable title, so a filename→title mapping for every owned book is
+directly extractable. 2,223 comic rows across 38 bundles, committed as
+`fixtures/humble-ground-truth.tsv` — bundle, title and filename stem only, no
+URLs, prices or account data. This retires D26's 40-minute hand-labelling plan
+and replaces a 200-row sample with a library-scale verified set. Non-comic
+bundles (tabletop RPG rulebooks, prose fiction, O'Reilly technical titles) are
+filtered out; one bundle of mixed prose and comics was dropped whole rather than
+contaminate the set, and one RPG-branded bundle that is actually Dynamite comics
+was kept. §7.
+
+**D32 — The shortest-feasible-run heuristic is validated and off probation: 0
+errors in 658 graded rows.** D29 held it back as an unproven prior deciding more
+rows than everything else combined. Measurement cleared it as the lowest-error
+basis of the three. The `ready` rate is 66.1% with it and roughly 36% without.
+Re-validate on every corpus bump. §6.3.
+
+**D33 — The language filter must never fall back to another language.** Six of
+the seven total errors across 2,223 rows came from silently accepting a record
+in another language when no English one matched, resolving `noragami_vol1`–`vol6`
+to the Japanese original and producing a Japanese-script folder name. No match
+in the requested language means `review`. §6.3.

@@ -43,13 +43,22 @@ without changing the spec first.**
    hand-renamed files. Tests use generated files, never anyone's real library.
    (§7, D12)
 
-### One gate is not yet real
+### The gate is real, and here are its numbers
 
-§7's silent-false-positive gate **cannot currently fail**, because
-`fixtures/heldout-filenames.txt` is unlabelled. The 92.3% located-rate *was*
-measured; the silent-wrongness rate was not. Building a labelled subset is a
-Phase 0 deliverable. **Until it exists, make no claim about silent wrongness** in
-the README, a PR body, or CI. (D26)
+§7's silent-false-positive gate is **measured**, not estimated:
+`fixtures/humble-ground-truth.tsv` holds 2,223 verified filename→title pairs
+pulled from the maintainer's own Humble library, where every download is
+published next to its real title.
+
+```
+ready                66.1%
+silent false pos      0.48%   <- the gate: hold at or below 0.5%
+```
+
+**Grade against it carefully.** A first pass reported 2.65% and every sampled
+failure was the grader's fault: Humble writes `&` where the corpus writes "and",
+prefixes promo items with "Free Issue" (containing a zero-width character), and
+inserts `Vol 1:` mid-title. Normalise both sides or you will chase phantoms.
 
 ---
 
