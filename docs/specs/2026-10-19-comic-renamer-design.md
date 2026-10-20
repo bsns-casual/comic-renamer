@@ -421,10 +421,19 @@ better than streaming for cost.
 **returned `EEXIST` when the destination already existed** — so unlike `rename()`
 it is natively no-clobber. It also works on zero-byte and sparse sources.
 
-Two constraints. It is APFS and same-volume only, so it must be **probed at
-runtime with a fallback to streaming**, never assumed — and in particular whether
-it works with a cloud-sync File Provider source is **unverified** and must be
-tested before being relied on. And `du` and `stat -f %b` cannot see clone
+Three constraints. It is APFS and same-volume only, so it must be **probed at
+runtime with a fallback to streaming**, never assumed.
+
+**And cloning a cloud placeholder silently hydrates it.** Measured against a real
+Dropbox placeholder: `clonefile` succeeded, but the source went from
+`blocks=0, SF_DATALESS` to `blocks=384, flags cleared` — the file was downloaded
+to satisfy the clone. A clone from a **materialised** source in the same tree
+moved `df` by 16 KB for a 6 MB file, essentially free.
+
+So cloning is free **only when the source is already local.** Against a library
+of online-only files it triggers a full download first — for the reference
+bundle, 31.2 GiB of it — and the clone is free only afterwards. This makes
+`SF_DATALESS` detection at `scan` load-bearing rather than informational. And `du` and `stat -f %b` cannot see clone
 savings; only a `df` delta reveals the truth, so capacity reporting must not use
 them (§6.10 `scan`).
 
@@ -440,11 +449,19 @@ the source root is a cloud-sync folder unless explicitly overridden.
   412 files · 31.2 GiB · same volume → instant, no extra disk used
   Originals will no longer exist at their current paths.
 
-  --copy       keeps originals — clone available here, 0 GiB needed
+  38 files are cloud placeholders — 6.1 GiB will be DOWNLOADED first.
+
+  --copy       keeps originals — clone available here, 0 GiB extra disk
   --hardlink   keeps originals, no extra disk, same volume only
 
   Type MOVE to continue:
 ```
+
+**The disclosure reports download cost, not only disk cost.** Those are
+different numbers and a user with an online-only library cares more about the
+first. A plan whose sources are dataless will transfer gigabytes whatever
+mechanism is chosen, and saying "0 GiB extra disk" while silently pulling 6 GiB
+over the network would be exactly the kind of quiet surprise §4 forbids.
 
 Typed confirmation on first run and whenever the plan is cross-volume.
 
@@ -1071,15 +1088,23 @@ but nothing reads it automatically. Its load-bearing content is the nine
 invariants in §10.1, each of which a competent contributor would otherwise
 reasonably undo.
 
-**D23 — Cloning reopens the copy-versus-move question, and D1 should be
-revisited.** D1 made move the default because copying 31.2 GiB against 11.0 GiB
-free could not complete. With `clonefile(2)` reachable from Rust, same-volume
-copy semantics cost **zero** disk, which removes the reason move was chosen. The
-default is left as move pending one measurement: whether cloning works with a
-cloud-sync File Provider source, which is where the reference bundle lives. If it
-does, `--copy` becomes both safe and free and should probably be the default
-again. **Do not quietly flip this** — it is the owner's call and the measurement
-comes first. §6.10.
+**D23 — Resolved by measurement: cloning works through a cloud-sync provider but
+hydrates the source, so it does not make `--copy` free in general.** The test:
+`clonefile` on a real Dropbox placeholder succeeded and left the source
+materialised (`blocks=0, SF_DATALESS` → `blocks=384, flags cleared`); the same
+call against an already-local file in the same tree moved `df` by 16 KB for a 6 MB
+file.
+
+So copy-via-clone is free **only when sources are already local** — true of the
+reference bundle today, not true of a stranger's online-only library, where it
+would pull the whole payload over the network first.
+
+**Move stays the default**, since the measurement did not deliver the
+unconditionally-free copy that would have justified flipping it. Two requirements
+fall out instead: the pre-flight must disclose **download** cost alongside disk
+cost, and `SF_DATALESS` detection at `scan` is load-bearing rather than
+informational. Whether to flip the default for the already-local case remains the
+owner's call, now with real numbers. §6.10.
 
 **D24 — No-clobber is enforced at the syscall, per mechanism.** A collision check
 followed by `rename(2)` is not a no-clobber guarantee, because `rename` silently
