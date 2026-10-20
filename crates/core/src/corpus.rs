@@ -120,6 +120,8 @@ pub struct Corpus {
     // shortcut: clones per key variant; switch to Vec<SeriesRecord> +
     // HashMap<String, Vec<u32>> if startup exceeds a second
     index: HashMap<String, Vec<SeriesRecord>>,
+    /// Distinct publishers, for `publisher_hint` to match a folder name against.
+    publishers: Vec<String>,
 }
 
 impl Corpus {
@@ -186,10 +188,24 @@ impl Corpus {
         }
         drop(statement);
 
-        Ok(Corpus { conn, index })
+        let mut publishers: Vec<String> = conn
+            .prepare("SELECT DISTINCT publisher FROM series")?
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<Result<_, _>>()?;
+        publishers.sort();
+
+        Ok(Corpus {
+            conn,
+            index,
+            publishers,
+        })
     }
 
     pub fn lookup(&self, key: &str) -> &[SeriesRecord] {
         self.index.get(key).map_or(&[], Vec::as_slice)
+    }
+
+    pub fn publishers(&self) -> &[String] {
+        &self.publishers
     }
 }

@@ -24,6 +24,8 @@ pub enum Mechanism {
 pub enum Basis {
     Override,
     Unambiguous,
+    /// Narrowed by the publisher inferred from the source folder (§6.3 step 2).
+    Publisher,
     VolumeFeasibility,
     ShortestRun,
 }

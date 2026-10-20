@@ -1,12 +1,13 @@
 //! Task 3. No test touches the network: every manifest URL is a `file://`
 //! pointing inside the test's own tempdir.
 
+mod common;
+
 use comic_renamer_core::corpus::{ensure_corpus, load_manifest, Corpus, Manifest};
 use comic_renamer_core::types::CorpusError;
+use common::{manifest_for, write_db};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
-
-const SCHEMA_VERSION: u32 = 1;
 
 fn manifest_json(licence: &str) -> String {
     format!(
@@ -46,52 +47,7 @@ fn manifest_with_wrong_hash() -> (TempDir, Manifest) {
     (dir, manifest)
 }
 
-type Row<'a> = (&'a str, &'a str, &'a str, &'a str, u16, u32);
-
-fn write_db(path: &Path, rows: &[Row<'_>]) {
-    let conn = rusqlite::Connection::open(path).unwrap();
-    conn.execute_batch(&format!(
-        "PRAGMA user_version = {SCHEMA_VERSION};
-         CREATE TABLE series (
-             name        TEXT    NOT NULL,
-             name_key    TEXT    NOT NULL,
-             publisher   TEXT    NOT NULL,
-             language    TEXT    NOT NULL,
-             year_began  INTEGER NOT NULL,
-             issue_count INTEGER NOT NULL
-         );"
-    ))
-    .unwrap();
-    for (name, name_key, publisher, language, year, run) in rows {
-        conn.execute(
-            "INSERT INTO series VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![name, name_key, publisher, language, year, run],
-        )
-        .unwrap();
-    }
-}
-
-/// A manifest that agrees with `path` on size and schema.
-fn manifest_for(path: &Path, series_count: u64) -> Manifest {
-    Manifest {
-        url: format!("file://{}", path.display()),
-        sha256: sha256_of(path),
-        size_bytes: std::fs::metadata(path).unwrap().len(),
-        series_count,
-        schema_version: SCHEMA_VERSION,
-        licence: "CC BY-SA 4.0".into(),
-        dump_date: "2026-09-15".into(),
-        attribution: "Grand Comics Database (https://www.comics.org)".into(),
-        upstream_manifest: "https://example.invalid/gcd-data.json".into(),
-        licence_url: None,
-    }
-}
-
-fn sha256_of(path: &Path) -> String {
-    comic_renamer_core::corpus::sha256_hex(&std::fs::read(path).unwrap())
-}
-
-fn tiny_corpus(dir: &TempDir, rows: &[Row<'_>]) -> Corpus {
+fn tiny_corpus(dir: &TempDir, rows: &[common::Row<'_>]) -> Corpus {
     let path = dir.path().join("gcd.sqlite");
     write_db(&path, rows);
     let manifest = manifest_for(&path, rows.len() as u64);
