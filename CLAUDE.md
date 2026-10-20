@@ -85,20 +85,46 @@ done   D26  ground truth, 2,223 verified rows; the gate is measured at 0.48%
 done   D34  Komga convention, specified from source (sections 6.8.1, 6.8.2)
 ```
 
-**Next: the implementation plan**, in `docs/plans/`. The design says what and
-why; the plan says in what order and how each step is verified.
+The Phase 1 plan is written and survived three adversarial reviews:
+`docs/plans/2026-10-20-phase-1-implementation.md`, 15 tasks.
 
-**Then Phase 1.** Two things to know before any code:
+### Pick up here
 
-1. **No Rust toolchain is installed** on the maintainer's machine. `rustup` first.
-   Language is Rust (D17).
-2. Phase 0b -- the full 13-app research spike -- runs *parallel* to Phase 1 and
-   gates Phase 2 only. Nothing in Phase 1 waits on it.
+**0. UNCOMMITTED WORK EXISTS.** A `PreToolUse` hook in `~/.claude/settings.json`
+— `{"matcher": "Bash", "command": "rtk hook claude"}` — rewrites every Bash call,
+so auto mode cannot verify what would run and returns no verdict. Delete that one
+object from the `PreToolUse` array (keep the `cc-status` one) and restart, or
+leave auto mode. Then commit: the spec's D37 padding edits, this file's ponytail
+section and state, and the plan. All on disk, none committed.
 
-**One small open decision:** zero-padding. Komga's comparator is numeric so
-`Vol. 2` correctly precedes `Vol. 10` unpadded, which is what the owner chose.
-But `ls` and most other tools sort lexically and will disagree. Pad anyway, or
-not — owner's call, recorded in D34.
+**1. `rustup`.** No Rust toolchain on this machine. Language is Rust (D17).
+
+**2. Task 1 — the skeleton.** Cheapest task, highest leverage. It declares every
+shared type, error and signature with `todo!()` bodies until `cargo check
+--workspace --all-targets` is clean. The plan's v1 specified interfaces in prose
+across sixteen tasks and reviews found seven compile-blockers, four forward
+dependencies and eight undefined error types. Task 1 makes the compiler the
+arbiter so that class cannot recur.
+
+**3. Open decision — execution method.** Recommended: **native**, with `cargo
+check`/`cargo test` as the per-task gate and one fresh whole-branch review at the
+end — the plan carries the design and Task 1 removes the drift risk. **Exception:
+stop for a fresh adversarial review after Task 9 (syscalls) and Task 12 (`apply`
+execution)**, the two places a mistake costs files rather than time. Alternative
+is subagent-driven throughout: ~15 extra contexts, most thorough.
+
+**First usable artifact is Task 10, not Task 15.** `scan` is read-only by
+construction and produces a plan of the real 31.2 GiB bundle. Run `cargo run --
+scan …` against the live library there, before `apply` exists.
+
+Phase 0b — the 13-app research spike — runs *parallel* to Phase 1 and gates
+Phase 2 only. Nothing in Phase 1 waits on it.
+
+Volume numbers are **zero-padded to a per-series width** (D37) — the digit count
+of that series' highest volume, from the corpus `issue_count`, floored at two.
+Komga's comparator is numeric and does not need it, but `ls`, Finder and most
+scripts sort lexically, where `Vol. 10` would precede `Vol. 2`. A fixed two-digit
+width breaks silently at volume 100 and manga runs pass it.
 
 ## Conventions
 
@@ -110,3 +136,43 @@ not — owner's call, recorded in D34.
   it changes resolution behaviour for every user. (§6.5)
 - Don't claim something works without running it. This project has twice been
   wrong about a packaging claim that failed on contact with a real build.
+
+## Ponytail
+
+This repo uses ponytail discipline for ordinary coding work: **the smallest
+change that fully solves the task**, and a reply a busy human understands in one
+read. Invoke with `/ponytail` (levels `lite`, `full`, `ultra`);
+`/ponytail-review` for a change, `/ponytail-audit` for the repo.
+
+When you take a shortcut deliberately, mark it:
+
+```rust
+// shortcut: single-threaded apply; parallelism needs the lockfile first
+```
+
+`/ponytail-debt` collects those into a ledger, so a deferred decision stays
+visible instead of becoming folklore.
+
+### Where ponytail does not apply
+
+**The nine invariants above are not subject to minimisation, and neither is the
+test discipline around them.** This is the one place where the simplest change
+that passes the tests is the wrong change, and the failure is not hypothetical —
+a safety review of this project's own implementation plan found exactly it.
+
+Concretely, a minimising instinct will want to:
+
+- replace `renamex_np(…, RENAME_EXCL)` with plain `rename` — simpler, one less
+  `extern`, and every happy-path test still passes. It also silently destroys a
+  file, which is invariant 6.
+- drop the `assert_unchanged()` tree-snapshot harness as ceremony. It is the only
+  thing standing between "the function returned `Err`" and "no files moved," and
+  those are not the same claim.
+- collapse the two sparse fixtures into one. They measure different things
+  (invariant 8) and one cannot do both jobs.
+- delete a test whose assertion looks redundant. Several here exist to pin an
+  *ordering* — verify before unlink — that no type signature enforces.
+
+Rule of thumb: **minimise the code, never the proof.** If a change makes the
+diff smaller by making a destructive path less observable, it is not a ponytail
+change, it is a regression wearing one.
