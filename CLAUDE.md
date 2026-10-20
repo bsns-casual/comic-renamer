@@ -76,13 +76,15 @@ Dated `YYYY-MM-DD-<topic>.md`.
 
 ## State
 
-Design approved. **Phase 0 is complete.** No implementation code yet.
+Design approved. **Phase 0 is complete. Phase 1 Task 1 is complete** — the
+workspace skeleton compiles; every body is `todo!()`.
 
 ```
 done   repo harness, CI, corpus manifest            (this file, .github/, corpus/)
 done   D23  cloning a placeholder hydrates it -- move stays the default
 done   D26  ground truth, 2,223 verified rows; the gate is measured at 0.48%
 done   D34  Komga convention, specified from source (sections 6.8.1, 6.8.2)
+done   T1   workspace skeleton; `cargo check --workspace --all-targets` clean
 ```
 
 The Phase 1 plan is written and survived three adversarial reviews:
@@ -90,32 +92,33 @@ The Phase 1 plan is written and survived three adversarial reviews:
 
 ### Pick up here
 
-**0. UNCOMMITTED WORK EXISTS.** A `PreToolUse` hook in `~/.claude/settings.json`
-— `{"matcher": "Bash", "command": "rtk hook claude"}` — rewrites every Bash call,
-so auto mode cannot verify what would run and returns no verdict. Delete that one
-object from the `PreToolUse` array (keep the `cc-status` one) and restart, or
-leave auto mode. Then commit: the spec's D37 padding edits, this file's ponytail
-section and state, and the plan. All on disk, none committed.
+**Task 2 — normalisation and residue.** Pure functions, no I/O, unit tests
+in-module. Signatures are already declared in `crates/core/src/normalize.rs` and
+`residue.rs`; read them there, not from the plan's prose.
 
-**1. `rustup`.** No Rust toolchain on this machine. Language is Rust (D17).
+**Two of the plan's example tests need a one-line adjustment when you write
+them.** Both are illustrative snippets that never faced a compiler:
 
-**2. Task 1 — the skeleton.** Cheapest task, highest leverage. It declares every
-shared type, error and signature with `todo!()` bodies until `cargo check
---workspace --all-targets` is clean. The plan's v1 specified interfaces in prose
-across sixteen tasks and reviews found seven compile-blockers, four forward
-dependencies and eight undefined error types. Task 1 makes the compiler the
-arbiter so that class cannot recur.
+- Task 2's `key_variants` assertion works only because the skeleton returns a
+  `BTreeSet<String>` — `Vec<String>::contains` will not take a `&str`.
+- Task 6's `pad` assertion compares a 4-tuple of `String` against a 4-tuple of
+  `&str`, which does not compile: std implements tuple `PartialEq` only between
+  identical types. Add `.as_str()` per element.
 
-**3. Open decision — execution method.** Recommended: **native**, with `cargo
-check`/`cargo test` as the per-task gate and one fresh whole-branch review at the
-end — the plan carries the design and Task 1 removes the drift risk. **Exception:
-stop for a fresh adversarial review after Task 9 (syscalls) and Task 12 (`apply`
-execution)**, the two places a mistake costs files rather than time. Alternative
-is subagent-driven throughout: ~15 extra contexts, most thorough.
+**Execution method: native**, per the recommendation that survived review —
+`cargo check`/`cargo test` as the per-task gate, one fresh whole-branch review
+at the end. **Still stop for a fresh adversarial review after Task 9 (syscalls)
+and Task 12 (`apply` execution)**, the two places a mistake costs files rather
+than time.
 
 **First usable artifact is Task 10, not Task 15.** `scan` is read-only by
 construction and produces a plan of the real 31.2 GiB bundle. Run `cargo run --
 scan …` against the live library there, before `apply` exists.
+
+**`tests/common/mod.rs` was deliberately left out of Task 1.** Cargo does not
+treat a file in a `tests/` subdirectory as a target, so a `todo!()` skeleton
+there is the one thing `cargo check` cannot verify — exactly the drift Task 1
+exists to prevent. Task 8 creates it alongside the first test that uses it.
 
 Phase 0b — the 13-app research spike — runs *parallel* to Phase 1 and gates
 Phase 2 only. Nothing in Phase 1 waits on it.
