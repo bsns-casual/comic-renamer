@@ -15,5 +15,8 @@ pub trait Preset {
 
 /// `apply` resolves `PlanHeader.preset` through this.
 pub fn preset_by_id(id: &str) -> Option<Box<dyn Preset>> {
-    todo!()
+    match id {
+        "komga" => Some(Box::new(komga::Komga)),
+        _ => None,
+    }
 }
