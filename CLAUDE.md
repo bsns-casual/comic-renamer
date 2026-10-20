@@ -76,25 +76,29 @@ Dated `YYYY-MM-DD-<topic>.md`.
 
 ## State
 
-Design approved. **Phase 0 harness: done** — this file, `AGENTS.md`, the corpus
-manifest, and CI. No implementation code yet.
+Design approved. **Phase 0 is complete.** No implementation code yet.
 
-**Phase 0 remaining, in rough priority order:**
+```
+done   repo harness, CI, corpus manifest            (this file, .github/, corpus/)
+done   D23  cloning a placeholder hydrates it -- move stays the default
+done   D26  ground truth, 2,223 verified rows; the gate is measured at 0.48%
+done   D34  Komga convention, specified from source (sections 6.8.1, 6.8.2)
+```
 
-1. **The labelled subset (D26).** ~200 rows the resolver marks `ready`, verified
-   against title, publisher and year. Needs the maintainer, ~40 minutes. Until
-   this exists the project's only non-negotiable gate cannot fail.
-2. **The dataless-clone measurement (D23).** Does `clonefile(2)` work when the
-   source is a Dropbox placeholder rather than a materialised file? If yes,
-   `--copy` costs nothing and move-by-default should probably be reconsidered.
-   Needs a placeholder to test against.
-3. **Komga convention research (Phase 0a).** Small; the only part of the 13-app
-   spike that gates Phase 1.
-4. **The implementation plan** in `docs/plans/`. Design says what and why; the
-   plan says in what order and how each step is verified.
+**Next: the implementation plan**, in `docs/plans/`. The design says what and
+why; the plan says in what order and how each step is verified.
 
-**Before any Phase 1 code:** no Rust toolchain is installed on the maintainer's
-machine. `rustup` is the first step. Language is Rust (D17).
+**Then Phase 1.** Two things to know before any code:
+
+1. **No Rust toolchain is installed** on the maintainer's machine. `rustup` first.
+   Language is Rust (D17).
+2. Phase 0b -- the full 13-app research spike -- runs *parallel* to Phase 1 and
+   gates Phase 2 only. Nothing in Phase 1 waits on it.
+
+**One small open decision:** zero-padding. Komga's comparator is numeric so
+`Vol. 2` correctly precedes `Vol. 10` unpadded, which is what the owner chose.
+But `ls` and most other tools sort lexically and will disagree. Pad anyway, or
+not — owner's call, recorded in D34.
 
 ## Conventions
 
