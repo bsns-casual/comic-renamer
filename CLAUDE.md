@@ -67,10 +67,25 @@ Dated `YYYY-MM-DD-<topic>.md`.
 
 ## State
 
-Design approved. Phase 0 in progress: repo harness (this file), the labelled
-subset (D26), the dataless-clone measurement (D23), and Komga convention research.
-No implementation code yet. Language is Rust (D17); no toolchain is installed on
-the maintainer's machine yet.
+Design approved. **Phase 0 harness: done** — this file, `AGENTS.md`, the corpus
+manifest, and CI. No implementation code yet.
+
+**Phase 0 remaining, in rough priority order:**
+
+1. **The labelled subset (D26).** ~200 rows the resolver marks `ready`, verified
+   against title, publisher and year. Needs the maintainer, ~40 minutes. Until
+   this exists the project's only non-negotiable gate cannot fail.
+2. **The dataless-clone measurement (D23).** Does `clonefile(2)` work when the
+   source is a Dropbox placeholder rather than a materialised file? If yes,
+   `--copy` costs nothing and move-by-default should probably be reconsidered.
+   Needs a placeholder to test against.
+3. **Komga convention research (Phase 0a).** Small; the only part of the 13-app
+   spike that gates Phase 1.
+4. **The implementation plan** in `docs/plans/`. Design says what and why; the
+   plan says in what order and how each step is verified.
+
+**Before any Phase 1 code:** no Rust toolchain is installed on the maintainer's
+machine. `rustup` is the first step. Language is Rust (D17).
 
 ## Conventions
 
