@@ -1,0 +1,225 @@
+# Verification sample -- Phase 0 deliverable, decision D26
+#
+# 200 rows the resolver would mark `ready` and execute WITHOUT asking.
+# The only question per row: is this the right book?
+#
+#   Replace [ ] with   [y] correct   [n] wrong   [?] unsure
+#
+# Deliberately oversampled toward HEURISTIC rows. 140 of these were decided by
+# "among candidates with enough volumes, prefer the shortest run" -- the guess
+# that a short series is a collected edition, not a monthly run. That single
+# heuristic carries 39 of the 71 percentage points of `ready` and is
+# unvalidated. If a silent false positive exists, it is hiding in these rows.
+#
+#   HEURISTIC     decided by shortest-feasible-run   <- scrutinise these
+#   volume-count  decided by "cannot be vol N of a shorter series"
+#   unambiguous   only one corpus record matched; low risk
+#
+# RUN  = how many entries that corpus series has. The heuristic prefers small.
+# CAND = how many corpus records shared this title before disambiguation.
+#
+# A single [n] is a silent false positive -- the defect class that blocks a
+# merge once this file is complete. See design section 7.
+#
+OK  #    BASIS         FILENAME                                   RESOLVED SERIES                  VOL  PUBLISHER         YEAR  RUN  CAND
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+[ ] 1    unambiguous   witchhatateliervol1.epub                   Witch Hat Atelier                1    Kodansha USA      2019  14   1
+[ ] 2    HEURISTIC     biggirls_vol1.pdf                          Big Girls                        1    Image             2021  1    2
+[ ] 3    HEURISTIC     satellitesam_vol2.pdf                      Satellite Sam                    2    Image             2014  3    2
+[ ] 4    HEURISTIC     revival_vol3.cbz                           Revival                          3    Image             2012  8    3
+[ ] 5    HEURISTIC     eastofwest_vol1.pdf                        East of West                     1    Image             2013  10   2
+[ ] 6    unambiguous   psychodramaillustrated_issue5.pdf          Psychodrama Illustrated          5    Fantagraphics     2020  9    1
+[ ] 7    HEURISTIC     Saga_Book1_1420484117.cbz                  Saga                             1    Image             2014  4    3
+[ ] 8    unambiguous   attackontitan_vol11.cbz                    Attack on Titan                  11   Kodansha USA      2012  34   1
+[ ] 9    HEURISTIC     geiger_vol1.pdf                            Geiger                           1    Image             2021  5    3
+[ ] 10   HEURISTIC     low_vol5.cbz                               Low                              5    Image             2015  5    2
+[ ] 11   unambiguous   fireforce_vol14.cbz                        Fire Force                       14   Kodansha USA      2016  34   1
+[ ] 12   HEURISTIC     godzilla_vol1.epub                         Godzilla                         1    Dark Horse        1990  2    6
+[ ] 13   HEURISTIC     icecreamman_vol2.epub                      Ice Cream Man                    2    Image             2018  11   2
+[ ] 14   HEURISTIC     deadlyclass_vol2.cbz                       Deadly Class                     2    Image             2016  4    3
+[ ] 15   unambiguous   kill6billiondemons_vol2.pdf                Kill 6 billion demons            2    Akileos           2021  3    1
+[ ] 16   HEURISTIC     deadlyclass_vol9.cbz                       Deadly Class                     9    Image             2014  12   3
+[ ] 17   HEURISTIC     middlewest_vol3.cbz                        Middlewest                       3    Image             2019  3    2
+[ ] 18   HEURISTIC     seaofstars_vol2.pdf                        Sea of Stars                     2    Image             2020  2    2
+[ ] 19   HEURISTIC     nailbiter_vol1.cbz                         Nailbiter                        1    Image             2014  8    2
+[ ] 20   volume-count  strangetalentoflutherstrode_vol2.pdf       The Strange Talent of Luther Str 2    Image             2011  6    2
+[ ] 21   HEURISTIC     seventoeternity_vol3.pdf                   Seven to Eternity                3    Image             2017  3    2
+[ ] 22   HEURISTIC     COWL_Vol1_1420484117.pdf                   C.O.W.L.                         1    Image             2014  2    2
+[ ] 23   HEURISTIC     injection_vol3.epub                        Injection                        3    Image             2015  3    3
+[ ] 24   HEURISTIC     papergirls_vol4.pdf                        Paper Girls                      4    Image             2016  6    4
+[ ] 25   unambiguous   attackontitan_vol4.cbz                     Attack on Titan                  4    Kodansha USA      2012  34   1
+[ ] 26   HEURISTIC     rumble_vol3.cbz                            Rumble                           3    Image             2015  6    3
+[ ] 27   HEURISTIC     blackscience_vol3.epub                     Black Science                    3    Image             2016  3    3
+[ ] 28   volume-count  Midas_Flesh_002_1407188013.cbz             The Midas Flesh                  2    Boom! Studios     2013  8    2
+[ ] 29   volume-count  Midas_Flesh_004_1407188013.cbz             The Midas Flesh                  4    Boom! Studios     2013  8    2
+[ ] 30   HEURISTIC     battleangelalita_vol02.cbz                 Battle Angel Alita               2    Viz               1994  2    5
+[ ] 31   HEURISTIC     flyingwitch_vol2.pdf                       Flying Witch                     2    Kodansha USA      2022  5    2
+[ ] 32   HEURISTIC     dropsofgodvol1.epub                        The Drops of God                 1    Kodansha USA      2025  4    2
+[ ] 33   HEURISTIC     autumnlands_vol1.cbz                       The Autumnlands                  1    Image             2015  2    2
+[ ] 34   HEURISTIC     phonogram_vol2.cbz                         Phonogram                        2    Image             2007  3    2
+[ ] 35   HEURISTIC     godzilla_vol3.pdf                          Godzilla                         3    IDW               2012  3    6
+[ ] 36   HEURISTIC     prettydeadly_vol3.pdf                      Pretty Deadly                    3    Image             2014  3    2
+[ ] 37   HEURISTIC     blackscience_vol2.epub                     Black Science                    2    Image             2016  3    3
+[ ] 38   HEURISTIC     sacrificers_vol3.pdf                       The Sacrificers                  3    Image             2024  4    2
+[ ] 39   unambiguous   fearagentfinaledition_vol4.pdf             Fear Agent: Final Edition        4    Image             2018  4    1
+[ ] 40   HEURISTIC     bitchplanet_triplefeature_vol1.epub        Bitch Planet: Triple Feature     1    Image             2017  1    2
+[ ] 41   HEURISTIC     rumble_vol4.pdf                            Rumble                           4    Image             2015  6    3
+[ ] 42   volume-count  Midas_Flesh_005_1407188013.cbz             The Midas Flesh                  5    Boom! Studios     2013  8    2
+[ ] 43   volume-count  seventoeternity_vol4.cbz                   Seven to Eternity                4    Image             2016  17   2
+[ ] 44   HEURISTIC     nailbiter_vol5.epub                        Nailbiter                        5    Image             2014  8    2
+[ ] 45   HEURISTIC     phonogram_vol2.pdf                         Phonogram                        2    Image             2007  3    2
+[ ] 46   unambiguous   cellsatwork_vol1.cbz                       Cells at Work!                   1    Kodansha USA      2016  6    1
+[ ] 47   HEURISTIC     thewalkingdead_vol22_optimized_1420484117. The Walking Dead                 22   Image             2004  32   5
+[ ] 48   HEURISTIC     TheFuse_Vol1_1420484117.pdf                The Fuse                         1    Image             2014  4    2
+[ ] 49   HEURISTIC     prophettrades_vol3.cbz                     Prophet                          3    Image             2012  5    7
+[ ] 50   HEURISTIC     blackscience_vol4.cbz                      Black Science                    4    Image             2014  9    3
+[ ] 51   volume-count  Genius_05_1420484117.cbz                   Genius                           5    Image             2014  5    3
+[ ] 52   unambiguous   ninathestarrybridevol1.epub                Nina the Starry Bride            1    Kodansha USA      2023  17   1
+[ ] 53   unambiguous   asignofaffectionvol1.pdf                   A Sign of Affection              1    Kodansha USA      2021  12   1
+[ ] 54   HEURISTIC     revival_vol8.cbz                           Revival                          8    Image             2012  8    3
+[ ] 55   HEURISTIC     alexandada_vol3.epub                       Alex + Ada                       3    Image             2014  3    2
+[ ] 56   HEURISTIC     seaofstars_vol2.epub                       Sea of Stars                     2    Image             2020  2    2
+[ ] 57   HEURISTIC     sex_vol5.cbz                               Sex                              5    Image             2013  6    2
+[ ] 58   unambiguous   vinlandsagavol11.pdf                       Vinland Saga                     11   Kodansha USA      2013  14   1
+[ ] 59   HEURISTIC     TheWalkingDead_vol22_1420484117.cbz        The Walking Dead                 22   Image             2004  32   5
+[ ] 60   HEURISTIC     blackmagick_vol1.epub                      Black Magick                     1    Image             2016  3    2
+[ ] 61   HEURISTIC     flyingwitch_vol3.pdf                       Flying Witch                     3    Kodansha USA      2022  5    2
+[ ] 62   unambiguous   godzilla_monstersandprotectors-riseup.epub Godzilla: Monsters & Protectors       IDW               2022  1    1
+[ ] 63   HEURISTIC     sledgehammer44volume1.pdf                  Sledgehammer 44                  1    Dark Horse        2014  1    2
+[ ] 64   HEURISTIC     SatelliteSam_vol1_1420484117.epub          Satellite Sam                    1    Image             2014  3    2
+[ ] 65   volume-count  seventoeternity_vol4.pdf                   Seven to Eternity                4    Image             2016  17   2
+[ ] 66   HEURISTIC     sex_vol6.pdf                               Sex                              6    Image             2013  6    2
+[ ] 67   HEURISTIC     straybullets_sunshineandroses_vol2.epub    Stray Bullets: Sunshine & Roses  2    Image             2018  4    2
+[ ] 68   HEURISTIC     COWL_vol1_1420484117.epub                  C.O.W.L.                         1    Image             2014  2    2
+[ ] 69   HEURISTIC     familytreevol1.cbz                         Family Tree                      1    Image             2020  3    2
+[ ] 70   HEURISTIC     saga_vol3.epub                             Saga                             3    Image             2014  4    3
+[ ] 71   unambiguous   inuyashiki_vol03.cbz                       Inuyashiki                       3    Kodansha USA      2015  10   1
+[ ] 72   unambiguous   blueperiodvol10.pdf                        Blue Period                      10   Kodansha USA      2020  17   1
+[ ] 73   HEURISTIC     noragami_vol6.cbz                          Noragami                         6    Pika Édition      2015  24   4
+[ ] 74   HEURISTIC     godzilla_kingdomofmonsters_vol1.epub       Godzilla: Kingdom of Monsters    1    IDW               2019  1    3
+[ ] 75   unambiguous   pumpkinscissors_vol7.cbz                   Pumpkin Scissors                 7    Random House      2007  5    1
+[ ] 76   unambiguous   vinlandsagavol7.pdf                        Vinland Saga                     7    Kodansha USA      2013  14   1
+[ ] 77   HEURISTIC     Unity Volume 2.cbz                         Unity                            2    Acclaim / Valiant 1992  2    3
+[ ] 78   HEURISTIC     deadlyclass_vol4.pdf                       Deadly Class                     4    Image             2016  4    3
+[ ] 79   HEURISTIC     cursewords_vol4.cbz                        Curse Words                      4    Image             2017  5    2
+[ ] 80   HEURISTIC     archerandarmstrong_vol3_1411409939.cbz     Archer & Armstrong               3    Valiant Entertain 2013  7    4
+[ ] 81   HEURISTIC     kaya_vol3.cbz                              Kaya                             3    Image             2023  5    2
+[ ] 82   unambiguous   vinlandsagavol3.epub                       Vinland Saga                     3    Kodansha USA      2013  14   1
+[ ] 83   HEURISTIC     copra_vol1.epub                            Copra                            1    Copra Press / Ber 2014  5    4
+[ ] 84   HEURISTIC     blackscience_vol2.cbz                      Black Science                    2    Image             2016  3    3
+[ ] 85   HEURISTIC     lazarus_vol2.pdf                           Lazarus                          2    Image             2007  3    4
+[ ] 86   HEURISTIC     unnatural_vol1.cbz                         Unnatural                        1    Image             2018  3    2
+[ ] 87   HEURISTIC     icecreamman_vol4.cbz                       Ice Cream Man                    4    Image             2018  11   2
+[ ] 88   HEURISTIC     deadlyclass_vol5.cbz                       Deadly Class                     5    Image             2014  12   3
+[ ] 89   HEURISTIC     copra_vol1.pdf                             Copra                            1    Copra Press / Ber 2014  5    4
+[ ] 90   HEURISTIC     prettydeadly_vol2.pdf                      Pretty Deadly                    2    Image             2014  3    2
+[ ] 91   HEURISTIC     rumble_vol1.cbz                            Rumble                           1    Image             2015  6    3
+[ ] 92   HEURISTIC     w0rldtr33_vol3.pdf                         W0rldtr33                        3    Image             2023  4    2
+[ ] 93   HEURISTIC     royalcity_vol3.cbz                         Royal City                       3    Image             2017  3    2
+[ ] 94   HEURISTIC     blackscience_vol2.pdf                      Black Science                    2    Image             2016  3    3
+[ ] 95   HEURISTIC     rai_issue4_1410830083.pdf                  Rai                              4    Valiant Entertain 2014  4    7
+[ ] 96   volume-count  Genius_03_1420484117.pdf                   Genius                           3    Image             2014  5    3
+[ ] 97   HEURISTIC     deadlyclass_vol2.pdf                       Deadly Class                     2    Image             2016  4    3
+[ ] 98   HEURISTIC     blackscience_vol8.pdf                      Black Science                    8    Image             2014  9    3
+[ ] 99   unambiguous   talesfromtheouterverse.pdf                 Tales from the Outerverse             Dark Horse        2022  1    1
+[ ] 100  unambiguous   shangri-la-frontiervol10.pdf               Shangri-La Frontier              10   Kodansha USA      2022  23   1
+[ ] 101  unambiguous   hackandslashdeluxeedition_vol2.epub        Hack/Slash Deluxe                2    Image             2021  5    1
+[ ] 102  HEURISTIC     wayward_vol1.pdf                           Wayward                          1    Image             2015  3    3
+[ ] 103  HEURISTIC     saga_vol3.epub                             Saga                             3    Image             2014  4    3
+[ ] 104  HEURISTIC     icecreamman_vol5.epub                      Ice Cream Man                    5    Image             2018  11   2
+[ ] 105  HEURISTIC     StrayBullets_vol1_1420484117.epub          Stray Bullets                    1    Image             2014  1    5
+[ ] 106  HEURISTIC     rai_issue2_1410830083.pdf                  Rai                              2    Valiant Entertain 2020  2    7
+[ ] 107  HEURISTIC     nailbiter_vol3.cbz                         Nailbiter                        3    Image             2014  8    2
+[ ] 108  HEURISTIC     jupiterscircle_vol1.cbz                    Jupiter's Circle                 1    Image             2015  2    2
+[ ] 109  HEURISTIC     moonstruck_vol2.cbz                        Moonstruck                       2    Image             2018  3    3
+[ ] 110  HEURISTIC     die_vol1.pdf                               Die                              1    Image             2022  1    3
+[ ] 111  unambiguous   blueperiodvol2.pdf                         Blue Period                      2    Kodansha USA      2020  17   1
+[ ] 112  HEURISTIC     deadlyclass_vol7.pdf                       Deadly Class                     7    Image             2014  12   3
+[ ] 113  unambiguous   clockworkplanet_vol2.pdf                   Clockwork Planet                 2    Kodansha USA      2017  10   1
+[ ] 114  HEURISTIC     Phonogram_Vol1.cbz                         Phonogram                        1    Image             2007  3    2
+[ ] 115  volume-count  Genius_05_1420484117.epub                  Genius                           5    Image             2014  5    3
+[ ] 116  HEURISTIC     saga_vol4.epub                             Saga                             4    Image             2014  4    3
+[ ] 117  HEURISTIC     Nailbiter_vol1_1420484117.cbz              Nailbiter                        1    Image             2014  8    2
+[ ] 118  HEURISTIC     quantumandwoody_vol1_1410830083.pdf        Quantum and Woody!               1    Valiant Entertain 2018  2    6
+[ ] 119  HEURISTIC     man-eaters_vol1.epub                       The Maneaters                    1    Frank Johnson Pub 1946  1    3
+[ ] 120  HEURISTIC     powerfantasy_vol1.cbz                      The Power Fantasy                1    Image             2025  3    2
+[ ] 121  unambiguous   asignofaffectionvol2.pdf                   A Sign of Affection              2    Kodansha USA      2021  12   1
+[ ] 122  HEURISTIC     sexcriminals_01_1420484117.pdf             Sex Criminals                    1    Image             2014  6    2
+[ ] 123  HEURISTIC     saga_vol10.epub                            Saga                             10   Image             2012  12   3
+[ ] 124  HEURISTIC     somethingiskillingthechildren_vol7.pdf     Something Is Killing the Childre 7    Boom! Studios     2020  9    2
+[ ] 125  HEURISTIC     nailbiter_vol6.cbz                         Nailbiter                        6    Image             2014  8    2
+[ ] 126  HEURISTIC     papergirls_vol1.pdf                        Paper Girls                      1    Image             2016  1    4
+[ ] 127  HEURISTIC     ludocrats_vol1.pdf                         The Ludocrats                    1    Image             2020  1    2
+[ ] 128  HEURISTIC     XO Manowar Volume 1.cbz                    X-O Manowar                      1    Valiant Entertain 2022  1    9
+[ ] 129  unambiguous   fireforce_vol3.pdf                         Fire Force                       3    Kodansha USA      2016  34   1
+[ ] 130  HEURISTIC     sexcriminals_vol6.epub                     Sex Criminals                    6    Image             2014  6    2
+[ ] 131  unambiguous   5000kmpersecond.epub                       5,000 km Per Second                   Fantagraphics     2016  1    1
+[ ] 132  volume-count  Genius_05_1420484117.pdf                   Genius                           5    Image             2014  5    3
+[ ] 133  HEURISTIC     sexcriminals_vol1.epub                     Sex Criminals                    1    Image             2014  6    2
+[ ] 134  HEURISTIC     descender_vol3.epub                        Descender                        3    Image             2015  6    3
+[ ] 135  HEURISTIC     saga_vol8.epub                             Saga                             8    Image             2012  12   3
+[ ] 136  HEURISTIC     icecreamman_vol5.cbz                       Ice Cream Man                    5    Image             2018  11   2
+[ ] 137  HEURISTIC     westandonguard_vol1.cbz                    We Stand on Guard                1    Image             2017  1    2
+[ ] 138  volume-count  Midas_Flesh_007_1407188013.cbz             The Midas Flesh                  7    Boom! Studios     2013  8    2
+[ ] 139  HEURISTIC     alexandada_vol2.cbz                        Alex + Ada                       2    Image             2014  3    2
+[ ] 140  volume-count  ajin_demihuman_vol04.cbz                   Ajin: Demi-Human                 4    Vertical          2014  16   2
+[ ] 141  unambiguous   attackontitan_vol7.cbz                     Attack on Titan                  7    Kodansha USA      2012  34   1
+[ ] 142  HEURISTIC     TheFadeOut_01_1420484117.cbz               The Fade Out                     1    Image             2018  1    3
+[ ] 143  HEURISTIC     wytches_vol1.cbz                           Wytches                          1    Image             2015  1    2
+[ ] 144  HEURISTIC     icecreamman_vol1.pdf                       Ice Cream Man                    1    Image             2018  11   2
+[ ] 145  HEURISTIC     icecreamman_vol2.pdf                       Ice Cream Man                    2    Image             2018  11   2
+[ ] 146  HEURISTIC     rumble_vol5.epub                           Rumble                           5    Image             2015  6    3
+[ ] 147  volume-count  ProtocolOrphans03_1407188013.cbz           Protocol: Orphans                3    Boom! Studios     2013  4    2
+[ ] 148  unambiguous   pumpkinscissors_vol4.pdf                   Pumpkin Scissors                 4    Random House      2007  5    1
+[ ] 149  HEURISTIC     deathorglory_vol2.cbz                      Death or Glory                   2    Image             2018  2    2
+[ ] 150  HEURISTIC     Chew Volume 1.cbr                          Chew                             1    Image             2009  12   2
+[ ] 151  HEURISTIC     trees_vol2.cbz                             Trees                            2    Image             2015  3    2
+[ ] 152  HEURISTIC     seventoeternity_vol2.cbz                   Seven to Eternity                2    Image             2017  3    2
+[ ] 153  HEURISTIC     deadlyclass_vol7.pdf                       Deadly Class                     7    Image             2014  12   3
+[ ] 154  HEURISTIC     noragami_vol6.pdf                          Noragami                         6    Pika Édition      2015  24   4
+[ ] 155  HEURISTIC     papergirls_vol2.pdf                        Paper Girls                      2    Image             2017  3    4
+[ ] 156  unambiguous   imstandingonamillionlives_vol1.cbz         I'm Standing on a Million Lives  1    Kodansha USA      2019  19   1
+[ ] 157  HEURISTIC     whatdidyoueatyesterdayvol2.pdf             What Did You Eat Yesterday?      2    Kodansha USA      2021  9    2
+[ ] 158  unambiguous   badmachinery_vol1_1412097863.pdf           Bad Machinery                    1    Oni Press         2013  7    1
+[ ] 159  unambiguous   hackandslashdeluxeedition_vol3.epub        Hack/Slash Deluxe                3    Image             2021  5    1
+[ ] 160  HEURISTIC     ajin_demihuman_vol1.cbz                    Ajin: Demi-Human                 1    Kodansha USA      2021  1    2
+[ ] 161  unambiguous   fireforce_vol2.cbz                         Fire Force                       2    Kodansha USA      2016  34   1
+[ ] 162  HEURISTIC     injection_vol1.pdf                         Injection                        1    Image             2018  1    3
+[ ] 163  unambiguous   thewoodsyearbookeditionbookthree.pdf       The Woods Yearbook Edition       3    Boom! Studios     2019  3    1
+[ ] 164  HEURISTIC     dropsofgodvol4.epub                        The Drops of God                 4    Kodansha USA      2025  4    2
+[ ] 165  volume-count  Genius_04_1420484117.cbz                   Genius                           4    Image             2014  5    3
+[ ] 166  unambiguous   driftingdragons_vol2.pdf                   Drifting Dragons                 2    Kodansha USA      2019  17   1
+[ ] 167  HEURISTIC     harbinger_vol2_1410830083.pdf              Harbinger                        2    Acclaim / Valiant 1992  2    5
+[ ] 168  HEURISTIC     copra_vol1.cbz                             Copra                            1    Copra Press / Ber 2014  5    4
+[ ] 169  unambiguous   november_vol2.cbz                          November                         2    Image             2019  4    1
+[ ] 170  HEURISTIC     revival_vol2.epub                          Revival                          2    Image             2012  8    3
+[ ] 171  unambiguous   attackontitan_beforethefall_vol14.cbz      Attack on Titan: Before the Fall 14   Kodansha USA      2014  17   1
+[ ] 172  volume-count  ajin_demihuman_vol08.cbz                   Ajin: Demi-Human                 8    Vertical          2014  16   2
+[ ] 173  HEURISTIC     injection_vol1.cbz                         Injection                        1    Image             2018  1    3
+[ ] 174  HEURISTIC     prettydeadly_vol3.epub                     Pretty Deadly                    3    Image             2014  3    2
+[ ] 175  HEURISTIC     blackscience_vol8.cbz                      Black Science                    8    Image             2014  9    3
+[ ] 176  HEURISTIC     sacrificers_vol2.pdf                       The Sacrificers                  2    Image             2024  4    2
+[ ] 177  HEURISTIC     inkblot_vol2.epub                          Inkblot                          2    Image             2021  2    2
+[ ] 178  HEURISTIC     deadlyclass_vol7.epub                      Deadly Class                     7    Image             2014  12   3
+[ ] 179  volume-count  ajin_demihuman_vol10.cbz                   Ajin: Demi-Human                 10   Vertical          2014  16   2
+[ ] 180  HEURISTIC     forged_vol1.pdf                            The Forged                       1    Image             2023  4    2
+[ ] 181  HEURISTIC     icecreamman_vol2.cbz                       Ice Cream Man                    2    Image             2018  11   2
+[ ] 182  HEURISTIC     alexandada_vol2.epub                       Alex + Ada                       2    Image             2014  3    2
+[ ] 183  unambiguous   masseffectomnibusvolume1.pdf               Mass Effect Omnibus              1    Dark Horse        2016  2    1
+[ ] 184  volume-count  Midas_Flesh_006_1407188013.cbz             The Midas Flesh                  6    Boom! Studios     2013  8    2
+[ ] 185  HEURISTIC     w0rldtr33_vol1.pdf                         W0rldtr33                        1    Image             2023  4    2
+[ ] 186  HEURISTIC     sex_vol4.epub                              Sex                              4    Image             2013  6    2
+[ ] 187  HEURISTIC     farmhand_vol2.cbz                          Farmhand                         2    Image             2019  5    2
+[ ] 188  volume-count  Genius_03_1420484117.cbz                   Genius                           3    Image             2014  5    3
+[ ] 189  unambiguous   gooddog.pdf                                Good Dog                              Fantagraphics     2013  1    1
+[ ] 190  HEURISTIC     flyingwitch_vol4.cbz                       Flying Witch                     4    Kodansha USA      2022  5    2
+[ ] 191  HEURISTIC     xo_manowar_vol1_1410830083.pdf             X-O Manowar                      1    Valiant Entertain 2022  1    9
+[ ] 192  HEURISTIC     nailbiter_vol8.epub                        Nailbiter                        8    Image             2014  8    2
+[ ] 193  unambiguous   justthetips.pdf                            Just the Tips                         Image             2014  1    1
+[ ] 194  HEURISTIC     nailbiter_vol8.pdf                         Nailbiter                        8    Image             2014  8    2
+[ ] 195  volume-count  strangetalentoflutherstrode_vol2.cbz       The Strange Talent of Luther Str 2    Image             2011  6    2
+[ ] 196  unambiguous   hypnotwistandscarletbystarlight.pdf        Hypnotwist / Scarlet By Starligh      Fantagraphics     2021  1    1
+[ ] 197  HEURISTIC     rumble_vol3.epub                           Rumble                           3    Image             2015  6    3
+[ ] 198  volume-count  Genius_03_1420484117.epub                  Genius                           3    Image             2014  5    3
+[ ] 199  HEURISTIC     sex_vol2.epub                              Sex                              2    Image             2013  6    2
+[ ] 200  unambiguous   pumpkinscissors_vol9.cbz                   Pumpkin Scissors                 9    Random House      2007  5    1

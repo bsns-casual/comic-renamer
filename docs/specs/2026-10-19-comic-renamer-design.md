@@ -234,16 +234,44 @@ One normalised key frequently hits several distinct titles, usually
 foreign-language editions. **5 of 40 keys in the reference bundle**, and naive
 tie-breaking by string length returned **3 silently wrong answers.**
 
+**Ambiguity is measured over corpus *records*, never over title strings.** A
+record is (name, publisher, year, run length). Three different books all called
+*Velvet* — Malibu 1993, Image 2013, Image 2014 — are one title and three records,
+and comparing titles reports them as unambiguous. That is the single most
+dangerous case, so comparing titles is blind precisely where it matters. Measured
+cost of getting this wrong: it inflates the apparent `ready` rate from 40% to
+79%, every inflated row being a confident guess.
+
 Resolution, in order:
 
-1. Filter to the user's language (default `en`).
+1. Filter to the user's language (default `en`). **Hard filter.**
 2. Prefer the publisher **inferred from the source folder name**.
-   `HumbleDarkHorseAnniversaryBundle` squashes to contain `darkhorse`, which
-   matches the corpus `publisher` column directly. Humble bundles are
-   publisher-themed and say so in the folder name. This is free signal.
-3. Prefer the earliest edition of the line.
-4. Still ambiguous → `review`, listing every candidate with its publisher and
-   year. **Never silently pick.**
+   `HumbleDarkHorseAnniversaryBundle` squashes to contain `darkhorse`, matching
+   the corpus `publisher` column. Free signal, but **worth only ~7 points at
+   scale** — on 2,714 held-out files it resolves 7.4% and leaves 28.9% ambiguous
+   *within a single publisher*. An earlier draft overstated it from a 40-file
+   sample.
+3. **Volume feasibility. A hard constraint, not a preference:** a file numbered
+   volume N cannot belong to a series with fewer than N entries. Resolves 1.7%
+   outright and narrows the rest.
+4. **Shortest feasible run** — among candidates with enough volumes, prefer the
+   shortest, on the reasoning that a short series is a collected-edition line
+   while a long one is the monthly run. `Velvet` Image-2014 with 3 entries over
+   Image-2013 with 15. **This is a heuristic and it carries 39 of the 71
+   percentage points of `ready`.**
+5. Still ambiguous → `review`, listing every candidate with publisher, year and
+   run length. **Never silently pick.**
+
+**Step 4 may not promote a row to `ready` until it is validated.** It is doing
+more work than everything else combined, on an unproven prior, which is exactly
+the shape §4 forbids. Until the labelled sample (D26) measures its error rate,
+step 4 marks rows `review`: `ready` is then ~32%, against ~71% once it is
+trusted. That 39-point swing is what the labelling session buys.
+
+"Prefer the earliest edition," which an earlier draft listed, is **withdrawn**:
+on a title shared by unrelated books it systematically picks the oldest obscure
+one over the book the user actually bought — it resolved `Velvet_vol1` to Malibu
+1993 inside an Image bundle.
 
 **Step 1 is a hard filter; step 2 is a preference; step 3 is a weak preference
 that may not promote a row to `ready` on its own.** The distinction matters
@@ -362,8 +390,20 @@ not paths.** A user cannot express an arbitrary destination, which is the point 
 the preset remains the sole path constructor. A row whose recomputed path differs
 from the stored one is a tampering signal and refuses.
 
-**Roughly one row in five will need a human.** 4.7% ambiguous plus 9.8% unsplit
-subtitle plus 7.7% unmatched puts the `ready` rate at about 78% at best. The plan
+**Between one and two rows in three will need a human — not one in five.**
+Measured over 2,714 held-out filenames with ambiguity counted over records:
+
+```
+ready, unambiguous outright          30.0%
+ready via volume feasibility          1.7%
+ready via shortest-run heuristic     39.3%   <- unvalidated, see 6.3
+still ambiguous                      11.6%
+subtitle unsplit                      9.8%
+not located                           7.5%
+```
+
+So `ready` is **71.1%** if the heuristic is trusted and **31.7%** if it is not.
+An earlier draft put it at 78% by counting ambiguity over titles. The plan
 file is therefore the **normal** path, not an escape hatch for unusually large
 runs, and open question 11.5 — whether `apply` refuses rows still marked
 `review` — is Phase-1 blocking rather than deferrable.
@@ -742,9 +782,12 @@ unlabelled, so what was actually measured is that **detected** failures routed t
 `review` — a weaker and different claim. A gate that cannot fail gates nothing,
 and this one currently cannot.
 
-**Establishing it is a Phase 0 deliverable.** Label a subset — roughly 200 of the
-rows the resolver marks `ready` are enough — by checking resolved title,
-publisher and year against the filename. Once that exists, the gate becomes real
+**Establishing it is a Phase 0 deliverable, and the sample now exists:**
+`fixtures/label-sample-200.txt`. It is **deliberately not a uniform sample.**
+140 of its 200 rows were decided by §6.3's step-4 heuristic, because that is
+where a silent false positive would hide — it decides 39 of the 71 points of
+`ready` on an unproven prior. The remaining 60 cover the two safer bases as a
+control. Once that exists, the gate becomes real
 and the rule stands: **a located-rate regression is a disappointment; a
 silent-false-positive regression is a defect that blocks merge.** Until it
 exists, no claim about silent wrongness may be made in the README, the PR
@@ -1126,3 +1169,22 @@ title, publisher and year) is a Phase 0 deliverable. The located-rate of 92.3%
 the journal, the interactive walk and its threshold, and all live-lookup
 plumbing. In: a minimal hand-edited Layer B file, without which Phase 1 violates
 anti-goal §4 by construction. §8.
+
+**D28 — Ambiguity is measured over corpus records, not title strings.** Three
+different books named *Velvet* are one title and three records; comparing titles
+calls that unambiguous and then guesses. Measured: counting titles inflates
+`ready` from 40% to 79%, every inflated row a silent guess. Also withdraws
+"prefer the earliest edition," which picked Malibu 1993 over Image 2013 inside an
+Image bundle. §6.3.
+
+**D29 — Two new disambiguation signals, one hard and one on probation.** Volume
+feasibility — a volume-N file cannot belong to a series with fewer than N entries
+— is a hard constraint. Shortest-feasible-run is a heuristic that lifts `ready`
+from 31.7% to 71.1% and is therefore **not permitted to promote a row to `ready`
+until the labelled sample measures its error rate.** A 39-point swing resting on
+an unproven prior is the shape anti-goal §4 exists to prevent. §6.3.
+
+**D30 — The publisher hint is worth less than first measured.** The 40-file
+reference bundle suggested it was decisive (5 ambiguous → 1). Across 2,714
+held-out files it resolves 7.4% and leaves 28.9% ambiguous within a single
+publisher. Still worth having, no longer load-bearing. §6.3.
