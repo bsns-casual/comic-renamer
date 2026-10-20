@@ -1,0 +1,13 @@
+[package]
+name = "comic-renamer"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+comfy-table = "8.0.1"
+comic-renamer-core = { version = "0.1.0", path = "../core" }
+dialoguer = "0.12.0"
+indicatif = "0.18.6"

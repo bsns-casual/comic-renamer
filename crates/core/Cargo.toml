@@ -1,0 +1,20 @@
+[package]
+name = "comic-renamer-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+libc = "0.2.191"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+thiserror = "2.0.21"
+toml = "1.1.8"
+unicode-normalization = "0.1.26"
+ureq = "3.4.2"
+
+[dev-dependencies]
+tempfile = "3.27.0"
