@@ -11,3 +11,6 @@ corpus/cache/
 
 # macOS
 .DS_Store
+
+# superpowers execution scratch (ledger, briefs, review packages)
+.superpowers/
