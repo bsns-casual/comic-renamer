@@ -1,0 +1,82 @@
+# Layer B — filename overrides (§6.2.1).
+#
+# The floor under the unmatched tail: initialisms no corpus resolves and no
+# algorithm guesses. Every title here is verified against
+# fixtures/humble-ground-truth.tsv, which records what Humble itself published
+# next to each download.
+#
+# Fields are metadata only. Never a path, never a separator (invariant 1,
+# §6.11) — the preset is the sole path constructor. `bundle` is required and
+# matches when squash(bundle) is a substring of squash(source folder name); a
+# bare filename key is not enough, because `vol1.pdf` recurs across publishers.
+#
+# Licence: CC BY-SA 4.0. See data/LICENSE.
+
+# --- Humble Image Comics Bundle 2: Image Firsts ---
+
+["TWD_CompendiumOne"]
+series = "The Walking Dead"
+subtitle = "Compendium One"
+bundle = "Image Comics Bundle 2"
+
+["GHA_Vol1"]
+series = "God Hates Astronauts"
+volume = 1
+bundle = "Image Comics Bundle 2"
+
+# --- Humble BOOM! Bundle ---
+
+["SOA_01"]
+series = "Sons of Anarchy"
+volume = 1
+bundle = "BOOM! Bundle"
+
+["SOA_02"]
+series = "Sons of Anarchy"
+volume = 2
+bundle = "BOOM! Bundle"
+
+["SOA_03"]
+series = "Sons of Anarchy"
+volume = 3
+bundle = "BOOM! Bundle"
+
+["SOA_04"]
+series = "Sons of Anarchy"
+volume = 4
+bundle = "BOOM! Bundle"
+
+["SOA_05"]
+series = "Sons of Anarchy"
+volume = 5
+bundle = "BOOM! Bundle"
+
+["SOA_06"]
+series = "Sons of Anarchy"
+volume = 6
+bundle = "BOOM! Bundle"
+
+["SOA_07"]
+series = "Sons of Anarchy"
+volume = 7
+bundle = "BOOM! Bundle"
+
+["SOA_08"]
+series = "Sons of Anarchy"
+volume = 8
+bundle = "BOOM! Bundle"
+
+["SOA_09"]
+series = "Sons of Anarchy"
+volume = 9
+bundle = "BOOM! Bundle"
+
+["SOA_10"]
+series = "Sons of Anarchy"
+volume = 10
+bundle = "BOOM! Bundle"
+
+["SOA_11"]
+series = "Sons of Anarchy"
+volume = 11
+bundle = "BOOM! Bundle"

@@ -1,0 +1,11 @@
+The curated rule data in this directory — data/overrides.toml — is derived from
+and distributed under the same terms as the corpus it corrects.
+
+Licence: Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0)
+         https://creativecommons.org/licenses/by-sa/4.0/
+
+Attribution: Grand Comics Database™ (https://www.comics.org)
+
+The Grand Comics Database content is licensed CC BY-SA 4.0. Share-alike applies
+to this directory only; the program's source code is MIT (see ../LICENSE), which
+D3/D9 of the design document records as a deliberate split.
