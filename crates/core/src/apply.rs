@@ -91,6 +91,21 @@ fn apply_inner(
     let preset = preset_by_id(&header.preset)
         .ok_or_else(|| ApplyError::UnknownPreset(header.preset.clone()))?;
 
+    // §6.11: the plan file is untrusted too, so both roots are resolved here
+    // rather than taken as written. `dest_root` is the containment anchor for
+    // every write — unvalidated, a plan naming `/` lands the library at the
+    // filesystem root.
+    let source_root = canonical_dir(&header.source_root)?;
+    let dest_root = canonical_dir(&header.dest_root)?;
+    if source_root.starts_with(&dest_root) || dest_root.starts_with(&source_root) {
+        return Err(ApplyError::RootsOverlap);
+    }
+    let header = PlanHeader {
+        source_root: source_root.clone(),
+        dest_root,
+        ..header
+    };
+
     if header.mode == Mode::Move && !allow_cloud_move && is_cloud_synced(&header.source_root) {
         return Err(ApplyError::CloudSourceMove(header.source_root.clone()));
     }
@@ -102,6 +117,7 @@ fn apply_inner(
         .collect();
 
     for row in &eligible {
+        verify_inside_source_root(row, &source_root)?;
         verify_unchanged(row)?;
         verify_destination(row, &header, preset.as_ref())?;
         verify_mechanism(row, &header)?;
@@ -144,7 +160,7 @@ fn apply_inner(
             total,
             current: row.source.to_string_lossy().into_owned(),
         });
-        execute(row, &header, &mut undo, progress)?;
+        execute(row, &header, preset.as_ref(), &mut undo, progress)?;
         executed += 1;
     }
     progress(Progress {
@@ -168,10 +184,15 @@ fn apply_inner(
 fn execute(
     row: &PlanRow,
     header: &PlanHeader,
+    preset: &dyn Preset,
     undo: &mut UndoWriter,
     progress: &mut dyn FnMut(Progress),
 ) -> Result<(), ApplyError> {
-    let relative = &row.destination_preview;
+    // Recomputed at the point of use, not merely checked earlier. Invariant 2
+    // says never trust a path string found in a plan file; reading
+    // `destination_preview` here made that true only by loop ordering, which
+    // nothing in the types enforces.
+    let relative = &preset.destination(&row.resolved(), &row.extension);
     ensure_parent(&header.dest_root, relative)?;
     let absolute = header.dest_root.join(relative);
 
@@ -224,6 +245,36 @@ pub fn undo_path(plan: &Path) -> PathBuf {
     let mut name = plan.file_name().unwrap_or_default().to_os_string();
     name.push(".undo.csv");
     plan.with_file_name(name)
+}
+
+/// §6.9 requires no absolute paths outside the chosen roots, and §6.11 says
+/// the plan is re-validated here because the plan file is untrusted.
+///
+/// Exact rather than a prefix test, and free: `scan` is non-recursive and
+/// builds every candidate as `read_dir(source_root)` + `entry.path()`, so a
+/// genuine row's source is always one component inside the canonical root.
+/// Without this, an edited plan moves any file on the system into the
+/// library — and the cloud-sync refusal, which keys on the root while every
+/// operation uses `row.source`, rests on the same relationship.
+fn verify_inside_source_root(row: &PlanRow, source_root: &Path) -> Result<(), ApplyError> {
+    if row.source.parent() != Some(source_root) {
+        return Err(ApplyError::OutsideSourceRoot(
+            row.id.clone(),
+            row.source.clone(),
+        ));
+    }
+    Ok(())
+}
+
+fn canonical_dir(path: &Path) -> Result<PathBuf, ApplyError> {
+    let resolved = std::fs::canonicalize(path)?;
+    if !resolved.is_dir() {
+        return Err(ApplyError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotADirectory,
+            format!("{} is not a directory", path.display()),
+        )));
+    }
+    Ok(resolved)
 }
 
 /// D14: the stored `destination_preview` is a preview. The real destination is

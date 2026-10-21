@@ -259,6 +259,10 @@ pub enum ApplyError {
     Tampered(String),
     #[error("row {0}: the chosen mechanism is no longer valid")]
     MechanismChanged(String),
+    #[error("row {0}: source {1} is not directly inside the plan's source_root")]
+    OutsideSourceRoot(String, PathBuf),
+    #[error("source and destination roots contain one another")]
+    RootsOverlap,
     #[error("{0} is cloud-synced; a move needs an explicit override")]
     CloudSourceMove(PathBuf),
     #[error("aborted at the prompt")]

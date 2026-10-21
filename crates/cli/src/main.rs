@@ -5,7 +5,7 @@
 //! absent — there is nothing here that can move a file.
 
 use clap::{Parser, Subcommand, ValueEnum};
-use comic_renamer_core::corpus::{ensure_corpus, load_manifest, Corpus};
+use comic_renamer_core::corpus::{ensure_corpus, parse_manifest, Corpus};
 use comic_renamer_core::overrides::Overrides;
 use comic_renamer_core::types::{Mode, ScanOpts, Status};
 use comic_renamer_core::{plan, scan};
@@ -70,11 +70,7 @@ fn run(command: Command) -> Result<(), String> {
         mode,
     } = command;
 
-    let manifest = {
-        let path = std::env::temp_dir().join("comic-renamer-manifest.json");
-        std::fs::write(&path, MANIFEST).map_err(|e| e.to_string())?;
-        load_manifest(&path).map_err(|e| e.to_string())?
-    };
+    let manifest = parse_manifest(MANIFEST).map_err(|e| e.to_string())?;
     let cache = cache_dir()?;
     eprintln!("corpus: {} series, dump {}", manifest.series_count, manifest.dump_date);
     let database = ensure_corpus(&manifest, &cache).map_err(|e| e.to_string())?;

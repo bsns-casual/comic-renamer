@@ -31,9 +31,15 @@ pub struct Manifest {
 }
 
 pub fn load_manifest(path: &Path) -> Result<Manifest, CorpusError> {
-    let text = std::fs::read_to_string(path)?;
+    parse_manifest(&std::fs::read_to_string(path)?)
+}
+
+/// The manifest is compiled into the binary (§6.5), so the common caller has
+/// a `&str` already. Routing it through a predictable path under `/tmp` to
+/// read it back invited a planted symlink and bought nothing.
+pub fn parse_manifest(text: &str) -> Result<Manifest, CorpusError> {
     let manifest: Manifest =
-        serde_json::from_str(&text).map_err(|e| CorpusError::Manifest(e.to_string()))?;
+        serde_json::from_str(text).map_err(|e| CorpusError::Manifest(e.to_string()))?;
     // D3/D9: every viable corpus source is share-alike, so a manifest that
     // claims otherwise is either wrong or pointing somewhere it should not.
     if !manifest.licence.starts_with("CC BY-SA") {

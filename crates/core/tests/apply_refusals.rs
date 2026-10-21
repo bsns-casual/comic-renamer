@@ -36,12 +36,31 @@ struct Fixture {
 
 impl Fixture {
     fn new(names: &[&str], corpus: &Corpus) -> Fixture {
+        Fixture::under(names, corpus, None)
+    }
+
+    /// A source genuinely inside a cloud-sync-looking path. The roots are
+    /// canonicalized at `apply`, so a made-up path no longer reaches the
+    /// cloud check at all.
+    fn cloud(names: &[&str], corpus: &Corpus) -> Fixture {
+        Fixture::under(names, corpus, Some("CloudStorage/Dropbox/Comics"))
+    }
+
+    fn under(names: &[&str], corpus: &Corpus, nest: Option<&str>) -> Fixture {
         let source = tempdir().unwrap();
         let dest = tempdir().unwrap();
         let plans = tempdir().unwrap();
-        tree_from_names(source.path(), names);
+        let root = match nest {
+            Some(nest) => {
+                let nested = source.path().join(nest);
+                std::fs::create_dir_all(&nested).unwrap();
+                nested
+            }
+            None => source.path().to_path_buf(),
+        };
+        tree_from_names(&root, names);
         let opts = ScanOpts {
-            source_root: source.path().to_path_buf(),
+            source_root: root.clone(),
             dest_root: dest.path().to_path_buf(),
             preset: "komga".into(),
             mode: None,
@@ -51,7 +70,7 @@ impl Fixture {
         let plan_path = plans.path().join("plan.jsonl");
         plan::write(&header, &rows, &plan_path).unwrap();
         Fixture {
-            source: source.path().to_path_buf(),
+            source: root,
             dest: dest.path().to_path_buf(),
             plan: plan_path,
             _source: source,
@@ -110,10 +129,7 @@ fn a_refused_run_moves_zero_files() {
     }
 
     // 4. A move off a cloud-synced root, without the override (D23).
-    let f = Fixture::new(&["mazebook.pdf"], &c);
-    f.rewrite(|header, _| {
-        header.source_root = PathBuf::from("/Users/someone/Library/CloudStorage/Dropbox/Comics");
-    });
+    let f = Fixture::cloud(&["mazebook.pdf"], &c);
     {
         let _guard = TreeGuard::new(&f.roots());
         assert!(matches!(run(&f), Err(ApplyError::CloudSourceMove(_))));
@@ -211,10 +227,7 @@ fn an_edited_plan_is_revalidated_not_rejected() {
 #[test]
 fn a_cloud_source_move_is_allowed_with_the_override() {
     let (_g, c) = gcd();
-    let f = Fixture::new(&["mazebook.pdf"], &c);
-    f.rewrite(|header, _| {
-        header.source_root = PathBuf::from("/Users/someone/Library/CloudStorage/Dropbox/Comics");
-    });
+    let f = Fixture::cloud(&["mazebook.pdf"], &c);
     let _guard = TreeGuard::new(&f.roots());
     // Without the override this is CloudSourceMove; with it the run proceeds
     // and the rows are judged on their own merits.
@@ -234,4 +247,62 @@ fn a_run_larger_than_the_free_space_is_refused_whole() {
     assert_eq!(available, 18 * GIB);
     assert!(19 * GIB > available, "a 19 GiB run must not fit in 20 GiB free");
     assert!(17 * GIB <= available);
+}
+
+#[test]
+fn an_edited_plan_cannot_move_a_file_from_outside_the_source_root() {
+    // §6.9 forbids absolute paths outside the chosen roots; §6.11 says the
+    // plan is re-validated here because the plan file is untrusted. Without
+    // this, an edited plan relocates any file on the system into the library
+    // — and re-stamping the checksum and the stat defeats every other check.
+    let (_g, c) = gcd();
+    let f = Fixture::new(&["mazebook.pdf"], &c);
+    let elsewhere = tempdir().unwrap();
+    let victim = elsewhere.path().join("tax-return.pdf");
+    std::fs::write(&victim, b"PRIVATE").unwrap();
+    let stat = std::fs::metadata(&victim).unwrap();
+
+    f.rewrite(|_, rows| {
+        rows[0].source = victim.clone();
+        rows[0].source_stat = comic_renamer_core::types::SourceStat {
+            size: stat.len(),
+            mtime_ns: std::os::unix::fs::MetadataExt::mtime(&stat) * 1_000_000_000
+                + std::os::unix::fs::MetadataExt::mtime_nsec(&stat),
+            inode: std::os::unix::fs::MetadataExt::ino(&stat),
+        };
+    });
+
+    let _guard = TreeGuard::new(&[f.source.as_path(), f.dest.as_path(), elsewhere.path()]);
+    assert!(matches!(
+        check(&f.plan, false, &mut |_| {}),
+        Err(ApplyError::OutsideSourceRoot(_, _))
+    ));
+    assert!(victim.exists(), "the victim was taken");
+}
+
+#[test]
+fn an_edited_plan_cannot_repoint_the_destination_root() {
+    // dest_root is the containment anchor for every write, and
+    // resolve_destination opens it without O_NOFOLLOW by necessity. A plan
+    // naming `/` would land the library at the filesystem root.
+    let (_g, c) = gcd();
+    let f = Fixture::new(&["mazebook.pdf"], &c);
+    f.rewrite(|header, _| header.dest_root = PathBuf::from("/"));
+    let _guard = TreeGuard::new(&[f.source.as_path(), f.dest.as_path()]);
+    assert!(matches!(
+        check(&f.plan, false, &mut |_| {}),
+        Err(ApplyError::RootsOverlap)
+    ));
+}
+
+#[test]
+fn an_edited_plan_cannot_make_the_roots_overlap() {
+    let (_g, c) = gcd();
+    let f = Fixture::new(&["mazebook.pdf"], &c);
+    f.rewrite(|header, _| header.dest_root = header.source_root.clone());
+    let _guard = TreeGuard::new(&[f.source.as_path(), f.dest.as_path()]);
+    assert!(matches!(
+        check(&f.plan, false, &mut |_| {}),
+        Err(ApplyError::RootsOverlap)
+    ));
 }
