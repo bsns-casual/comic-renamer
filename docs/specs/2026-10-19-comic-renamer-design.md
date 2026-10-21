@@ -784,7 +784,7 @@ would otherwise leave hanging.
 comic-renamer scan <source> --dest <dir> --preset komga
                   [--move|--copy] [-o plan.json]
 comic-renamer apply plan.json
-comic-renamer undo <undo-manifest.csv>
+comic-renamer undo plan.jsonl
 ```
 
 **The mode flag belongs on `scan`, not `apply`.** §6.10 selects a per-row
@@ -794,10 +794,21 @@ cannot both be true. So `scan` takes the mode, records `--dest` and the per-row
 mechanism in the plan, and `apply` takes no mode flag at all. That is what makes
 `apply` reproducible from the plan alone.
 
-**`undo` operates on the undo manifest, not the plan.** They are different
-artifacts: the plan is intent, the manifest is a record of what actually
-happened (§6.10). Undoing from intent would attempt to reverse operations that
-never ran.
+**`undo` reads the manifest for what happened and the plan for what to trust**
+(amended by D38). The two remain different artifacts, and the reasoning that
+separated them stands: the plan is intent, the manifest is a record, and
+undoing from intent would attempt to reverse operations that never ran. So
+every row `reverse` acts on still comes from the manifest.
+
+What changed is the *anchor*. Three reviews established that the manifest
+cannot anchor itself — whoever edits it supplies both the roots and the
+identities those roots would be checked against, so a hand-written manifest
+relocated and deleted files outside every root. `undo` therefore takes the
+plan path, canonicalises the plan's roots, recomputes each destination through
+the preset, and treats the manifest's own roots as a cross-check. It derives
+the manifest beside the plan, which also means `apply` and `undo` share one
+lock — something Task 11 always required and two separate lock files silently
+defeated.
 
 ---
 
@@ -1337,6 +1348,18 @@ Linux server. Komga compares through ICU collators with
 `CANONICAL_DECOMPOSITION`, so the forms are equal. The demonstrated APFS
 case-folding and normalisation *collision* on the filesystem is unaffected and
 still a Phase 1 blocker (D2); NFC output remains a hard invariant. §6.10.
+
+**D38 — `undo` takes the plan, not the manifest, reversing §6.13.** §6.13 said
+undo operates on the undo manifest and that the two are different artifacts.
+Three reviews of `undo.rs` established that the manifest cannot be its own
+anchor: whoever edits it supplies the roots *and* the identities those roots
+are checked against, so a hand-written manifest relocated or deleted files
+outside every root. `reverse` therefore takes the plan, canonicalises its
+roots, recomputes each destination through the preset, and treats the
+manifest's own `roots` record as a cross-check. It also makes `apply` and
+`undo` share one lock, which Task 11 always required and which two separate
+lock files silently defeated. Full design:
+`docs/specs/2026-10-21-undo-and-reverse-design.md`.
 
 **D37 — Volume numbers are zero-padded after all, to a per-series width.**
 Owner's call, reversing the earlier unpadded choice. Komga genuinely does not
