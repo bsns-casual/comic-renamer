@@ -92,9 +92,13 @@ done   T4   Layer B overrides            T8   sparse fixtures + TreeGuard
 done   T5   resolver ladder              T9   no-clobber syscalls + collisions
 ```
 
-**77 tests pass** (`cargo test --workspace`). Two environment notes: `cargo`
-lives in `~/.cargo/bin` and is not on a non-interactive shell's PATH, and
-clippy is not installed, so no lint run has happened.
+**81 tests pass** (`cargo test --workspace`), plus one `#[ignore]`d test that
+runs the whole corpus path against the real release — set
+`COMIC_RENAMER_TEST_ZIP` to a downloaded `gcd-*.zip` and run `--ignored`.
+
+Two environment notes: `cargo` lives in `~/.cargo/bin` and is not on a
+non-interactive shell's PATH, and clippy is not installed, so no lint run has
+happened.
 
 The Phase 1 plan is written and survived three adversarial reviews:
 `docs/plans/2026-10-20-phase-1-implementation.md`, 15 tasks.
@@ -119,17 +123,30 @@ Five interface changes the skeleton did not carry:
   refused every destination, because `/var` is itself a symlink on macOS.
 - `collisions` is public; the plan's tests call it directly.
 
-**Two open risks the review should settle**, both in `corpus.rs`:
+**Both earlier open risks are closed**, by downloading the real release and
+running against it rather than reasoning about it:
 
-1. `ensure_corpus` installs the fetched bytes verbatim, but the pinned URL is a
-   `.zip` while `sizeBytes`/`sha256` appear to pin the *unzipped* sqlite. A
-   real fetch needs an unzip step that does not exist, and no archive crate is
-   in the plan's pinned stack. First bites at T14.
-2. The corpus schema — table `series` with
-   `name/name_key/publisher/language/year_began/issue_count`, version in
-   `PRAGMA user_version` — is **defined by this code and never checked against
-   the real paperbunkr-gcd-data release.** Tests build it locally, so they
-   cannot catch a mismatch.
+- The manifest pins the **zip**: 35,341,426 bytes, sha256 matching exactly,
+  one member `gcd.sqlite` at 102,490,112 bytes. `ensure_corpus` now verifies
+  then extracts (zip 4.6.1 — 9.x needs a newer MSRV than the workspace's
+  declared 1.80, and bumping that is a plan change).
+- The schema is
+  `series(id, name, name_key, year_began, year_ended, publisher, language,
+  issue_count)` — two columns more than we read, in another order, which the
+  named `SELECT` already tolerated. `PRAGMA user_version` is **0**; the
+  extract publishes its version in a `meta` table as `meta.schema_version`.
+
+Finding that cost two real bugs in T3, both of which rejected every real
+corpus and both of which the local fixtures were shaped to hide: `Corpus::open`
+compared the 97.7 MB database against the manifest's 33.7 MB `sizeBytes`, and
+compared `PRAGMA user_version` against the manifest. Fixtures now carry a
+`meta` table and a test builds the real schema shape.
+
+On the real 229,836-series corpus the ladder behaves as §6.3 describes: nine
+*Velvet* records across five languages, the hard language filter leaves the
+three English ones, shortest feasible run picks Image 2014. Whole path in a
+release build — verify, extract, index, two resolutions — **0.69s**, so the
+`// shortcut:` on per-variant cloning stays inside its stated budget.
 
 **Execution method: native** — `cargo check`/`cargo test` as the per-task gate.
 **Still stop for a fresh adversarial review after Task 12 (`apply`
