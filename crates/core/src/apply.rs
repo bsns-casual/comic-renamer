@@ -5,7 +5,10 @@
 //! the only file it creates is its own lock, beside the plan. Execution and
 //! the undo manifest are Task 12.
 
-use crate::fsops::{find_collisions, select_mechanism};
+use crate::fsops::{
+    clone_excl, ensure_parent, find_collisions, rename_excl, select_mechanism, stream_verified,
+};
+use crate::undo::UndoWriter;
 use crate::preset::{preset_by_id, Preset};
 use crate::types::{
     ApplyError, ApplyResult, Mechanism, Mode, PlanHeader, PlanRow, Progress, Status,
@@ -48,6 +51,25 @@ const CLOUD_MARKERS: [&str; 6] = [
 pub fn apply(
     plan: &Path,
     allow_cloud_move: bool,
+    progress: &mut dyn FnMut(Progress),
+) -> Result<ApplyResult, ApplyError> {
+    apply_inner(plan, allow_cloud_move, false, progress)
+}
+
+/// As `apply`, but stops before executing. Everything up to and including the
+/// collision check runs; nothing is written and no manifest is created.
+pub fn check(
+    plan: &Path,
+    allow_cloud_move: bool,
+    progress: &mut dyn FnMut(Progress),
+) -> Result<ApplyResult, ApplyError> {
+    apply_inner(plan, allow_cloud_move, true, progress)
+}
+
+fn apply_inner(
+    plan: &Path,
+    allow_cloud_move: bool,
+    dry_run: bool,
     progress: &mut dyn FnMut(Progress),
 ) -> Result<ApplyResult, ApplyError> {
     // The lock comes first: two runs over one plan is the one failure a later
@@ -95,16 +117,113 @@ pub fn apply(
         .flat_map(|c| c.row_ids.iter().map(String::as_str))
         .collect();
 
-    let executed = eligible
+    let runnable: Vec<&PlanRow> = eligible
         .iter()
         .filter(|row| !colliding.contains(&row.id.as_str()))
-        .count();
+        .copied()
+        .collect();
+    let skipped = rows.len() - runnable.len();
+
+    if dry_run {
+        return Ok(ApplyResult {
+            executed: runnable.len(),
+            skipped,
+            failed: 0,
+        });
+    }
+
+    // `O_EXCL`: re-running a plan must not truncate the previous run's
+    // manifest, the only record of where those files went.
+    let mut undo = UndoWriter::create(&undo_path(plan))?;
+
+    let total = runnable.len() as u64;
+    let mut executed = 0usize;
+    for (index, row) in runnable.iter().enumerate() {
+        progress(Progress {
+            done: index as u64,
+            total,
+            current: row.source.to_string_lossy().into_owned(),
+        });
+        execute(row, &header, &mut undo, progress)?;
+        executed += 1;
+    }
+    progress(Progress {
+        done: total,
+        total,
+        current: String::new(),
+    });
 
     Ok(ApplyResult {
         executed,
-        skipped: rows.len() - executed,
+        skipped,
         failed: 0,
     })
+}
+
+/// One row. The ordering is the whole point: the destination is in place and
+/// verified **before** the source is unlinked, never the other way round.
+///
+/// A failure returns, abandoning the remaining rows. Continuing past a
+/// permission error turns one refusal into a half-moved library.
+fn execute(
+    row: &PlanRow,
+    header: &PlanHeader,
+    undo: &mut UndoWriter,
+    progress: &mut dyn FnMut(Progress),
+) -> Result<(), ApplyError> {
+    let relative = &row.destination_preview;
+    ensure_parent(&header.dest_root, relative)?;
+    let absolute = header.dest_root.join(relative);
+
+    // Pending lands and is fsynced before the operation is attempted. A
+    // manifest entry still sitting in a buffer when the power goes is a file
+    // nobody can find again.
+    let seq = undo.record_pending(&row.source, &absolute, row.mechanism, header.mode)?;
+
+    match row.mechanism {
+        // Atomic, and there is nothing to hash: the inode does not move.
+        Mechanism::Rename => rename_excl(&row.source, &header.dest_root, relative)?,
+        Mechanism::Clone => {
+            match clone_excl(&row.source, &header.dest_root, relative) {
+                Ok(()) => {}
+                // An occupied destination stays a refusal; it is never a
+                // reason to try again by another route.
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return Err(ApplyError::Io(e))
+                }
+                // §6.10 wants the clone probed at runtime with a fallback to
+                // streaming. Announced, not silent, because the cost differs.
+                Err(e) => {
+                    progress(Progress {
+                        done: 0,
+                        total: 0,
+                        current: format!("clone unavailable ({e}); streaming {}", relative.display()),
+                    });
+                    stream_verified(&row.source, &header.dest_root, relative)?;
+                }
+            }
+        }
+        Mechanism::Stream => {
+            // temp -> fsync -> verify -> rename_excl, all inside.
+            stream_verified(&row.source, &header.dest_root, relative)?;
+            if header.mode == Mode::Move {
+                // THEN unlink. stream_verified never touches the source, so
+                // this is the only place a move loses its original, and it
+                // happens after the copy is verified and in place.
+                std::fs::remove_file(&row.source)?;
+            }
+        }
+    }
+
+    undo.record_done(seq)?;
+    Ok(())
+}
+
+/// Beside the plan, like the lock.
+pub fn undo_path(plan: &Path) -> PathBuf {
+    let mut name = plan.file_name().unwrap_or_default().to_os_string();
+    name.push(".undo.csv");
+    plan.with_file_name(name)
 }
 
 /// D14: the stored `destination_preview` is a preview. The real destination is

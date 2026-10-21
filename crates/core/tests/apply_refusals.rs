@@ -1,11 +1,12 @@
-//! Task 11. `apply` pre-flight. **Every test wraps both trees in a
+//! Task 11. `apply` pre-flight, exercised through `check`, which runs
+//! everything up to execution and writes nothing. **Every test wraps both trees in a
 //! `TreeGuard` with no permits** — the test an earlier draft was missing,
 //! because `Err` alone proves nothing about whether rows 1-3 ran before row 4
 //! refused.
 
 mod common;
 
-use comic_renamer_core::apply::{apply, lock_path};
+use comic_renamer_core::apply::{check, lock_path};
 use comic_renamer_core::corpus::Corpus;
 use comic_renamer_core::overrides::Overrides;
 use comic_renamer_core::types::{ApplyError, PlanHeader, PlanRow, ScanOpts};
@@ -73,7 +74,7 @@ impl Fixture {
 }
 
 fn run(f: &Fixture) -> Result<comic_renamer_core::types::ApplyResult, ApplyError> {
-    apply(&f.plan, false, &mut |_| {})
+    check(&f.plan, false, &mut |_| {})
 }
 
 #[test]
@@ -197,7 +198,7 @@ fn an_edited_plan_is_revalidated_not_rejected() {
 
     let _guard = TreeGuard::new(&f.roots());
     let mut saw_notice = false;
-    let r = apply(&f.plan, false, &mut |p| {
+    let r = check(&f.plan, false, &mut |p| {
         if p.current.contains("edited") {
             saw_notice = true;
         }
@@ -218,7 +219,7 @@ fn a_cloud_source_move_is_allowed_with_the_override() {
     // Without the override this is CloudSourceMove; with it the run proceeds
     // and the rows are judged on their own merits.
     assert!(matches!(run(&f), Err(ApplyError::CloudSourceMove(_))));
-    let r = apply(&f.plan, true, &mut |_| {}).unwrap();
+    let r = check(&f.plan, true, &mut |_| {}).unwrap();
     assert_eq!(r.executed, 1);
 }
 

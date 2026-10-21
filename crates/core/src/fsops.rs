@@ -554,3 +554,54 @@ fn existing_conflict(dest_root: &Path, relative: &Path) -> Option<PathBuf> {
     // Every component matched literally, so the whole path is occupied.
     Some(current)
 }
+
+/// Creates the directories a destination needs, one component at a time,
+/// refusing to traverse a symlink — the same discipline as
+/// `resolve_destination`, which cannot create anything.
+///
+/// Called per row at execution, never during pre-flight: a run that refuses
+/// every row should not leave a tree of empty folders behind.
+pub fn ensure_parent(dest_root: &Path, relative: &Path) -> io::Result<()> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    let mut components: Vec<_> = relative.components().collect();
+    components.pop(); // the leaf is a file, not a directory
+    if components.is_empty() {
+        return Ok(());
+    }
+
+    let root = cstring(dest_root)?;
+    // SAFETY: `root` is valid for the call and the descriptor is adopted.
+    let raw = unsafe { libc::open(root.as_ptr(), libc::O_DIRECTORY | libc::O_CLOEXEC) };
+    if raw < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut current = unsafe { OwnedFd::from_raw_fd(raw) };
+
+    for component in components {
+        let Component::Normal(name) = component else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} is not a plain relative path", relative.display()),
+            ));
+        };
+        let name = CString::new(name.as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "component holds a NUL"))?;
+
+        // SAFETY: `current` is an open directory we own; `name` outlives both
+        // calls. EEXIST is expected and handled by the openat that follows.
+        unsafe { libc::mkdirat(current.as_raw_fd(), name.as_ptr(), 0o755) };
+        let raw = unsafe {
+            libc::openat(
+                current.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if raw < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        current = unsafe { OwnedFd::from_raw_fd(raw) };
+    }
+    Ok(())
+}
