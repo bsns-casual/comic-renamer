@@ -5,7 +5,10 @@ use comic_renamer_core::normalize::nfc;
 use comic_renamer_core::preset::komga::{pad, Komga};
 use comic_renamer_core::preset::{preset_by_id, Preset};
 use comic_renamer_core::types::{Basis, Resolved, Status};
+use comic_renamer_core::fsops::find_collisions;
+use comic_renamer_core::types::{Mechanism, PlanRow, SourceStat};
 use std::path::PathBuf;
+use tempfile::tempdir;
 
 fn res(series: &str, volume: Option<u32>, run: u32, subtitle: Option<&str>) -> Resolved {
     Resolved {
@@ -54,13 +57,41 @@ fn sanitizes_without_rejecting() {
 }
 
 #[test]
-fn distinct_titles_never_converge() {
+fn titles_that_converge_are_caught_by_the_collision_detector() {
+    // `Hellboy: Seed` and `Hellboy - Seed` now land on one folder, because
+    // the substitution is plain ASCII rather than a look-alike nobody can
+    // type. That is safe only because the merge is *reported*: the plan's
+    // original assertion was about two series merging **silently**.
     let a = Komga.destination(&res("Hellboy: Seed", None, 1, None), "pdf");
     let b = Komga.destination(&res("Hellboy - Seed", None, 1, None), "pdf");
-    assert_ne!(
-        a, b,
-        "sanitising two titles onto one path silently merges two series"
+    assert_eq!(a, b, "the ASCII substitution is many-to-one by design");
+
+    let d = tempdir().unwrap();
+    let rows = [
+        plan_row("a", "Hellboy: Seed"),
+        plan_row("b", "Hellboy - Seed"),
+    ];
+    assert_eq!(
+        find_collisions(&rows, d.path(), &Komga).len(),
+        1,
+        "a convergence that is not reported is a silent series merge"
     );
+}
+
+#[test]
+fn no_emitted_path_contains_a_colon_in_any_form() {
+    // Maintainer's call: never a colon in a file or folder name, and that
+    // includes the look-alikes an earlier version substituted.
+    for title in ["Nemesis: Rogues' Gallery", "Powers: The Best Ever", "A:B"] {
+        let p = Komga
+            .destination(&res(title, Some(1), 9, Some("Sub: Title")), "pdf")
+            .to_string_lossy()
+            .into_owned();
+        for forbidden in [':', '\u{a789}', '\u{ff1a}', '\u{2236}'] {
+            assert!(!p.contains(forbidden), "{p:?} contains {forbidden:?}");
+        }
+        assert!(!p.contains("  "), "{p:?} has a doubled space");
+    }
 }
 
 #[test]
@@ -151,5 +182,26 @@ fn the_folder_and_the_filename_sanitise_the_same_way() {
         let folder = p.components().next().unwrap().as_os_str().to_string_lossy().into_owned();
         let stem = p.file_stem().unwrap().to_string_lossy().into_owned();
         assert_eq!(folder, stem, "{title:?} sanitised two different ways");
+    }
+}
+
+fn plan_row(id: &str, series: &str) -> PlanRow {
+    PlanRow {
+        id: id.into(),
+        source: PathBuf::from(format!("/src/{id}.pdf")),
+        destination_preview: PathBuf::new(),
+        extension: "pdf".into(),
+        series: series.into(),
+        volume: None,
+        subtitle: None,
+        run: 1,
+        status: Status::Ready(Basis::Unambiguous),
+        mechanism: Mechanism::Rename,
+        source_stat: SourceStat {
+            size: 1,
+            mtime_ns: 1,
+            inode: id.bytes().map(u64::from).sum(),
+        },
+        record: None,
     }
 }

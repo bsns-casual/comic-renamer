@@ -15,20 +15,25 @@ const DEVICE_NAMES: [&str; 22] = [
     "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
 ];
 
-/// Characters that are illegal in a path, each mapped to a *distinct*
-/// look-alike. Mapping `:` onto ` - ` would make `Hellboy: Seed` and
-/// `Hellboy - Seed` one folder, which silently merges two series — so every
-/// substitute has to be a character nothing else produces.
-const SUBSTITUTIONS: [(char, char); 9] = [
-    (':', '\u{a789}'),  // ꞉ modifier letter colon
-    ('/', '\u{2044}'),  // ⁄ fraction slash
-    ('\\', '\u{29f5}'), // ⧵ reverse solidus operator
-    ('?', '\u{ff1f}'),  // ？
-    ('*', '\u{ff0a}'),  // ＊
-    ('"', '\u{ff02}'),  // ＂
-    ('<', '\u{ff1c}'),  // ＜
-    ('>', '\u{ff1e}'),  // ＞
-    ('|', '\u{ff5c}'),  // ｜
+/// Characters that cannot appear in a path, mapped to plain ASCII.
+///
+/// Never a look-alike. An earlier version mapped `:` to U+A789 MODIFIER
+/// LETTER COLON so that `Hellboy: Seed` and `Hellboy - Seed` could not
+/// converge — which worked, at the cost of a character nobody can type into
+/// a real filename. The convergence it guarded against is no longer silent:
+/// `find_collisions` groups rows by the series folder's collision key as well
+/// as the whole path, so two titles landing on one folder are reported and
+/// the rows refused, never merged.
+const SUBSTITUTIONS: [(char, &str); 9] = [
+    (':', " - "),
+    ('/', " - "),
+    ('\\', "-"),
+    ('|', "-"),
+    ('"', "'"),
+    ('<', "("),
+    ('>', ")"),
+    ('?', ""),
+    ('*', ""),
 ];
 
 pub struct Komga;
@@ -85,13 +90,19 @@ pub fn sanitize(component: &str) -> String {
     let mapped: String = nfc(component)
         .chars()
         .filter(|c| !c.is_control() && !is_invisible(*c))
-        .map(|c| {
+        .flat_map(|c| {
             SUBSTITUTIONS
                 .iter()
                 .find(|(from, _)| *from == c)
-                .map_or(c, |(_, to)| *to)
+                .map_or_else(|| c.to_string(), |(_, to)| (*to).to_string())
+                .chars()
+                .collect::<Vec<_>>()
         })
         .collect();
+
+    // A substitution next to an existing space leaves a run: `Powers: The`
+    // becomes `Powers -  The`.
+    let mapped = collapse_spaces(&mapped);
 
     let trimmed = trim_hostile_edges(&mapped);
 
@@ -124,6 +135,19 @@ fn is_invisible(c: char) -> bool {
         | '\u{202a}'..='\u{202e}'
         | '\u{2066}'..='\u{2069}'
         | '\u{feff}')
+}
+
+fn collapse_spaces(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut was_space = false;
+    for c in s.chars() {
+        let is_space = c == ' ';
+        if !(is_space && was_space) {
+            out.push(c);
+        }
+        was_space = is_space;
+    }
+    out
 }
 
 /// A trailing dot or space is legal on APFS and silently stripped by Windows,
