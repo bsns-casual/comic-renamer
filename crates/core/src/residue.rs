@@ -94,14 +94,10 @@ fn eat_one(s: &str) -> Option<(Token, usize)> {
         }
     }
     for qualifier in EDITION_QUALIFIERS {
-        let whole = s.len() >= qualifier.len() + 7
-            && s[..qualifier.len()].eq_ignore_ascii_case(qualifier)
-            && s[qualifier.len()..qualifier.len() + 7].eq_ignore_ascii_case("edition");
-        if whole {
-            return Some((
-                Token::Edition(qualifier.to_string()),
-                qualifier.len() + 7,
-            ));
+        if let Some(rest) = strip_prefix_ci(s, qualifier) {
+            if strip_prefix_ci(rest, "edition").is_some() {
+                return Some((Token::Edition(qualifier.to_string()), qualifier.len() + 7));
+            }
         }
     }
     for format in FORMATS {
@@ -110,6 +106,21 @@ fn eat_one(s: &str) -> Option<(Token, usize)> {
         }
     }
     None
+}
+
+/// Case-insensitive prefix strip that never slices inside a character.
+///
+/// The obvious form -- a byte-length guard followed by `s[..n]` -- panics on
+/// any multibyte residue whose boundary falls inside the window. `eat` is
+/// called from the resolver's boundary guard before a match is even accepted,
+/// so a Japanese filename took the process down rather than becoming `review`.
+fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    let end = prefix.len();
+    if !s.is_char_boundary(end) {
+        return None;
+    }
+    let head = s.get(..end)?;
+    head.eq_ignore_ascii_case(prefix).then(|| &s[end..])
 }
 
 /// Digits, then a spelled-out number, then a roman numeral.

@@ -108,12 +108,28 @@ pub fn resolve(
     let chosen = if narrowed.len() == 1 {
         narrowed.remove(0)
     } else if volume.is_some() {
-        basis = Basis::ShortestRun;
-        narrowed
+        // A tie on run means shortest-run has decided nothing. Breaking it on
+        // year_began silently reinstates "prefer the earliest edition", which
+        // D28 withdraws *by name* for resolving Velvet_vol1 to Malibu 1993
+        // inside an Image bundle. §6.3 step 5: never silently pick.
+        let shortest = narrowed.iter().map(|r| r.run).min().expect("non-empty");
+        let mut tied: Vec<SeriesRecord> = narrowed
             .iter()
-            .min_by_key(|r| (r.run, r.year_began))
+            .filter(|r| r.run == shortest)
             .cloned()
-            .expect("non-empty")
+            .collect();
+        if tied.len() > 1 {
+            return Resolved {
+                series: String::new(),
+                volume,
+                subtitle,
+                run: 0,
+                status: Status::Review(ReviewReason::Ambiguous(narrowed)),
+                record: None,
+            };
+        }
+        basis = Basis::ShortestRun;
+        tied.remove(0)
     } else {
         // 5. Still ambiguous → review, every candidate listed. Never pick.
         return Resolved {
@@ -205,20 +221,76 @@ fn boundary_is_clean(original: &str, matched_chars: usize, residue: &str) -> boo
 
 /// From the source folder's own name (§6.3). Free signal when present, and
 /// absent for anyone running against `~/Downloads` — which is the common case.
+///
+/// Matched on **word boundaries**, not as a squashed substring. The corpus
+/// ships two-letter publishers (`DC`, `EC`, `IC`, …) and 15,558 distinct names
+/// in all, so substring matching fired on every row of the ground-truth set:
+/// `Humble Valiant Bundle` matched *Lian* inside va-**LIAN**-t, and
+/// `Hellboy Expanded Universe` matched *Pan*. Taking the longest match made it
+/// worse, preferring a tiny publisher called *Humble Comics* over the IDW
+/// named in the same folder.
+///
+/// When two publishers both match, there is no hint. §6.3 step 2 lets the hint
+/// promote a row to `ready`, so a wrong one is a silent-wrongness path, not
+/// noise — and step 5 says never silently pick.
 pub fn publisher_hint(source_folder: &str, corpus: &Corpus) -> PublisherHint {
-    let folder = squash(source_folder);
+    let mut folder = words(source_folder);
+    // The distributor's own name is not a publisher signal, and the corpus
+    // contains a small publisher literally called "Humble Comics" — so
+    // `Humble Comics Bundle: …` resolved to it in preference to the IDW or
+    // Image named later in the same folder.
+    if folder.first().is_some_and(|w| DISTRIBUTORS.contains(&w.as_str())) {
+        folder.remove(0);
+    }
     if folder.is_empty() {
         return PublisherHint(None);
     }
-    // Longest match wins, so `Dark Horse Manga` beats `Dark Horse`.
-    let best = corpus
+    let mut matched: Vec<&String> = corpus
         .publishers()
         .iter()
         .filter(|p| {
-            let squashed = squash(p);
-            !squashed.is_empty() && folder.contains(&squashed)
+            let needle = words(p);
+            !needle.is_empty() && folder.windows(needle.len()).any(|w| w == needle.as_slice())
         })
-        .max_by_key(|p| squash(p).len())
-        .cloned();
-    PublisherHint(best)
+        .collect();
+    matched.dedup();
+    match matched.as_slice() {
+        [only] => PublisherHint(Some((*only).clone())),
+        _ => PublisherHint(None),
+    }
+}
+
+/// Bundle names begin with the shop, not the publisher (§7, D12: evaluation
+/// input is distributor bundles).
+const DISTRIBUTORS: [&str; 3] = ["humble", "fanatical", "indiegala"];
+
+/// Splits a folder name into lowercase words, on punctuation and on camelCase
+/// boundaries: `HumbleDarkHorseAnniversaryBundle` becomes
+/// `[humble, dark, horse, anniversary, bundle]`, and `IDWPublishing` becomes
+/// `[idw, publishing]`.
+fn words(s: &str) -> Vec<String> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = Vec::new();
+    let mut current = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if !c.is_alphanumeric() {
+            if !current.is_empty() {
+                out.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        let boundary = c.is_uppercase()
+            && !current.is_empty()
+            && (chars[i - 1].is_lowercase()
+                || chars[i - 1].is_numeric()
+                || chars.get(i + 1).is_some_and(|n| n.is_lowercase()));
+        if boundary {
+            out.push(std::mem::take(&mut current));
+        }
+        current.extend(c.to_lowercase());
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
 }

@@ -206,3 +206,97 @@ fn an_unknown_series_fails_rather_than_matching_something() {
         Status::Failed
     );
 }
+
+#[test]
+fn a_multibyte_filename_does_not_panic() {
+    // The residue tokenizer sliced by byte behind a byte-length guard, so any
+    // residue whose boundary fell inside a character crashed the process.
+    // `eat` runs inside the boundary guard, before a match is even accepted,
+    // so this reached the resolver for names that would never have resolved.
+    let (_d, c) = gcd_subset();
+    for stem in [
+        "naruto\u{5b8c}\u{5168}\u{7248}\u{7b2c}\u{4e00}\u{5dfb}",
+        "\u{30ce}\u{30e9}\u{30ac}\u{30df}vol1",
+        "hellboyomnibus\u{5b8c}\u{5168}\u{7248}",
+        "secondeditio\u{5168}",
+    ] {
+        let r = resolve(stem, NO_FOLDER, &no_hint(), &c, &no_ov(), "en");
+        // Any status is acceptable; a panic is not.
+        assert!(matches!(
+            r.status,
+            Status::Ready(_) | Status::Review(_) | Status::Failed
+        ));
+    }
+}
+
+#[test]
+fn a_tie_on_run_length_is_ambiguous_not_the_earliest_edition() {
+    // D28 withdraws "prefer the earliest edition" by name, for resolving
+    // Velvet_vol1 to Malibu 1993 inside an Image bundle. A tie on run means
+    // shortest-run decided nothing, so the row must go to review.
+    let (_d, c) = corpus(&[
+        ("Velvet", "velvet", "Malibu", "en", 1993, 3),
+        ("Velvet", "velvet", "Image", "en", 2014, 3),
+    ]);
+    let r = resolve("velvet_vol1", NO_FOLDER, &no_hint(), &c, &no_ov(), "en");
+    assert!(
+        matches!(r.status, Status::Review(ReviewReason::Ambiguous(_))),
+        "got {:?} on record {:?}",
+        r.status,
+        r.record
+    );
+    assert!(r.record.is_none());
+}
+
+#[test]
+fn shortest_run_still_fires_when_there_is_a_single_shortest() {
+    // The other half: the tie guard must not disable the heuristic that
+    // carries 39 of the 71 points of `ready`.
+    let (_d, c) = three_velvets();
+    let r = resolve("velvet_vol1", NO_FOLDER, &no_hint(), &c, &no_ov(), "en");
+    assert_eq!(r.status, Status::Ready(Basis::ShortestRun));
+    assert_eq!(r.record.unwrap().year_began, 2014);
+}
+
+#[test]
+fn publisher_hint_ignores_a_substring_coincidence() {
+    // `Humble Valiant Bundle` matched *Lian* inside va-LIAN-t under substring
+    // matching; `Hellboy Expanded Universe` matched *Pan*.
+    let (_d, c) = corpus(&[
+        ("Something", "something", "Lian", "en", 2004, 3),
+        ("Other", "other", "Pan", "en", 2004, 3),
+    ]);
+    assert_eq!(publisher_hint("Humble Valiant Bundle", &c).0, None);
+    assert_eq!(publisher_hint("Hellboy Expanded Universe 2025", &c).0, None);
+}
+
+#[test]
+fn publisher_hint_matches_a_camel_case_folder_on_word_boundaries() {
+    let (_d, c) = two_masks();
+    assert_eq!(
+        publisher_hint("HumbleDarkHorseAnniversaryBundle", &c).0.as_deref(),
+        Some("Dark Horse")
+    );
+}
+
+#[test]
+fn publisher_hint_is_absent_when_two_publishers_match() {
+    // §6.3 step 2 lets the hint promote a row to `ready`, so a wrong one is a
+    // silent-wrongness path. Step 5: never silently pick.
+    let (_d, c) = corpus(&[
+        ("A", "a", "Humble Comics", "en", 2004, 3),
+        ("B", "b", "IDW", "en", 2004, 3),
+    ]);
+    assert_eq!(
+        publisher_hint("Humble Comics Bundle: Godzilla by IDW", &c).0,
+        None
+    );
+}
+
+#[test]
+fn a_two_letter_publisher_needs_its_own_word() {
+    let (_d, c) = corpus(&[("A", "a", "DC", "en", 2004, 3)]);
+    assert_eq!(publisher_hint("Humble DC Bundle", &c).0.as_deref(), Some("DC"));
+    // "dc" inside a longer word must not match.
+    assert_eq!(publisher_hint("Humble Abdcef Bundle", &c).0, None);
+}

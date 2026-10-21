@@ -5,7 +5,7 @@ mod common;
 
 use comic_renamer_core::corpus::{ensure_corpus, load_manifest, Corpus, Manifest};
 use comic_renamer_core::overrides::Overrides;
-use comic_renamer_core::resolve::resolve;
+use comic_renamer_core::resolve::{publisher_hint, resolve};
 use comic_renamer_core::types::{Basis, CorpusError, PublisherHint, Status};
 use common::{manifest_for, write_db};
 use std::path::{Path, PathBuf};
@@ -280,4 +280,136 @@ fn rejects_a_database_missing_a_column_we_read() {
     drop(conn);
     let manifest = manifest_for(&db, 0);
     assert!(Corpus::open(&db, &manifest).is_err());
+}
+
+/// Reports how often the publisher hint fires across the real bundles.
+/// Ignored: needs the corpus. Substring matching fired on 2,223 of 2,223
+/// ground-truth rows, against D30's measured 7.4% resolution rate — a hint
+/// that is always present is not a signal.
+#[test]
+#[ignore]
+fn the_publisher_hint_does_not_fire_on_every_bundle() {
+    let Ok(zip_path) = std::env::var("COMIC_RENAMER_TEST_ZIP") else {
+        panic!("set COMIC_RENAMER_TEST_ZIP to a downloaded gcd-*.zip");
+    };
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/manifest.json");
+    let mut manifest = load_manifest(&repo).unwrap();
+    manifest.url = format!("file://{zip_path}");
+    let cache = TempDir::new().unwrap();
+    let db = ensure_corpus(&manifest, cache.path()).unwrap();
+    let corpus = Corpus::open(&db, &manifest).unwrap();
+
+    let truth = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/humble-ground-truth.tsv");
+    let text = std::fs::read_to_string(&truth).unwrap();
+    let mut bundles: Vec<&str> = text
+        .lines()
+        .skip(1)
+        .filter_map(|l| l.split('\t').next())
+        .collect();
+    bundles.sort_unstable();
+    bundles.dedup();
+
+    let hit: Vec<(&str, String)> = bundles
+        .iter()
+        .filter_map(|b| publisher_hint(b, &corpus).0.map(|p| (*b, p)))
+        .collect();
+    println!(
+        "publisher hint fires on {}/{} bundles",
+        hit.len(),
+        bundles.len()
+    );
+    for (bundle, publisher) in &hit {
+        println!("  {bundle}  ->  {publisher}");
+    }
+    assert!(
+        hit.len() < bundles.len(),
+        "the hint fires on every bundle, which is what substring matching did"
+    );
+    // Every hint that does fire must be a word of the folder, not a fragment.
+    for (bundle, publisher) in &hit {
+        let folder = bundle.to_lowercase();
+        assert!(
+            publisher
+                .to_lowercase()
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|w| !w.is_empty())
+                .all(|w| folder.split(|c: char| !c.is_alphanumeric()).any(|f| f == w)),
+            "{publisher:?} is not a word of {bundle:?}"
+        );
+    }
+}
+
+/// Does the publisher hint move rows toward or away from ground truth?
+/// Ignored: needs the corpus. §6.3 step 2 lets the hint promote a row to
+/// `ready`, so a wrong hint is a silent-wrongness path rather than noise.
+#[test]
+#[ignore]
+fn the_publisher_hint_does_not_make_titles_worse() {
+    let Ok(zip_path) = std::env::var("COMIC_RENAMER_TEST_ZIP") else {
+        panic!("set COMIC_RENAMER_TEST_ZIP to a downloaded gcd-*.zip");
+    };
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/manifest.json");
+    let mut manifest = load_manifest(&repo).unwrap();
+    manifest.url = format!("file://{zip_path}");
+    let cache = TempDir::new().unwrap();
+    let db = ensure_corpus(&manifest, cache.path()).unwrap();
+    let corpus = Corpus::open(&db, &manifest).unwrap();
+    let overrides = Overrides::default();
+
+    let truth = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/humble-ground-truth.tsv");
+    let text = std::fs::read_to_string(&truth).unwrap();
+
+    // §7: normalise both sides or you chase phantoms. Humble writes `&` where
+    // the corpus writes "and", and inserts `Vol 1:` mid-title.
+    let key = |s: &str| -> String {
+        s.to_lowercase()
+            .replace('&', "and")
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .collect()
+    };
+
+    let mut changed = 0usize;
+    let mut better = 0usize;
+    let mut worse = 0usize;
+    let mut demoted = 0usize;
+    for line in text.lines().skip(1) {
+        let mut cols = line.split('\t');
+        let (Some(bundle), Some(title), Some(stem)) = (cols.next(), cols.next(), cols.next())
+        else {
+            continue;
+        };
+        let hint = publisher_hint(bundle, &corpus);
+        if hint.0.is_none() {
+            continue;
+        }
+        let with = resolve(stem, bundle, &hint, &corpus, &overrides, "en");
+        let without = resolve(stem, bundle, &PublisherHint(None), &corpus, &overrides, "en");
+        if with.series == without.series {
+            continue;
+        }
+        changed += 1;
+        let truth_key = key(title);
+        let hit = |s: &str| !s.is_empty() && truth_key.starts_with(&key(s));
+        // A row that goes to review is a safe outcome, not a wrong one. Only
+        // a *different, confidently asserted* title counts as worse — that is
+        // the silent-wrongness path §4 forbids.
+        let asserted = !with.series.is_empty();
+        match (hit(&with.series), hit(&without.series)) {
+            (true, false) => better += 1,
+            (false, true) if asserted => {
+                worse += 1;
+                println!(
+                    "  WORSE  stem={stem}\n         truth={title}\n         with-hint={} ({:?})",
+                    with.series, with.status
+                );
+            }
+            (false, true) => demoted += 1,
+            _ => {}
+        }
+    }
+    println!(
+        "hint changed {changed} titles: {better} better, {worse} wrong, {demoted} sent to review"
+    );
+    assert_eq!(worse, 0, "the hint asserted {worse} wrong titles");
 }
