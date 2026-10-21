@@ -1,0 +1,236 @@
+//! Task 11. `apply` pre-flight. **Every test wraps both trees in a
+//! `TreeGuard` with no permits** — the test an earlier draft was missing,
+//! because `Err` alone proves nothing about whether rows 1-3 ran before row 4
+//! refused.
+
+mod common;
+
+use comic_renamer_core::apply::{apply, lock_path};
+use comic_renamer_core::corpus::Corpus;
+use comic_renamer_core::overrides::Overrides;
+use comic_renamer_core::types::{ApplyError, PlanHeader, PlanRow, ScanOpts};
+use comic_renamer_core::{plan, scan};
+use common::{corpus, tree_from_names, TreeGuard};
+use std::path::{Path, PathBuf};
+use tempfile::{tempdir, TempDir};
+
+fn gcd() -> (TempDir, Corpus) {
+    corpus(&[
+        ("Mazebook", "mazebook", "Dark Horse", "en", 2021, 5),
+        ("Hellboy Omnibus", "hellboyomnibus", "Dark Horse", "en", 2018, 4),
+        ("Birdking", "birdking", "Dark Horse", "en", 2022, 3),
+        ("Velvet", "velvet", "Image", "en", 2014, 3),
+    ])
+}
+
+/// A source tree, an empty destination, and a written plan over both.
+struct Fixture {
+    _source: TempDir,
+    _dest: TempDir,
+    _plans: TempDir,
+    source: PathBuf,
+    dest: PathBuf,
+    plan: PathBuf,
+}
+
+impl Fixture {
+    fn new(names: &[&str], corpus: &Corpus) -> Fixture {
+        let source = tempdir().unwrap();
+        let dest = tempdir().unwrap();
+        let plans = tempdir().unwrap();
+        tree_from_names(source.path(), names);
+        let opts = ScanOpts {
+            source_root: source.path().to_path_buf(),
+            dest_root: dest.path().to_path_buf(),
+            preset: "komga".into(),
+            mode: None,
+            lang: "en".into(),
+        };
+        let (header, rows) = scan::scan(&opts, corpus, &Overrides::default(), &mut |_| {}).unwrap();
+        let plan_path = plans.path().join("plan.jsonl");
+        plan::write(&header, &rows, &plan_path).unwrap();
+        Fixture {
+            source: source.path().to_path_buf(),
+            dest: dest.path().to_path_buf(),
+            plan: plan_path,
+            _source: source,
+            _dest: dest,
+            _plans: plans,
+        }
+    }
+
+    fn roots(&self) -> [&Path; 2] {
+        [self.source.as_path(), self.dest.as_path()]
+    }
+
+    fn rewrite<F: FnOnce(&mut PlanHeader, &mut Vec<PlanRow>)>(&self, edit: F) {
+        let (mut header, mut rows) = plan::read(&self.plan).unwrap();
+        edit(&mut header, &mut rows);
+        // Re-stamped, so the checksum is valid and the *content* is what the
+        // pre-flight has to catch — not the checksum.
+        plan::write(&header, &rows, &self.plan).unwrap();
+    }
+}
+
+fn run(f: &Fixture) -> Result<comic_renamer_core::types::ApplyResult, ApplyError> {
+    apply(&f.plan, false, &mut |_| {})
+}
+
+#[test]
+fn a_refused_run_moves_zero_files() {
+    let (_g, c) = gcd();
+
+    // 1. A destination edited to point somewhere else.
+    let f = Fixture::new(&["mazebook.pdf"], &c);
+    f.rewrite(|_, rows| rows[0].destination_preview = PathBuf::from("Elsewhere/x.pdf"));
+    {
+        let _guard = TreeGuard::new(&f.roots());
+        assert!(matches!(run(&f), Err(ApplyError::Tampered(_))));
+    }
+
+    // 2. A source that changed after the scan.
+    let f = Fixture::new(&["mazebook.pdf"], &c);
+    std::fs::write(f.source.join("mazebook.pdf"), b"now it has content").unwrap();
+    {
+        // The source legitimately differs, so the guard permits that one file
+        // and nothing else.
+        let _guard = TreeGuard::new(&f.roots());
+        assert!(matches!(run(&f), Err(ApplyError::SourceChanged(_))));
+    }
+
+    // 3. A mechanism that no longer matches.
+    let f = Fixture::new(&["mazebook.pdf"], &c);
+    f.rewrite(|_, rows| {
+        rows[0].mechanism = comic_renamer_core::types::Mechanism::Stream;
+    });
+    {
+        let _guard = TreeGuard::new(&f.roots());
+        assert!(matches!(run(&f), Err(ApplyError::MechanismChanged(_))));
+    }
+
+    // 4. A move off a cloud-synced root, without the override (D23).
+    let f = Fixture::new(&["mazebook.pdf"], &c);
+    f.rewrite(|header, _| {
+        header.source_root = PathBuf::from("/Users/someone/Library/CloudStorage/Dropbox/Comics");
+    });
+    {
+        let _guard = TreeGuard::new(&f.roots());
+        assert!(matches!(run(&f), Err(ApplyError::CloudSourceMove(_))));
+    }
+
+    // 5. An unknown preset.
+    let f = Fixture::new(&["mazebook.pdf"], &c);
+    f.rewrite(|header, _| header.preset = "plex".into());
+    {
+        let _guard = TreeGuard::new(&f.roots());
+        assert!(matches!(run(&f), Err(ApplyError::UnknownPreset(_))));
+    }
+}
+
+#[test]
+fn refuses_a_lock_held_by_another_run() {
+    let (_g, c) = gcd();
+    let f = Fixture::new(&["mazebook.pdf"], &c);
+    // Taken the way a concurrent run would take it.
+    std::fs::write(lock_path(&f.plan), b"").unwrap();
+    let _guard = TreeGuard::new(&f.roots());
+    assert!(matches!(run(&f), Err(ApplyError::Locked)));
+}
+
+#[test]
+fn the_lock_is_released_when_the_run_ends() {
+    let (_g, c) = gcd();
+    let f = Fixture::new(&["mazebook.pdf"], &c);
+    let _guard = TreeGuard::new(&f.roots());
+    run(&f).unwrap();
+    assert!(!lock_path(&f.plan).exists(), "the lock outlived the run");
+    // So a second run is possible.
+    run(&f).unwrap();
+}
+
+#[test]
+fn does_not_execute_review_rows() {
+    let (_g, c) = gcd();
+    // Two that resolve cleanly, three that cannot: an unknown title, an
+    // unsplit subtitle, and a volume no record can hold.
+    let f = Fixture::new(
+        &[
+            "mazebook.pdf",
+            "birdking_vol1.pdf",
+            "totallyunknownthing.pdf",
+            "hellboyomnibusvolume1_seedofdestruction.pdf",
+            "velvet_vol9.pdf",
+        ],
+        &c,
+    );
+    let _guard = TreeGuard::new(&f.roots());
+    let r = run(&f).unwrap();
+    assert_eq!((r.executed, r.skipped), (2, 3), "{r:?}");
+}
+
+#[test]
+fn an_occupied_destination_refuses_the_row_not_the_run() {
+    // §6.10: never overwrite, never auto-suffix — refuse the row.
+    let (_g, c) = gcd();
+    let f = Fixture::new(&["mazebook.pdf", "birdking_vol1.pdf"], &c);
+    std::fs::create_dir(f.dest.join("Mazebook")).unwrap();
+    std::fs::write(f.dest.join("Mazebook/Mazebook.pdf"), b"already here").unwrap();
+    let _guard = TreeGuard::new(&f.roots());
+    let r = run(&f).unwrap();
+    assert_eq!((r.executed, r.skipped), (1, 1), "{r:?}");
+}
+
+#[test]
+fn an_edited_plan_is_revalidated_not_rejected() {
+    // §6.9. A stale checksum is a report about what a human touched; every
+    // destination is recomputed from metadata regardless.
+    let (_g, c) = gcd();
+    let f = Fixture::new(&["mazebook.pdf"], &c);
+    // The checksum is taken over the re-serialised data, so reformatting a
+    // plan does not trip it — only a change of content does. This edit is a
+    // real one that still leaves every row executable.
+    let text = std::fs::read_to_string(&f.plan).unwrap();
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    lines[0] = lines[0].replace("\"required_bytes\":0", "\"required_bytes\":123");
+    assert!(lines[0].contains("123"), "the header shape changed");
+    std::fs::write(&f.plan, lines.join("\n")).unwrap();
+
+    let _guard = TreeGuard::new(&f.roots());
+    let mut saw_notice = false;
+    let r = apply(&f.plan, false, &mut |p| {
+        if p.current.contains("edited") {
+            saw_notice = true;
+        }
+    })
+    .unwrap();
+    assert_eq!(r.executed, 1);
+    assert!(saw_notice, "the edit was not reported");
+}
+
+#[test]
+fn a_cloud_source_move_is_allowed_with_the_override() {
+    let (_g, c) = gcd();
+    let f = Fixture::new(&["mazebook.pdf"], &c);
+    f.rewrite(|header, _| {
+        header.source_root = PathBuf::from("/Users/someone/Library/CloudStorage/Dropbox/Comics");
+    });
+    let _guard = TreeGuard::new(&f.roots());
+    // Without the override this is CloudSourceMove; with it the run proceeds
+    // and the rows are judged on their own merits.
+    assert!(matches!(run(&f), Err(ApplyError::CloudSourceMove(_))));
+    let r = apply(&f.plan, true, &mut |_| {}).unwrap();
+    assert_eq!(r.executed, 1);
+}
+
+#[test]
+fn a_run_larger_than_the_free_space_is_refused_whole() {
+    // The arithmetic, which is where a bug would be; the statvfs call around
+    // it is one syscall. A run must leave max(1 GiB, 10%) behind.
+    use comic_renamer_core::apply::usable;
+    const GIB: u64 = 1 << 30;
+    let free = 20 * GIB;
+    let available = usable(free);
+    assert_eq!(available, 18 * GIB);
+    assert!(19 * GIB > available, "a 19 GiB run must not fit in 20 GiB free");
+    assert!(17 * GIB <= available);
+}

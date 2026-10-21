@@ -28,6 +28,24 @@ pub fn write(header: &PlanHeader, rows: &[PlanRow], path: &Path) -> Result<(), P
 /// caller can tell a human's edit apart from a malformed file and decide. Every
 /// other failure here is fatal.
 pub fn read(path: &Path) -> Result<(PlanHeader, Vec<PlanRow>), PlanError> {
+    let (header, rows, edited) = read_allowing_edits(path)?;
+    if edited {
+        let actual = checksum(&header, &rows);
+        return Err(PlanError::ChecksumMismatch {
+            expected: header.checksum,
+            actual,
+        });
+    }
+    Ok((header, rows))
+}
+
+/// As `read`, but a stale checksum is **reported** rather than fatal: the
+/// third element is true when a human has edited the file.
+///
+/// §6.9 says an edited plan is revalidated, not rejected, which `read` alone
+/// cannot express — it has no way to hand back the rows it refused. `apply`
+/// is the caller that needs them; every other validation is still fatal here.
+pub fn read_allowing_edits(path: &Path) -> Result<(PlanHeader, Vec<PlanRow>, bool), PlanError> {
     let text = std::fs::read_to_string(path)?;
     let mut lines = text.lines().filter(|l| !l.trim().is_empty());
 
@@ -50,15 +68,8 @@ pub fn read(path: &Path) -> Result<(PlanHeader, Vec<PlanRow>), PlanError> {
         rows.push(row);
     }
 
-    let actual = checksum(&header, &rows);
-    if actual != header.checksum {
-        return Err(PlanError::ChecksumMismatch {
-            expected: header.checksum,
-            actual,
-        });
-    }
-
-    Ok((header, rows))
+    let edited = checksum(&header, &rows) != header.checksum;
+    Ok((header, rows, edited))
 }
 
 /// `destination_preview` is relative to `dest_root`. Anything absolute, or
