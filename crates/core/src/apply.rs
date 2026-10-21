@@ -11,7 +11,7 @@ use crate::fsops::{
 use crate::undo::UndoWriter;
 use crate::preset::{preset_by_id, Preset};
 use crate::types::{
-    ApplyError, ApplyResult, Mechanism, Mode, PlanHeader, PlanRow, Progress, Status,
+    ApplyError, ApplyResult, Mechanism, Mode, PlanHeader, PlanRow, Progress, Status, UndoReport,
 };
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
@@ -167,7 +167,11 @@ fn apply_inner(
             None => {
                 // `O_EXCL`: re-running a plan must not truncate the previous
                 // run's manifest, the only record of where those files went.
-                undo = Some(UndoWriter::create(&undo_path(plan), &header.dest_root)?);
+                undo = Some(UndoWriter::create(
+                    &undo_path(plan),
+                    &header.source_root,
+                    &header.dest_root,
+                )?);
                 undo.as_mut().expect("just created")
             }
         };
@@ -204,40 +208,105 @@ fn execute(
     // `destination_preview` here made that true only by loop ordering, which
     // nothing in the types enforces.
     let relative = &preset.destination(&row.resolved(), &row.extension);
-    ensure_parent(&header.dest_root, relative)?;
     let absolute = header.dest_root.join(relative);
+    let source_name = Path::new(row.source.file_name().unwrap_or_default());
 
     // Pending lands and is fsynced before the operation is attempted. A
     // manifest entry still sitting in a buffer when the power goes is a file
     // nobody can find again.
-    let seq = undo.record_pending(&row.source, &absolute, row.mechanism, header.mode)?;
+    let seq = undo.record_pending(
+        source_name,
+        relative,
+        row.mechanism,
+        header.mode,
+        &row.source,
+    )?;
 
+    // ensure_parent after record_pending, so a created series directory is
+    // recorded rather than left behind unaccounted for.
+    ensure_parent(&header.dest_root, relative)?;
+
+    // A `failed` row removes the ambiguity a bare `pending` used to carry
+    // between "crashed mid-operation" and "refused at the syscall" — the
+    // ambiguity `reverse` resolved by matching on size.
+    //
+    // It is written **only when nothing was created**. A failure after
+    // `placed` — a verified copy whose unlink then failed — must leave the
+    // row at `placed`, because that is the record that lets `reverse` clear
+    // the duplicate. Writing `failed` over it throws away the one piece of
+    // information the state depends on.
+    let mut created = false;
+    let outcome = perform(row, header, relative, &absolute, seq, undo, &mut created, progress);
+    if outcome.is_err() {
+        if !created {
+            let _ = undo.record_failed(seq);
+        }
+        return outcome;
+    }
+
+    undo.record_done(seq)?;
+    Ok(())
+}
+
+fn perform(
+    row: &PlanRow,
+    header: &PlanHeader,
+    relative: &Path,
+    absolute: &Path,
+    seq: u64,
+    undo: &mut UndoWriter,
+    created: &mut bool,
+    progress: &mut dyn FnMut(Progress),
+) -> Result<(), ApplyError> {
     match row.mechanism {
-        // Atomic, and there is nothing to hash: the inode does not move.
-        Mechanism::Rename => rename_excl(&row.source, &header.dest_root, relative)?,
+        // Atomic, and there is nothing to hash: the inode does not move, so
+        // there is no new identity to record and no `placed` state.
+        Mechanism::Rename => {
+            rename_excl(&row.source, &header.dest_root, relative)?;
+            // No new inode and so no `placed`, but the file has moved: a
+            // later failure must not claim nothing was created.
+            *created = true;
+        }
         Mechanism::Clone => {
             match clone_excl(&row.source, &header.dest_root, relative) {
-                Ok(()) => {}
+                Ok(()) => {
+                    placed(undo, seq, absolute)?;
+                    *created = true;
+                }
                 // An occupied destination stays a refusal; it is never a
                 // reason to try again by another route.
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     return Err(ApplyError::Io(e))
                 }
                 // §6.10 wants the clone probed at runtime with a fallback to
-                // streaming. Announced, not silent, because the cost differs.
+                // streaming. Announced, and counted by `required_bytes`.
                 Err(e) => {
                     progress(Progress {
                         done: 0,
                         total: 0,
-                        current: format!("clone unavailable ({e}); streaming {}", relative.display()),
+                        current: format!(
+                            "clone unavailable ({e}); streaming {}",
+                            relative.display()
+                        ),
                     });
                     stream_verified(&row.source, &header.dest_root, relative)?;
+                    placed(undo, seq, absolute)?;
+                    *created = true;
                 }
+            }
+            if header.mode == Mode::Move {
+                std::fs::remove_file(&row.source)?;
             }
         }
         Mechanism::Stream => {
             // temp -> fsync -> verify -> rename_excl, all inside.
             stream_verified(&row.source, &header.dest_root, relative)?;
+            // A hard gate before the unlink. Ignore its failure and the row
+            // is a bare `pending` with the source gone and the destination's
+            // inode unrecorded — the user's only copy in the library under a
+            // name `reverse` will not touch.
+            placed(undo, seq, absolute)?;
+            *created = true;
             if header.mode == Mode::Move {
                 // THEN unlink. stream_verified never touches the source, so
                 // this is the only place a move loses its original, and it
@@ -246,11 +315,70 @@ fn execute(
             }
         }
     }
-
-    // The destination's identity, so `reverse` can refuse anything that is
-    // not the file this row put there.
-    undo.record_done(seq, &absolute)?;
     Ok(())
+}
+
+/// Records the destination's own identity. Never with an empty field: the
+/// same bytes would mean both "this status carries none" and "the stat
+/// failed", and `reverse` would silently fall back to a weaker match.
+fn placed(undo: &mut UndoWriter, seq: u64, absolute: &Path) -> Result<(), ApplyError> {
+    let meta = std::fs::symlink_metadata(absolute)?;
+    undo.record_placed(
+        seq,
+        (
+            meta.len(),
+            meta.ino(),
+            meta.mtime() * 1_000_000_000 + meta.mtime_nsec(),
+        ),
+    )?;
+    Ok(())
+}
+
+/// Reverses a run. Takes the **plan**, not the manifest (D38): the plan's
+/// roots anchor every path the manifest names, the preset decides which
+/// destinations are recognisable, and both share one lock with `apply`.
+///
+/// The manifest remains the record of what actually happened — only the
+/// anchor moved. Undoing from intent would attempt to reverse operations that
+/// never ran, which §6.13's original reasoning rightly refused.
+pub fn undo(plan: &Path) -> Result<UndoReport, ApplyError> {
+    let _lock = Lock::acquire(plan)?;
+    let (header, rows, _edited) = crate::plan::read_allowing_edits(plan)?;
+    let preset = preset_by_id(&header.preset)
+        .ok_or_else(|| ApplyError::UnknownPreset(header.preset.clone()))?;
+
+    let source_root = canonical_dir(&header.source_root)?;
+    let dest_root = canonical_dir(&header.dest_root)?;
+    if source_root.starts_with(&dest_root) || dest_root.starts_with(&source_root) {
+        return Err(ApplyError::RootsOverlap);
+    }
+
+    // Invariant 9: a row is only recognised if the preset still produces its
+    // destination, which is what stops a hand-written manifest naming an
+    // arbitrary relative path.
+    let recomputed: Vec<PathBuf> = rows
+        .iter()
+        .map(|row| preset.destination(&row.resolved(), &row.extension))
+        .collect();
+
+    let manifest = undo_path(plan);
+    // Idempotent, which Task 12 requires: a manifest that is absent — never
+    // written, or renamed aside by a previous complete reverse — means there
+    // is nothing to undo, not an error.
+    if !manifest.exists() {
+        return Ok(UndoReport::default());
+    }
+    let report = crate::undo::reverse(&manifest, &source_root, &dest_root, &recomputed)?;
+
+    // A fully reversed manifest is renamed aside: the audit trail survives
+    // and the plan becomes runnable again. Left in place, a successful undo
+    // meant O_EXCL refused that plan forever.
+    if report.refused.is_empty() && report.skipped == 0 && report.restored > 0 {
+        let mut name = manifest.file_name().unwrap_or_default().to_os_string();
+        name.push(".reversed");
+        let _ = std::fs::rename(&manifest, manifest.with_file_name(name));
+    }
+    Ok(report)
 }
 
 /// Beside the plan, like the lock.
@@ -472,32 +600,43 @@ fn is_cloud_synced(path: &Path) -> bool {
     })
 }
 
-/// An `O_EXCL` file beside the plan, removed on drop.
+/// An advisory `flock(2)` on a file beside the plan.
 ///
-/// `O_EXCL` rather than a check-then-create: two runs racing on one plan is
-/// the failure no later check can undo.
+/// **`flock`, not `O_EXCL`.** The kernel releases an `flock` when its owner
+/// dies; an `O_EXCL` file survives a `SIGKILL` and has to be deleted by hand
+/// — and a crash is exactly when `undo` is needed, so the stale lock blocked
+/// the only recovery path. `O_EXCL` is still right for the *manifest*, where
+/// its job is refusing to truncate a previous run's record.
+///
+/// `undo` takes this same lock, which Task 11 always required and which two
+/// separate lock files silently defeated.
 pub struct Lock {
-    path: PathBuf,
+    /// Held open for the lifetime of the lock: closing it releases the flock.
+    _file: std::fs::File,
 }
 
 impl Lock {
     pub fn acquire(plan: &Path) -> Result<Lock, ApplyError> {
-        let path = lock_path(plan);
-        match std::fs::OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
             .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(_) => Ok(Lock { path }),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(ApplyError::Locked),
-            Err(e) => Err(ApplyError::Io(e)),
+            .create(true)
+            .truncate(false)
+            .open(lock_path(plan))?;
+        // SAFETY: a valid open descriptor we own, for the duration of the call.
+        let rc = unsafe {
+            libc::flock(
+                std::os::fd::AsRawFd::as_raw_fd(&file),
+                libc::LOCK_EX | libc::LOCK_NB,
+            )
+        };
+        if rc != 0 {
+            let e = std::io::Error::last_os_error();
+            return match e.raw_os_error() {
+                Some(libc::EWOULDBLOCK) => Err(ApplyError::Locked),
+                _ => Err(ApplyError::Io(e)),
+            };
         }
-    }
-}
-
-impl Drop for Lock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        Ok(Lock { _file: file })
     }
 }
 

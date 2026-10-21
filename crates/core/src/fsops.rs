@@ -159,6 +159,123 @@ pub fn rename_excl(src: &Path, dest_root: &Path, relative: &Path) -> io::Result<
     }
 }
 
+/// `fstatat` with `AT_SYMLINK_NOFOLLOW`, through a walked parent descriptor.
+///
+/// The point of taking `(root, relative)` rather than a joined path: a joined
+/// path is resolved by the kernel, which follows a symlinked series directory
+/// beneath the root. `undo` stats a path it is about to delete, so the check
+/// and the deletion must see the same directory.
+pub fn stat_at(root: &Path, relative: &Path) -> io::Result<std::fs::Metadata> {
+    let destination = resolve_destination(root, relative)?;
+    // There is no safe std wrapper for fstatat, so the metadata is read
+    // through a descriptor opened on the leaf instead — O_SYMLINK so a
+    // symlink is described rather than followed.
+    use std::os::fd::{AsRawFd, FromRawFd};
+    // SAFETY: `parent` is an open directory we own and `leaf` outlives the call.
+    let raw = unsafe {
+        libc::openat(
+            destination.parent.as_raw_fd(),
+            destination.leaf.as_ptr(),
+            libc::O_RDONLY | libc::O_SYMLINK | libc::O_CLOEXEC,
+        )
+    };
+    if raw < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: a fresh descriptor we own; File takes it over and closes it.
+    let file = unsafe { std::fs::File::from_raw_fd(raw) };
+    file.metadata()
+}
+
+/// `unlinkat` through a walked parent descriptor, for the same reason.
+pub fn remove_at(root: &Path, relative: &Path) -> io::Result<()> {
+    let destination = resolve_destination(root, relative)?;
+    // SAFETY: as above.
+    let rc = unsafe {
+        libc::unlinkat(
+            std::os::fd::AsRawFd::as_raw_fd(&destination.parent),
+            destination.leaf.as_ptr(),
+            0,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// `renameatx_np` with a walked descriptor on **both** sides.
+///
+/// `rename_excl` resolves only its destination and passes `AT_FDCWD` for the
+/// source, which is adequate when the caller has already established the
+/// source's containment. `undo` has not, so it uses this.
+pub fn rename_excl_at(
+    from_root: &Path,
+    from_relative: &Path,
+    to_root: &Path,
+    to_relative: &Path,
+) -> io::Result<()> {
+    let from = resolve_destination(from_root, from_relative)?;
+    let to = resolve_destination(to_root, to_relative)?;
+    // SAFETY: two open directory descriptors we own, two names that outlive
+    // the call.
+    let rc = unsafe {
+        libc::renameatx_np(
+            std::os::fd::AsRawFd::as_raw_fd(&from.parent),
+            from.leaf.as_ptr(),
+            std::os::fd::AsRawFd::as_raw_fd(&to.parent),
+            to.leaf.as_ptr(),
+            RENAME_EXCL,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Creates the root itself when it is absent.
+///
+/// `ensure_parent` pops the leaf, so for a single-component relative path it
+/// has nothing to do — and `undo`'s restore target is exactly that. The
+/// common case is a user who deleted the emptied bundle folder.
+pub fn ensure_root(root: &Path) -> io::Result<()> {
+    if root.is_dir() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(root)
+}
+
+/// Removes now-empty directories from `relative`'s parent up to `root`,
+/// deepest first. `rmdir` refuses a non-empty directory, so this cannot take
+/// one that still holds books.
+pub fn prune_empty_dirs(root: &Path, relative: &Path) -> io::Result<()> {
+    let mut components: Vec<_> = relative.components().collect();
+    components.pop();
+    while !components.is_empty() {
+        let partial: PathBuf = components.iter().collect();
+        let Ok(destination) = resolve_destination(root, &partial) else {
+            return Ok(());
+        };
+        // SAFETY: an open directory we own and a name that outlives the call.
+        let rc = unsafe {
+            libc::unlinkat(
+                std::os::fd::AsRawFd::as_raw_fd(&destination.parent),
+                destination.leaf.as_ptr(),
+                libc::AT_REMOVEDIR,
+            )
+        };
+        if rc != 0 {
+            // ENOTEMPTY and anything else: stop, leave the rest alone.
+            return Ok(());
+        }
+        components.pop();
+    }
+    Ok(())
+}
+
 /// `clonefile`, whose `EEXIST` is native, with `CLONE_NOFOLLOW_ANY` so the
 /// kernel refuses a symlink anywhere in the path.
 ///
@@ -240,7 +357,11 @@ pub fn stream_verified(src: &Path, dest_root: &Path, relative: &Path) -> io::Res
     io::copy(&mut input, &mut file)?;
     file.sync_all()?;
 
-    let (src_len, src_hash) = size_and_hash(src)?;
+
+    // Hashed through the descriptor the copy was read from, not by
+    // re-opening the path: otherwise the verify reads the payload twice and
+    // confirms a name rather than the bytes that were written.
+    let (src_len, src_hash) = hash_open_file(&mut input)?;
     let (tmp_len, tmp_hash) = hash_open_file(&mut file)?;
     if src_len != tmp_len || src_hash != tmp_hash {
         // `temp` unlinks itself on drop.
@@ -362,12 +483,6 @@ fn hex(bytes: &[u8]) -> String {
         let _ = write!(s, "{b:02x}");
         s
     })
-}
-
-/// Streams rather than reading the file in: sources here reach gigabytes.
-fn size_and_hash(path: &Path) -> io::Result<(u64, String)> {
-    let mut file = std::fs::File::open(path)?;
-    hash_open_file(&mut file)
 }
 
 /// Reads `SF_DATALESS` in `st_flags`, never `st_blocks == 0`, which

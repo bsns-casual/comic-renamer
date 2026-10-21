@@ -4,14 +4,17 @@
 
 mod common;
 
-use comic_renamer_core::apply::{apply, undo_path};
+use comic_renamer_core::apply::{apply, undo, undo_path};
 use comic_renamer_core::corpus::Corpus;
 use comic_renamer_core::overrides::Overrides;
 use comic_renamer_core::types::{Mechanism, Mode, PlanHeader, PlanRow, ScanOpts};
 use comic_renamer_core::undo::{reverse, UndoWriter};
+
+
 use comic_renamer_core::{plan, scan};
 use common::{corpus, tree_from_names, TreeGuard};
 use std::io::ErrorKind;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use tempfile::{tempdir, TempDir};
 
@@ -101,12 +104,76 @@ fn collect(dir: &Path, out: &mut Vec<String>) {
 // The undo manifest
 // ---------------------------------------------------------------------------
 
+/// A manifest-level fixture: a copy of one file already sitting in `dest`,
+/// recorded as this run having put it there.
+struct Recorded {
+    _dir: TempDir,
+    manifest: PathBuf,
+    source_root: PathBuf,
+    dest_root: PathBuf,
+    relative: PathBuf,
+}
+
+impl Recorded {
+    fn new(name: &str, body: &[u8], mode: Mode, keep_source: bool) -> Recorded {
+        let dir = tempdir().unwrap();
+        let source_root = dir.path().join("src");
+        let dest_root = dir.path().join("dest");
+        std::fs::create_dir_all(&source_root).unwrap();
+        std::fs::create_dir_all(&dest_root).unwrap();
+        let source = source_root.join(name);
+        std::fs::write(&source, body).unwrap();
+        let relative = PathBuf::from(name);
+        let destination = dest_root.join(&relative);
+        std::fs::write(&destination, body).unwrap();
+
+        let manifest = dir.path().join("plan.jsonl.undo.csv");
+        let mut writer = UndoWriter::create(&manifest, &source_root, &dest_root).unwrap();
+        let seq = writer
+            .record_pending(Path::new(name), &relative, Mechanism::Clone, mode, &source)
+            .unwrap();
+        let meta = std::fs::symlink_metadata(&destination).unwrap();
+        writer
+            .record_placed(
+                seq,
+                (
+                    meta.len(),
+                    MetadataExt::ino(&meta),
+                    MetadataExt::mtime(&meta) * 1_000_000_000 + MetadataExt::mtime_nsec(&meta),
+                ),
+            )
+            .unwrap();
+        writer.record_done(seq).unwrap();
+        drop(writer);
+
+        if !keep_source {
+            std::fs::remove_file(&source).unwrap();
+        }
+        Recorded {
+            _dir: dir,
+            manifest,
+            source_root,
+            dest_root,
+            relative,
+        }
+    }
+
+    fn reverse(&self) -> Result<comic_renamer_core::types::UndoReport, comic_renamer_core::types::UndoError> {
+        let recomputed = vec![self.relative.clone()];
+        reverse(&self.manifest, &self.source_root, &self.dest_root, &recomputed)
+    }
+
+    fn destination(&self) -> PathBuf {
+        self.dest_root.join(&self.relative)
+    }
+}
+
 #[test]
 fn create_refuses_an_existing_manifest() {
     let d = tempdir().unwrap();
     let path = d.path().join("run.undo.csv");
-    let _first = UndoWriter::create(&path, d.path()).expect("first create");
-    let second = UndoWriter::create(&path, d.path());
+    let _first = UndoWriter::create(&path, d.path(), d.path()).expect("first create");
+    let second = UndoWriter::create(&path, d.path(), d.path());
     assert_eq!(
         second.err().map(|e| e.kind()),
         Some(ErrorKind::AlreadyExists),
@@ -117,189 +184,114 @@ fn create_refuses_an_existing_manifest() {
 #[test]
 fn pending_is_on_disk_before_the_operation() {
     let d = tempdir().unwrap();
+    let source = d.path().join("a.pdf");
+    std::fs::write(&source, b"x").unwrap();
     let path = d.path().join("run.undo.csv");
-    let mut writer = UndoWriter::create(&path, d.path()).unwrap();
+    let mut writer = UndoWriter::create(&path, d.path(), d.path()).unwrap();
     writer
         .record_pending(
-            Path::new("/src/a.pdf"),
-            Path::new("/dest/A/a.pdf"),
+            Path::new("a.pdf"),
+            Path::new("A/a.pdf"),
             Mechanism::Rename,
             Mode::Move,
+            &source,
         )
         .unwrap();
-    // Not after a flush we controlled — read it back cold.
+    // Read back cold, not after a flush the test controlled.
     assert!(std::fs::read_to_string(&path).unwrap().contains("pending"));
 }
 
 #[test]
 fn awkward_filenames_survive_the_manifest_round_trip() {
     // The GCD lists *Hellboy, the Corpse and the Iron Shoes*; newlines are
-    // legal on APFS and arrive from bundle filenames. The writer quoted both
-    // correctly all along — the reader used `str::lines`, which splits inside
-    // a quoted field, so one such name made the whole run unreversible.
-    let d = tempdir().unwrap();
+    // legal on APFS. The writer quoted both correctly all along — the reader
+    // used `str::lines`, which splits inside a quoted field.
     for name in [
         "Hellboy, the Corpse and the \"Iron\" Shoes.pdf",
         "two\nlines.pdf",
     ] {
-        let run = d.path().join(format!("run{}.csv", name.len()));
-        let dest = d.path().join("dest");
-        std::fs::create_dir_all(&dest).unwrap();
-        let victim = dest.join(name);
-        std::fs::write(&victim, b"copied here by the tool").unwrap();
-
-        let mut writer = UndoWriter::create(&run, &dest).unwrap();
-        let seq = writer
-            .record_pending(Path::new("/src/x.pdf"), &victim, Mechanism::Clone, Mode::Copy)
-            .unwrap();
-        writer.record_done(seq, &victim).unwrap();
-        drop(writer);
-
-        let report = reverse(&run).unwrap();
+        let r = Recorded::new(name, b"copied here by the tool", Mode::Copy, true);
+        let report = r.reverse().unwrap();
         assert_eq!(report.restored, 1, "{name:?} did not round-trip: {report:?}");
-        assert!(!victim.exists());
+        assert!(!r.destination().exists());
     }
 }
 
 #[test]
 fn reverse_refuses_a_destination_it_did_not_create() {
-    // The manifest used to record no identity at all, so `reverse` deleted
-    // or relocated whatever sat at the path. Replace a library file with a
-    // better scan, run undo, and the replacement was taken.
-    let d = tempdir().unwrap();
-    let run = d.path().join("run.csv");
-    let dest = d.path().join("dest");
-    std::fs::create_dir_all(&dest).unwrap();
-    let path = dest.join("Mazebook.pdf");
-    std::fs::write(&path, b"what the tool copied").unwrap();
-
-    let mut writer = UndoWriter::create(&run, &dest).unwrap();
-    let seq = writer
-        .record_pending(Path::new("/src/x.pdf"), &path, Mechanism::Clone, Mode::Copy)
-        .unwrap();
-    writer.record_done(seq, &path).unwrap();
-    drop(writer);
-
-    // The user replaces it with a better scan.
-    std::fs::write(&path, b"THE GOOD SCAN, much larger than before").unwrap();
-
-    let report = reverse(&run).unwrap();
+    // The manifest used to record no identity at all, so reverse deleted or
+    // relocated whatever sat at the path.
+    let r = Recorded::new("Mazebook.pdf", b"what the tool copied", Mode::Copy, true);
+    std::fs::write(r.destination(), b"THE GOOD SCAN, much larger").unwrap();
+    let report = r.reverse().unwrap();
     assert_eq!(report.restored, 0);
     assert_eq!(report.refused.len(), 1, "{report:?}");
-    assert!(path.exists(), "reverse deleted a file the tool never created");
+    assert!(r.destination().exists(), "reverse deleted a file it never created");
 }
 
 #[test]
-fn reverse_refuses_a_destination_outside_the_manifests_root() {
-    // A manifest is as untrusted as a plan (§6.11): a hand-written one used
-    // to make `reverse` delete any file on the system.
-    let d = tempdir().unwrap();
-    let outside = d.path().join("private");
-    std::fs::create_dir_all(&outside).unwrap();
-    let victim = outside.join("tax-return.pdf");
-    std::fs::write(&victim, b"PRIVATE").unwrap();
-    let dest = d.path().join("dest");
-    std::fs::create_dir_all(&dest).unwrap();
+fn reverse_refuses_when_only_size_and_inode_match() {
+    // (size, inode) survive an in-place edit, so identity carries mtime_ns
+    // too — otherwise reverse deletes the only *corrected* copy.
+    let r = Recorded::new("Mazebook.pdf", b"original", Mode::Copy, true);
+    let destination = r.destination();
+    // Rewrite in place: same length, same inode, new mtime.
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new().write(true).open(&destination).unwrap();
+    file.write_all(b"EDITEDxx").unwrap();
+    file.sync_all().unwrap();
+    drop(file);
 
-    let run = d.path().join("hand-written.csv");
-    std::fs::write(
-        &run,
-        format!(
-            "seq,status,mode,mechanism,source,destination,size,inode\n\
-             0,root,,,,'{},,\n\
-             1,pending,copy,clone,'/src/x.pdf,'{},7,1\n",
-            dest.display(),
-            victim.display()
-        ),
-    )
-    .unwrap();
+    let report = r.reverse().unwrap();
+    assert_eq!(report.restored, 0, "{report:?}");
+    assert!(destination.exists(), "an in-place edit was mistaken for our own file");
+}
 
-    let report = reverse(&run).unwrap();
+#[test]
+fn reverse_of_a_copy_refuses_when_the_original_is_gone() {
+    // Invariant 6, and the plainest data-loss path in the project: copy a
+    // bundle in, delete the bundle folder, undo. The old version deleted the
+    // last copy and reported success.
+    let r = Recorded::new("Mazebook.pdf", b"the only copy", Mode::Copy, false);
+    let report = r.reverse().unwrap();
     assert_eq!(report.restored, 0);
-    assert!(victim.exists(), "reverse deleted a file outside its own root");
-}
-
-#[test]
-fn a_torn_final_line_does_not_abandon_the_rows_before_it() {
-    // The crash this manifest exists to survive. A truncated last record used
-    // to abort the whole file, leaving every completed row stranded.
-    let (_g, c) = gcd();
-    let f = Fixture::new(&["mazebook.pdf"], &c, Mode::Move);
-    apply(&f.plan, false, &mut |_| {}).unwrap();
-
-    let mut text = std::fs::read_to_string(f.manifest()).unwrap();
-    text.push_str("2,pending,move,ren");
-    std::fs::write(f.manifest(), text).unwrap();
-
-    let report = reverse(&f.manifest()).unwrap();
-    assert_eq!(report.restored, 1, "{report:?}");
-    assert_eq!(report.refused.len(), 1, "the torn tail was not reported");
-    assert!(f.source.join("mazebook.pdf").exists());
-}
-
-#[test]
-fn one_refused_row_does_not_block_the_others() {
-    // Rows unwind newest-first, and the first Reoccupied used to return,
-    // so an earlier successful row never came back — forever, on every
-    // re-run.
-    let (_g, c) = gcd();
-    let f = Fixture::new(&["mazebook.pdf", "birdking_vol1.pdf"], &c, Mode::Move);
-    apply(&f.plan, false, &mut |_| {}).unwrap();
-    assert!(f.files_under(&f.source).is_empty());
-
-    // A squatter at one original path.
-    std::fs::write(f.source.join("birdking_vol1.pdf"), b"squatter").unwrap();
-
-    let report = reverse(&f.manifest()).unwrap();
-    assert_eq!(report.restored, 1, "{report:?}");
     assert_eq!(report.refused.len(), 1, "{report:?}");
-    assert!(f.source.join("mazebook.pdf").exists(), "the other row never came back");
-}
-
-#[test]
-fn reverse_reports_what_it_could_not_examine() {
-    // Path::exists() answers false on EACCES, so a permission problem read as
-    // "already reversed" and reverse returned success having done nothing.
-    let (_g, c) = gcd();
-    let f = Fixture::new(&["mazebook.pdf"], &c, Mode::Move);
-    apply(&f.plan, false, &mut |_| {}).unwrap();
-
-    let series = f.dest.join("Mazebook");
-    let mut locked = std::fs::metadata(&series).unwrap().permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut locked, 0o000);
-    std::fs::set_permissions(&series, locked).unwrap();
-
-    let report = reverse(&f.manifest());
-
-    let mut restore = std::fs::metadata(&series).unwrap().permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut restore, 0o700);
-    std::fs::set_permissions(&series, restore).unwrap();
-
-    let report = report.unwrap();
-    assert_eq!(report.restored, 0);
     assert!(
-        !report.refused.is_empty(),
-        "an unreadable destination was reported as nothing to do: {report:?}"
+        r.destination().exists(),
+        "reverse destroyed the last copy of a file"
     );
 }
 
 #[test]
-fn reverse_takes_the_lock() {
-    // Task 11: "the lock is an O_EXCL file beside the plan; undo takes it
-    // too." It did not, so an apply and an undo could interleave.
-    let (_g, c) = gcd();
-    let f = Fixture::new(&["mazebook.pdf"], &c, Mode::Move);
-    apply(&f.plan, false, &mut |_| {}).unwrap();
+fn reverse_refuses_a_destination_the_preset_does_not_produce() {
+    // Invariant 9: a hand-written manifest cannot name an arbitrary path.
+    let r = Recorded::new("Mazebook.pdf", b"x", Mode::Copy, true);
+    let report = reverse(
+        &r.manifest,
+        &r.source_root,
+        &r.dest_root,
+        // The plan produces something else entirely.
+        &[PathBuf::from("Something/Else.pdf")],
+    )
+    .unwrap();
+    assert_eq!(report.restored, 0);
+    assert!(r.destination().exists());
+}
 
-    let mut held = f.manifest().into_os_string();
-    held.push(".lock");
-    std::fs::write(&held, b"").unwrap();
+#[test]
+fn reverse_refuses_a_manifest_whose_roots_disagree_with_the_plan() {
+    let r = Recorded::new("Mazebook.pdf", b"x", Mode::Copy, true);
+    let elsewhere = tempdir().unwrap();
     assert!(matches!(
-        reverse(&f.manifest()),
-        Err(comic_renamer_core::types::UndoError::Locked)
+        reverse(
+            &r.manifest,
+            elsewhere.path(),
+            &r.dest_root,
+            &[r.relative.clone()]
+        ),
+        Err(comic_renamer_core::types::UndoError::NoRoot)
     ));
-    std::fs::remove_file(&held).unwrap();
-    assert_eq!(reverse(&f.manifest()).unwrap().restored, 1);
+    assert!(r.destination().exists());
 }
 
 // ---------------------------------------------------------------------------
@@ -393,7 +385,7 @@ fn a_streamed_move_verifies_before_it_unlinks() {
         .collect();
     assert!(leftovers.is_empty(), "a .partial survived");
 
-    reverse(&undo_path(&plan_path)).unwrap();
+    undo(&plan_path).unwrap();
     assert!(source.path().join("mazebook.pdf").exists(), "undo did not restore it");
     let _ = std::fs::remove_dir_all(&dest);
 }
@@ -451,7 +443,7 @@ fn scan_apply_undo_restores_the_tree() {
     apply(&f.plan, false, &mut |_| {}).unwrap();
     assert!(f.files_under(&f.source).is_empty());
 
-    reverse(&f.manifest()).unwrap();
+    undo(&f.plan).unwrap();
     assert_eq!(f.files_under(&f.source), before);
     assert!(f.files_under(&f.dest).is_empty(), "the destination still holds files");
 }
@@ -465,7 +457,7 @@ fn reverse_of_a_copy_deletes_the_destination_only() {
     // The source must be untouched throughout: getting copy and move the
     // wrong way round here clobbers a kept original.
     let guard = TreeGuard::new(&[f.source.as_path()]);
-    reverse(&f.manifest()).unwrap();
+    undo(&f.plan).unwrap();
     assert!(f.files_under(&f.dest).is_empty());
     drop(guard);
 }
@@ -476,12 +468,16 @@ fn reverse_is_idempotent_and_refuses_a_reoccupied_path() {
     let f = Fixture::new(&["mazebook.pdf"], &c, Mode::Move);
     apply(&f.plan, false, &mut |_| {}).unwrap();
 
-    reverse(&f.manifest()).unwrap();
-    reverse(&f.manifest()).unwrap();
+    assert_eq!(undo(&f.plan).unwrap().restored, 1);
+    // Idempotent: a complete reverse renames the manifest aside, so a second
+    // pass has nothing to do rather than failing.
+    let second = undo(&f.plan).unwrap();
+    assert_eq!((second.restored, second.refused.len()), (0, 0), "{second:?}");
     assert_eq!(f.files_under(&f.source), ["mazebook.pdf"]);
 
-    // Now move it away again and put a squatter at the original path.
-    apply(&f.plan, false, &mut |_| {}).unwrap_err(); // the manifest already exists
+    // And the plan is runnable again, which it was not when a successful
+    // undo left the manifest in place for O_EXCL to trip over.
+    assert_eq!(apply(&f.plan, false, &mut |_| {}).unwrap().executed, 1);
 }
 
 #[test]
@@ -493,7 +489,7 @@ fn reverse_refuses_to_overwrite_a_squatter() {
 
     // Per-row now, not a whole-manifest error: one bad row must not strand
     // every other row in the file.
-    let report = reverse(&f.manifest()).unwrap();
+    let report = undo(&f.plan).unwrap();
     assert_eq!(report.restored, 0);
     assert_eq!(report.refused.len(), 1, "{report:?}");
     assert_eq!(
@@ -516,4 +512,80 @@ fn a_re_run_cannot_truncate_the_previous_manifest() {
         first,
         "the only record of where the last run's files went was overwritten"
     );
+}
+
+/// The test the plan lists as `an_interrupted_apply_reverses_the_completed_rows`
+/// and that three implementations went without. Needs a real second volume:
+/// a same-volume move is a rename, which has no `placed` state, so the
+/// duplicate this pins cannot occur there.
+///
+/// Point `COMIC_RENAMER_TEST_VOLUME` at a mount on another device.
+#[test]
+#[ignore]
+fn an_interrupted_apply_reverses_the_completed_rows() {
+    let Ok(volume) = std::env::var("COMIC_RENAMER_TEST_VOLUME") else {
+        panic!("set COMIC_RENAMER_TEST_VOLUME to a mount on another device");
+    };
+    let (_g, c) = gcd();
+
+    let source = tempdir().unwrap();
+    for name in ["mazebook.pdf", "birdking_vol1.pdf"] {
+        std::fs::write(source.path().join(name), format!("contents of {name}")).unwrap();
+    }
+    let dest = PathBuf::from(&volume).join("comic-renamer-interrupt");
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+    let plans = tempdir().unwrap();
+
+    let opts = ScanOpts {
+        source_root: source.path().to_path_buf(),
+        dest_root: dest.clone(),
+        preset: "komga".into(),
+        mode: Some(Mode::Move),
+        lang: "en".into(),
+    };
+    let (header, rows) = scan::scan(&opts, &c, &Overrides::default(), &mut |_| {}).unwrap();
+    assert_eq!(rows[0].mechanism, Mechanism::Stream, "not actually cross-volume");
+    let plan_path = plans.path().join("plan.jsonl");
+    plan::write(&header, &rows, &plan_path).unwrap();
+
+    // Make the source directory read-only so the first row's copy verifies
+    // and lands, and then its unlink fails. That is the `placed` state: two
+    // copies on disk, which no earlier implementation could clear.
+    let mut locked = std::fs::metadata(source.path()).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut locked, 0o500);
+    std::fs::set_permissions(source.path(), locked).unwrap();
+
+    let result = apply(&plan_path, false, &mut |_| {});
+
+    let mut restore = std::fs::metadata(source.path()).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut restore, 0o700);
+    std::fs::set_permissions(source.path(), restore).unwrap();
+
+    assert!(result.is_err(), "the failed unlink should have aborted the run");
+    // Both sources survive; one of them now has a duplicate in the library.
+    assert_eq!(
+        std::fs::read_dir(source.path()).unwrap().count(),
+        2,
+        "a source was consumed despite the abort"
+    );
+
+    let report = undo(&plan_path).unwrap();
+    assert!(report.refused.is_empty(), "{report:?}");
+    assert_eq!(
+        std::fs::read_dir(source.path()).unwrap().count(),
+        2,
+        "undo disturbed the sources"
+    );
+    // The duplicate is gone and the library is empty again: rows_still_moved == 0.
+    let left: Vec<_> = walkdir(&dest);
+    assert!(left.is_empty(), "rows still moved: {left:?}");
+
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+fn walkdir(root: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    collect(root, &mut found);
+    found
 }

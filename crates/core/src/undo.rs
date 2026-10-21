@@ -1,19 +1,33 @@
-//! Append-only. A `pending` row lands before the operation is attempted and a
-//! `done` row after; `reverse` decides from the filesystem, not the status.
-//! In-place status rewriting is impossible anyway — "pending" is 7 bytes and
-//! "done" is 4. RFC 4180 quoting, doubled embedded quotes.
+//! Append-only undo manifest and `reverse`.
 //!
-//! Rewritten after an adversarial review found six structural faults. Each
-//! one is named at the code that fixes it, because every one of them was a
+//! Written to `docs/specs/2026-10-21-undo-and-reverse-design.md`, which exists
+//! because two earlier implementations of this file failed adversarial review.
+//! The invariants it states are the ones to preserve; the comments below name
+//! which bug each one replaces, because every one of them was a
 //! reasonable-looking shortcut.
 
-use crate::fsops::{rename_excl, stream_verified};
+use crate::fsops::{
+    ensure_root, prune_empty_dirs, remove_at, rename_excl_at, stat_at, stream_verified,
+};
 use crate::types::{Mechanism, Mode, UndoError, UndoReport};
 use std::io::{self, Write};
 use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
-const COLUMNS: &str = "seq,status,mode,mechanism,source,destination,size,inode";
+const COLUMNS: &str = "seq,status,mode,mechanism,source_name,dest_relative,size,inode,mtime_ns";
+
+/// `(size, inode, mtime_ns)`. All three, because size and inode alone survive
+/// an in-place edit — and the duplicate branch would then delete the only
+/// *corrected* copy of a file the user had fixed.
+type Identity = (u64, u64, i64);
+
+fn identity_of(meta: &std::fs::Metadata) -> Identity {
+    (
+        meta.len(),
+        meta.ino(),
+        meta.mtime() * 1_000_000_000 + meta.mtime_nsec(),
+    )
+}
 
 pub struct UndoWriter {
     file: std::fs::File,
@@ -22,72 +36,75 @@ pub struct UndoWriter {
 
 impl UndoWriter {
     /// `O_EXCL`: re-running a plan must not truncate the previous run's
-    /// manifest, the only record of where those files went.
-    ///
-    /// `dest_root` is recorded because `reverse` acts destructively on paths
-    /// it reads back, and a manifest is as untrusted as a plan (§6.11). A
-    /// hand-written two-line manifest used to make `reverse` delete any file
-    /// on the system.
-    pub fn create(path: &Path, dest_root: &Path) -> io::Result<UndoWriter> {
+    /// manifest, the only record of where those files went. (The *lock* uses
+    /// `flock` instead — see `apply::Lock`.)
+    pub fn create(path: &Path, source_root: &Path, dest_root: &Path) -> io::Result<UndoWriter> {
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(path)?;
         writeln!(file, "{COLUMNS}")?;
-        writeln!(file, "0,root,,,,{},,", path_field(dest_root))?;
+        writeln!(
+            file,
+            "0,roots,,,{},{},,,",
+            path_field(source_root),
+            path_field(dest_root)
+        )?;
         file.sync_all()?;
-        // `sync_all` makes the contents durable, not the name. Without an
-        // fsync on the containing directory a power loss can leave the
-        // manifest's own directory entry missing.
+        // `sync_all` makes the contents durable, not the name.
         sync_parent(path)?;
         Ok(UndoWriter { file, seq: 0 })
     }
 
-    /// Returns the row's sequence number, for the matching `record_done`.
-    ///
-    /// Flushed and `fsync`ed before returning: the caller attempts the
-    /// operation next, and a manifest entry still in a buffer when the power
-    /// goes is a file nobody can find again.
+    /// About to attempt. Carries the source's identity, which is all that is
+    /// knowable before the operation.
     pub fn record_pending(
         &mut self,
-        src: &Path,
-        dst: &Path,
+        source_name: &Path,
+        dest_relative: &Path,
         mechanism: Mechanism,
         mode: Mode,
+        source: &Path,
     ) -> io::Result<u64> {
         self.seq += 1;
-        // The source's identity, which is all that is knowable before the
-        // operation. A rename preserves the inode, so for that mechanism this
-        // alone identifies the destination afterwards.
-        let (size, inode) = match std::fs::symlink_metadata(src) {
-            Ok(meta) => (meta.len().to_string(), meta.ino().to_string()),
-            Err(_) => (String::new(), String::new()),
-        };
+        let meta = std::fs::symlink_metadata(source)?;
+        let (size, inode, mtime) = identity_of(&meta);
         writeln!(
             self.file,
-            "{},pending,{},{},{},{},{size},{inode}",
+            "{},pending,{},{},{},{},{size},{inode},{mtime}",
             self.seq,
             field(mode_name(mode)),
             field(mechanism_name(mechanism)),
-            path_field(src),
-            path_field(dst),
+            path_field(source_name),
+            path_field(dest_relative),
         )?;
-        self.file.sync_all()?;
-        Ok(self.seq)
+        self.file.sync_all()
+            .map(|()| self.seq)
     }
 
-    /// The destination's identity, now that it exists. `reverse` refuses any
-    /// destination that does not match — without it, `reverse` deleted or
-    /// relocated whatever happened to be at the path, including a file the
-    /// tool never created.
-    pub fn record_done(&mut self, seq: u64, destination: &Path) -> io::Result<()> {
-        let (size, inode) = match std::fs::symlink_metadata(destination) {
-            Ok(meta) => (meta.len().to_string(), meta.ino().to_string()),
-            Err(_) => (String::new(), String::new()),
-        };
-        writeln!(self.file, "{seq},done,,,,,{size},{inode}")?;
-        self.file.sync_all()?;
-        Ok(())
+    /// Attempted, created nothing. Without it a bare `pending` is ambiguous
+    /// between "crashed mid-operation" and "refused at the syscall", and
+    /// `reverse` guessed between them by matching on size — which is what
+    /// reopened the two worst findings.
+    pub fn record_failed(&mut self, seq: u64) -> io::Result<()> {
+        writeln!(self.file, "{seq},failed,,,,,,,")?;
+        self.file.sync_all()
+    }
+
+    /// A new inode exists at the destination and is verified. Written by
+    /// clone and stream in **both** modes, before any unlink.
+    ///
+    /// Never written with an empty identity: the same bytes would mean both
+    /// "this status carries none" and "the stat failed".
+    pub fn record_placed(&mut self, seq: u64, identity: Identity) -> io::Result<()> {
+        let (size, inode, mtime) = identity;
+        writeln!(self.file, "{seq},placed,,,,,{size},{inode},{mtime}")?;
+        self.file.sync_all()
+    }
+
+    pub fn record_done(&mut self, seq: u64) -> io::Result<()> {
+        writeln!(self.file, "{seq},done,,,,,,,")?;
+        self.file.sync_all()
     }
 }
 
@@ -133,244 +150,340 @@ fn unprefix(value: &str) -> &str {
     value.strip_prefix('\'').unwrap_or(value)
 }
 
-/// `<manifest>.lock`. Task 11 says the lock is taken by `undo` too; it was
-/// not, so an `apply` and an `undo` of one plan could interleave.
-struct UndoLock {
-    path: PathBuf,
-}
-
-impl UndoLock {
-    fn acquire(manifest: &Path) -> Result<UndoLock, UndoError> {
-        let mut name = manifest.file_name().unwrap_or_default().to_os_string();
-        name.push(".lock");
-        let path = manifest.with_file_name(name);
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(_) => Ok(UndoLock { path }),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(UndoError::Locked),
-            Err(e) => Err(UndoError::Io(e)),
-        }
-    }
-}
-
-impl Drop for UndoLock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Status {
+    Pending,
+    Failed,
+    Placed,
+    Done,
 }
 
 #[derive(Clone, Debug)]
-struct Entry {
+struct Row {
     seq: u64,
+    status: Status,
     mode: Mode,
     mechanism: Mechanism,
-    source: PathBuf,
-    destination: PathBuf,
-    /// The source as it was before the operation.
-    source_identity: Option<(u64, u64)>,
-    /// The destination as it was after, when a `done` row was reached.
-    destination_identity: Option<(u64, u64)>,
+    source_name: PathBuf,
+    dest_relative: PathBuf,
+    source_identity: Option<Identity>,
+    placed_identity: Option<Identity>,
 }
 
-impl Entry {
-    /// Is the file at the destination the one this row put there?
+impl Row {
+    /// The identity the destination must have for this row to own it.
     ///
-    /// A `done` row carries the destination's own identity and is exact. A
-    /// `pending`-only row is the crash case: a rename preserves the inode, so
-    /// the source's identity still answers it; a clone or a stream changes
-    /// the inode, leaving only the size.
-    fn owns(&self, actual: (u64, u64)) -> bool {
-        if let Some(recorded) = self.destination_identity {
-            return actual == recorded;
-        }
-        match (self.source_identity, self.mechanism) {
-            (Some(recorded), Mechanism::Rename) => actual == recorded,
-            (Some((size, _)), _) => actual.0 == size,
-            (None, _) => false,
+    /// Exact, or `None` and the row is refused. No arm that widens the match:
+    /// the size-only fallback an earlier version used fired far more often
+    /// than its author intended, because comics from one bundle are
+    /// byte-identical.
+    fn expected(&self) -> Option<Identity> {
+        match (self.status, self.mechanism) {
+            (Status::Placed | Status::Done, _) => self.placed_identity.or(
+                // A rename moves the inode, so the source's identity still
+                // describes the destination exactly.
+                match self.mechanism {
+                    Mechanism::Rename => self.source_identity,
+                    _ => None,
+                },
+            ),
+            // Interrupted mid-operation. Only a rename can still be identified.
+            (Status::Pending, Mechanism::Rename) => self.source_identity,
+            (Status::Pending, _) => None,
+            (Status::Failed, _) => None,
         }
     }
 }
 
-/// `reverse` of a copy **deletes the destination**; of a move it **moves it
-/// back**. Backwards clobbers a kept original. Strips the `'` prefix, refuses
-/// a reoccupied original, and is idempotent.
+/// Reverses a run. Takes the **plan**, deriving the manifest beside it, so it
+/// holds the same lock `apply` does and the plan's roots anchor every path
+/// the manifest names (D38).
 ///
-/// Every row is independent. A row it cannot reverse is reported and the rest
-/// continue — aborting the manifest on the first problem left every earlier,
-/// successful row stranded, and re-running hit the same row forever.
-pub fn reverse(manifest: &Path) -> Result<UndoReport, UndoError> {
-    let _lock = UndoLock::acquire(manifest)?;
-    let (root, entries, torn) = read_manifest(manifest)?;
+/// Every row is independent, including rows that fail to parse: aborting the
+/// manifest on the first problem left every earlier successful row stranded,
+/// and re-running hit the same row forever.
+/// `apply::undo` is the entry point: it takes the plan, holds the lock,
+/// canonicalises the roots and recomputes the destinations. This is the
+/// manifest-level operation it calls.
+pub fn reverse(
+    manifest: &Path,
+    source_root: &Path,
+    dest_root: &Path,
+    recomputed: &[PathBuf],
+) -> Result<UndoReport, UndoError> {
+    let (recorded_source, recorded_dest, rows, torn) = read_manifest(manifest)?;
+
+    // The manifest's own roots are a cross-check, not the anchor. Exact
+    // identity buys nothing if whoever edits the manifest also supplies the
+    // roots those identities are checked against.
+    if recorded_source != source_root || recorded_dest != dest_root {
+        return Err(UndoError::NoRoot);
+    }
+
     let mut report = UndoReport::default();
     if let Some(tail) = torn {
-        // A torn final line is the crash this manifest exists for. It used to
-        // abandon every completed row in the file.
         report
             .refused
             .push(format!("ignored an incomplete final record: {tail}"));
     }
 
-    // Newest first: a run's effects unwind in the order they were applied.
-    for entry in entries.into_iter().rev() {
-        match reverse_one(&entry, &root) {
+    for row in rows.into_iter().rev() {
+        match reverse_one(&row, source_root, dest_root, recomputed) {
             Ok(true) => report.restored += 1,
             Ok(false) => report.skipped += 1,
-            Err(why) => report.refused.push(format!("row {}: {why}", entry.seq)),
+            Err(why) => report.refused.push(format!("row {}: {why}", row.seq)),
         }
     }
     Ok(report)
 }
 
-fn reverse_one(entry: &Entry, root: &Path) -> Result<bool, String> {
-    if !entry.destination.starts_with(root) {
+fn reverse_one(
+    row: &Row,
+    source_root: &Path,
+    dest_root: &Path,
+    recomputed: &[PathBuf],
+) -> Result<bool, String> {
+    if row.status == Status::Failed {
+        return Ok(false);
+    }
+    // Invariant 2 applied to reverse: a destination is only recognised if the
+    // preset still produces it. Without this a hand-written manifest names an
+    // arbitrary relative path.
+    if !recomputed.iter().any(|p| p == &row.dest_relative) {
         return Err(format!(
-            "destination {} is outside the manifest's root",
-            entry.destination.display()
+            "{} is not a destination this plan produces",
+            row.dest_relative.display()
         ));
     }
+    plain_relative(&row.dest_relative)?;
+    let source_name = single_component(&row.source_name)?;
 
-    // `Path::exists()` answers false on EACCES, so a permission problem used
-    // to read as "already reversed" and `reverse` reported success.
-    let meta = match std::fs::symlink_metadata(&entry.destination) {
+    // stat through a walked parent descriptor, so the check and the deletion
+    // that follows see the same directory.
+    let meta = match stat_at(dest_root, &row.dest_relative) {
         Ok(meta) => meta,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(format!("cannot examine {}: {e}", entry.destination.display())),
+        Err(e) => {
+            // `Path::exists()` answers false on EACCES, so a permission
+            // problem used to read as "already reversed".
+            return Err(format!(
+                "cannot examine {}: {e}",
+                row.dest_relative.display()
+            ));
+        }
     };
-
-    if !entry.owns((meta.len(), meta.ino())) {
+    let expected = row
+        .expected()
+        .ok_or_else(|| "no exact identity was recorded for this row".to_string())?;
+    if identity_of(&meta) != expected {
         return Err(format!(
             "{} is not the file this run put there",
-            entry.destination.display()
+            row.dest_relative.display()
         ));
     }
 
-    match entry.mode {
-        // The original was kept, so there is nothing to put back.
+    let source = stat_at(source_root, source_name);
+    match row.mode {
         Mode::Copy => {
-            std::fs::remove_file(&entry.destination).map_err(|e| e.to_string())?;
-            Ok(true)
-        }
-        Mode::Move => {
-            let parent = entry
-                .source
-                .parent()
-                .ok_or_else(|| "source has no parent".to_string())?;
-            let name = Path::new(
-                entry
-                    .source
-                    .file_name()
-                    .ok_or_else(|| "source has no filename".to_string())?,
-            );
-
-            if let Ok(existing) = std::fs::symlink_metadata(&entry.source) {
-                // The move's own copy is back already, so this is idempotent
-                // rather than a conflict.
-                if entry.owns((existing.len(), existing.ino())) {
-                    return Ok(false);
-                }
-                // Both the destination and the original exist. For a move
-                // that means the unlink failed after a verified copy, leaving
-                // a duplicate; removing the copy is provably safe and is the
-                // only way to clear it. Anything else is a squatter.
-                if entry.mechanism != Mechanism::Rename
-                    && entry.source_identity == Some((existing.len(), existing.ino()))
-                {
-                    std::fs::remove_file(&entry.destination).map_err(|e| e.to_string())?;
-                    return Ok(true);
-                }
-                return Err(format!("{} is occupied", entry.source.display()));
-            }
-
-            match rename_excl(&entry.destination, parent, name) {
-                Ok(()) => Ok(true),
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                    Err(format!("{} is occupied", entry.source.display()))
-                }
-                // A cross-volume move was executed by streaming, so it has to
-                // be reversed by streaming. Reversing it with `rename` failed
-                // EXDEV on exactly the runs where the move was most expensive.
-                Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
-                    stream_verified(&entry.destination, parent, name).map_err(|e| e.to_string())?;
-                    std::fs::remove_file(&entry.destination).map_err(|e| e.to_string())?;
+            // Invariant 6. Copy a bundle in, delete the bundle folder, undo:
+            // removing the destination would destroy the last copy, and an
+            // earlier version did exactly that and reported success.
+            match &source {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Err(format!(
+                    "the original {} is gone; removing {} would destroy the last copy",
+                    source_name.display(),
+                    row.dest_relative.display()
+                )),
+                Err(e) => Err(format!("cannot examine the original: {e}")),
+                Ok(meta) if row.source_identity != Some(identity_of(meta)) => Err(format!(
+                    "the original {} is not what this run copied from",
+                    source_name.display()
+                )),
+                Ok(_) => {
+                    remove_at(dest_root, &row.dest_relative).map_err(|e| e.to_string())?;
+                    prune_empty_dirs(dest_root, &row.dest_relative).map_err(|e| e.to_string())?;
                     Ok(true)
                 }
-                Err(e) => Err(e.to_string()),
             }
+        }
+        Mode::Move => match &source {
+            // The duplicate a failed unlink leaves. Gated on the status, not
+            // on identity: inferring it from the filesystem produced a branch
+            // that could never run.
+            Ok(_) if row.status == Status::Placed => {
+                remove_at(dest_root, &row.dest_relative).map_err(|e| e.to_string())?;
+                prune_empty_dirs(dest_root, &row.dest_relative).map_err(|e| e.to_string())?;
+                Ok(true)
+            }
+            Ok(meta) if row.source_identity == Some(identity_of(meta)) => Ok(false),
+            Ok(_) => Err(format!("{} is occupied", source_name.display())),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                // The common case is a user who deleted the emptied bundle
+                // folder; `ensure_parent` is a no-op for a single component.
+                ensure_root(source_root).map_err(|e| e.to_string())?;
+                let restore = rename_excl_at(
+                    dest_root,
+                    &row.dest_relative,
+                    source_root,
+                    Path::new(source_name),
+                );
+                match restore {
+                    Ok(()) => {
+                        prune_empty_dirs(dest_root, &row.dest_relative)
+                            .map_err(|e| e.to_string())?;
+                        Ok(true)
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                        Err(format!("{} is occupied", source_name.display()))
+                    }
+                    // A cross-volume move was executed by streaming, so it is
+                    // reversed by streaming. `rename` fails EXDEV on exactly
+                    // the runs where the move was most expensive.
+                    Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
+                        let from = dest_root.join(&row.dest_relative);
+                        stream_verified(&from, source_root, Path::new(source_name))
+                            .map_err(|e| e.to_string())?;
+                        match remove_at(dest_root, &row.dest_relative) {
+                            Ok(()) => {
+                                prune_empty_dirs(dest_root, &row.dest_relative)
+                                    .map_err(|e| e.to_string())?;
+                                Ok(true)
+                            }
+                            // Reported for what it is. The previous version
+                            // called this "occupied", pointing the user at
+                            // deleting the copy they had just recovered.
+                            Err(e) => Err(format!(
+                                "a duplicate remains at {}; the original was restored ({e})",
+                                row.dest_relative.display()
+                            )),
+                        }
+                    }
+                    Err(e) => Err(e.to_string()),
+                }
+            }
+            Err(e) => Err(format!("cannot examine the original: {e}")),
+        },
+    }
+}
+
+fn plain_relative(path: &Path) -> Result<(), String> {
+    if path.components().all(|c| matches!(c, Component::Normal(_))) && path.components().count() > 0
+    {
+        Ok(())
+    } else {
+        Err(format!("{} is not a plain relative path", path.display()))
+    }
+}
+
+fn single_component(path: &Path) -> Result<&Path, String> {
+    let mut components = path.components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => Ok(path),
+        _ => Err(format!("{} is not a single filename", path.display())),
+    }
+}
+
+type Parsed = (PathBuf, PathBuf, Vec<Row>, Option<String>);
+
+fn read_manifest(manifest: &Path) -> Result<Parsed, UndoError> {
+    let text = std::fs::read_to_string(manifest)?;
+    let (records, torn) = parse_records(&text);
+
+    let mut roots: Option<(PathBuf, PathBuf)> = None;
+    let mut rows: Vec<Row> = Vec::new();
+
+    for columns in records.iter().skip(1) {
+        if columns.iter().all(|c| c.is_empty()) {
+            continue;
+        }
+        // Short rows, unparseable sequences and unknown vocabulary are all
+        // per-row problems. Only a missing or duplicated roots record can
+        // refuse the whole file, because without it nothing can be anchored.
+        if columns.len() < 9 {
+            continue;
+        }
+        let identity = match (
+            columns[6].parse::<u64>(),
+            columns[7].parse::<u64>(),
+            columns[8].parse::<i64>(),
+        ) {
+            (Ok(size), Ok(inode), Ok(mtime)) => Some((size, inode, mtime)),
+            _ => None,
+        };
+        if columns[1] == "roots" {
+            if roots.is_some() {
+                return Err(UndoError::NoRoot);
+            }
+            roots = Some((
+                PathBuf::from(unprefix(&columns[4])),
+                PathBuf::from(unprefix(&columns[5])),
+            ));
+            continue;
+        }
+        let Ok(seq) = columns[0].parse::<u64>() else {
+            continue;
+        };
+        match columns[1].as_str() {
+            "pending" => {
+                let Some(mode) = parse_mode(&columns[2]) else { continue };
+                let Some(mechanism) = parse_mechanism(&columns[3]) else { continue };
+                rows.push(Row {
+                    seq,
+                    status: Status::Pending,
+                    mode,
+                    mechanism,
+                    source_name: PathBuf::from(unprefix(&columns[4])),
+                    dest_relative: PathBuf::from(unprefix(&columns[5])),
+                    source_identity: identity,
+                    placed_identity: None,
+                });
+            }
+            // Last status wins per seq; a status row with no pending is
+            // ignored rather than fatal.
+            "failed" => set_status(&mut rows, seq, Status::Failed, None),
+            "placed" => set_status(&mut rows, seq, Status::Placed, identity),
+            "done" => set_status(&mut rows, seq, Status::Done, None),
+            _ => continue,
+        }
+    }
+
+    let (source_root, dest_root) = roots.ok_or(UndoError::NoRoot)?;
+    Ok((source_root, dest_root, rows, torn))
+}
+
+fn set_status(rows: &mut [Row], seq: u64, status: Status, identity: Option<Identity>) {
+    if let Some(row) = rows.iter_mut().find(|r| r.seq == seq) {
+        row.status = status;
+        if identity.is_some() {
+            row.placed_identity = identity;
         }
     }
 }
 
-type Manifest = (PathBuf, Vec<Entry>, Option<String>);
-
-fn read_manifest(manifest: &Path) -> Result<Manifest, UndoError> {
-    let text = std::fs::read_to_string(manifest)?;
-    let (records, torn) = parse_records(&text);
-
-    let mut root: Option<PathBuf> = None;
-    let mut pending: Vec<Entry> = Vec::new();
-    let mut done: Vec<(u64, Option<(u64, u64)>)> = Vec::new();
-
-    for (index, columns) in records.iter().enumerate().skip(1) {
-        if columns.iter().all(|c| c.is_empty()) {
-            continue;
-        }
-        let fail = |message: &str| UndoError::Parse {
-            line: index + 1,
-            message: message.to_string(),
-        };
-        if columns.len() < 8 {
-            return Err(fail("expected eight columns"));
-        }
-        let identity = match (columns[6].parse::<u64>(), columns[7].parse::<u64>()) {
-            (Ok(size), Ok(inode)) => Some((size, inode)),
-            _ => None,
-        };
-        match columns[1].as_str() {
-            "root" => root = Some(PathBuf::from(unprefix(&columns[5]))),
-            "done" => done.push((
-                columns[0].parse().map_err(|_| fail("sequence is not a number"))?,
-                identity,
-            )),
-            "pending" => pending.push(Entry {
-                seq: columns[0].parse().map_err(|_| fail("sequence is not a number"))?,
-                mode: match columns[2].as_str() {
-                    "move" => Mode::Move,
-                    "copy" => Mode::Copy,
-                    other => return Err(fail(&format!("unknown mode {other:?}"))),
-                },
-                mechanism: match columns[3].as_str() {
-                    "rename" => Mechanism::Rename,
-                    "clone" => Mechanism::Clone,
-                    "stream" => Mechanism::Stream,
-                    other => return Err(fail(&format!("unknown mechanism {other:?}"))),
-                },
-                source: PathBuf::from(unprefix(&columns[4])),
-                destination: PathBuf::from(unprefix(&columns[5])),
-                source_identity: identity,
-                destination_identity: None,
-            }),
-            other => return Err(fail(&format!("unknown status {other:?}"))),
-        }
+fn parse_mode(value: &str) -> Option<Mode> {
+    match value {
+        "move" => Some(Mode::Move),
+        "copy" => Some(Mode::Copy),
+        _ => None,
     }
+}
 
-    for entry in &mut pending {
-        if let Some((_, identity)) = done.iter().find(|(seq, _)| *seq == entry.seq) {
-            entry.destination_identity = *identity;
-        }
+fn parse_mechanism(value: &str) -> Option<Mechanism> {
+    match value {
+        "rename" => Some(Mechanism::Rename),
+        "clone" => Some(Mechanism::Clone),
+        "stream" => Some(Mechanism::Stream),
+        _ => None,
     }
-    Ok((root.ok_or(UndoError::NoRoot)?, pending, torn))
 }
 
 /// RFC 4180 **records**, not lines. `str::lines` splits inside a quoted
 /// field, so a filename containing a newline — legal on APFS, and written
-/// correctly by the writer — made the whole run unreadable.
+/// correctly by the writer — made an entire run unreadable.
 ///
-/// Returns the complete records and, separately, any trailing fragment: a
-/// torn final line is the crash this file exists to survive, not a reason to
-/// abandon every record before it.
+/// A trailing fragment is returned separately: a torn final record is the
+/// crash this file exists to survive, not a reason to abandon the records
+/// before it.
 fn parse_records(text: &str) -> (Vec<Vec<String>>, Option<String>) {
     let mut records = Vec::new();
     let mut fields = Vec::new();
@@ -394,11 +507,9 @@ fn parse_records(text: &str) -> (Vec<Vec<String>>, Option<String>) {
             _ => current.push(c),
         }
     }
-    // Anything left was not terminated by a newline.
     if quoted || !current.is_empty() || !fields.is_empty() {
         fields.push(current);
-        let tail = fields.join(",");
-        return (records, Some(tail));
+        return (records, Some(fields.join(",")));
     }
     (records, None)
 }

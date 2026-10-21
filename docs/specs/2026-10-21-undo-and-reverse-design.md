@@ -291,9 +291,14 @@ implementation's did.
   than a name and reads the payload once.
 - `Lock` uses `flock(2)`.
 
-- `apply` writes `failed` on its error path, and `placed` after the
-  destination is verified for every mechanism that creates a new inode, in
-  both modes, before any unlink.
+- `apply` writes `placed` after the destination is verified, for every
+  mechanism that creates a new inode, in both modes, before any unlink.
+- `apply` writes `failed` on its error path **only when nothing was
+  created**. A failure after `placed` — a verified copy whose unlink then
+  failed — leaves the row at `placed`, because that is the record `reverse`
+  needs to clear the duplicate. Writing `failed` over it discards the one
+  piece of information the state depends on, and leaves the duplicate on disk
+  with `reverse` reporting the row as skipped.
 - `apply` runs `ensure_parent` *after* `record_pending`, so a created series
   directory is recorded rather than left behind.
 - `reverse` takes the plan path, not the manifest path, and derives the

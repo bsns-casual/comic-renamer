@@ -148,10 +148,26 @@ fn a_refused_run_moves_zero_files() {
 fn refuses_a_lock_held_by_another_run() {
     let (_g, c) = gcd();
     let f = Fixture::new(&["mazebook.pdf"], &c);
-    // Taken the way a concurrent run would take it.
-    std::fs::write(lock_path(&f.plan), b"").unwrap();
+    // Held the way a concurrent run holds it: an flock on the descriptor,
+    // not merely the existence of a file.
+    let held = comic_renamer_core::apply::Lock::acquire(&f.plan).unwrap();
     let _guard = TreeGuard::new(&f.roots());
     assert!(matches!(run(&f), Err(ApplyError::Locked)));
+    drop(held);
+    run(&f).unwrap();
+}
+
+#[test]
+fn a_lock_file_left_by_a_killed_run_does_not_block() {
+    // flock, not O_EXCL: the kernel releases the lock when its owner dies.
+    // An O_EXCL lock file survived a SIGKILL and had to be deleted by hand —
+    // and a crash is exactly when undo is needed, so the stale lock blocked
+    // the one recovery path.
+    let (_g, c) = gcd();
+    let f = Fixture::new(&["mazebook.pdf"], &c);
+    std::fs::write(lock_path(&f.plan), b"leftover from a killed run").unwrap();
+    let _guard = TreeGuard::new(&f.roots());
+    run(&f).unwrap();
 }
 
 #[test]
@@ -160,8 +176,8 @@ fn the_lock_is_released_when_the_run_ends() {
     let f = Fixture::new(&["mazebook.pdf"], &c);
     let _guard = TreeGuard::new(&f.roots());
     run(&f).unwrap();
-    assert!(!lock_path(&f.plan).exists(), "the lock outlived the run");
-    // So a second run is possible.
+    // A second run proves release; the file itself may persist, which is
+    // what makes a killed run recoverable.
     run(&f).unwrap();
 }
 
