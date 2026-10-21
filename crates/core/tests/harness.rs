@@ -4,6 +4,7 @@
 mod common;
 
 use common::{blocks, sparse_seek_write, sparse_truncate_only, zero_byte, TreeGuard};
+use std::os::unix::fs::MetadataExt;
 use tempfile::tempdir;
 
 #[test]
@@ -64,11 +65,57 @@ fn guard_fails_on_a_same_size_rewrite() {
 }
 
 #[test]
-fn guard_permits_a_declared_change() {
+fn guard_permits_a_declared_creation() {
     let d = tempdir().unwrap();
-    let g = TreeGuard::new(&[d.path()]).expect_changed(&[&d.path().join("ok")]);
+    let g = TreeGuard::new(&[d.path()]).expect_created(&[&d.path().join("ok")]);
     std::fs::write(d.path().join("ok"), b"x").unwrap();
     drop(g);
+}
+
+#[test]
+#[should_panic(expected = "expected created")]
+fn permitting_a_creation_does_not_permit_a_deletion() {
+    // The hole the old expect_changed had: a path named so the guard would
+    // tolerate it appearing became exempt from vanishing too.
+    let d = tempdir().unwrap();
+    let victim = d.path().join("victim");
+    std::fs::write(&victim, b"x").unwrap();
+    let g = TreeGuard::new(&[d.path()]).expect_created(&[&victim]);
+    std::fs::remove_file(&victim).unwrap();
+    drop(g);
+}
+
+#[test]
+#[should_panic(expected = "expected created, never appeared")]
+fn a_declared_creation_that_never_happens_fails() {
+    let d = tempdir().unwrap();
+    let _g = TreeGuard::new(&[d.path()]).expect_created(&[&d.path().join("promised")]);
+}
+
+#[test]
+fn guard_catches_a_clone_and_replace_that_preserves_mtime() {
+    // clonefile preserves mtime to the nanosecond, so a swap under a path is
+    // invisible to a fingerprint without the inode. This is the gap that
+    // mattered most in a project whose invariants are about inodes.
+    let d = tempdir().unwrap();
+    let path = d.path().join("f");
+    std::fs::write(&path, b"IDENTICAL").unwrap();
+    let before = std::fs::metadata(&path).unwrap();
+
+    let guard = TreeGuard::new(&[d.path()]);
+    let copy = d.path().join("tmp");
+    std::fs::write(&copy, b"IDENTICAL").unwrap();
+    filetime::set_file_mtime(&copy, filetime::FileTime::from_last_modification_time(&before))
+        .unwrap();
+    std::fs::rename(&copy, &path).unwrap();
+
+    let after = std::fs::metadata(&path).unwrap();
+    assert_ne!(before.ino(), after.ino(), "test did not actually swap the file");
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(guard)))
+            .is_err(),
+        "guard missed an identity swap"
+    );
 }
 
 #[test]

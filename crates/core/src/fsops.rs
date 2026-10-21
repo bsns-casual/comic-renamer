@@ -9,7 +9,7 @@ use std::ffi::CString;
 use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// `st_flags` bit set by the kernel on a cloud placeholder whose data lives
 /// only on the server (D25). Not exported by the `libc` crate.
@@ -23,12 +23,135 @@ fn cstring(path: &Path) -> io::Result<CString> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))
 }
 
-/// `renamex_np(…, RENAME_EXCL)`. Errors `AlreadyExists` rather than clobbering.
-pub fn rename_excl(src: &Path, dst: &Path) -> io::Result<()> {
-    let (from, to) = (cstring(src)?, cstring(dst)?);
-    // SAFETY: both pointers are valid NUL-terminated C strings that outlive
-    // the call, and renamex_np reads them without retaining them.
-    let rc = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), RENAME_EXCL) };
+/// `clonefile` flag: refuse to follow a symbolic link anywhere in the path.
+/// §6.11 says to prefer the kernel's own containment over our path arithmetic.
+/// `libc` does not export it; the value is from `<sys/clonefile.h>`.
+const CLONE_NOFOLLOW_ANY: u32 = 0x0008;
+
+/// A verified destination: a directory handle that is provably reached from
+/// `dest_root` without traversing a symlink, plus the leaf name within it.
+///
+/// Holding the handle rather than the path is what closes the race. Once the
+/// walk has succeeded, swapping a component for a symlink cannot redirect a
+/// write through this fd.
+struct Destination {
+    parent: std::os::fd::OwnedFd,
+    leaf: CString,
+}
+
+/// §6.11: containment per component, never a string prefix. A symlinked
+/// subdirectory passes `starts_with(dest_root)` and writes outside the tree.
+///
+/// Components *above* `dest_root` are followed: the root is the user's own
+/// choice, and on macOS `/var` is itself a symlink, so refusing those refuses
+/// almost every real destination. Components *beneath* it are opened
+/// `O_NOFOLLOW`, so a symlinked series folder fails with `ELOOP`.
+fn resolve_destination(dest_root: &Path, relative: &Path) -> io::Result<Destination> {
+    use std::os::fd::{FromRawFd, OwnedFd};
+
+    let mut components = Vec::new();
+    for component in relative.components() {
+        match component {
+            Component::Normal(name) => components.push(name),
+            // `strip_prefix` and `components()` do not resolve `..`, so a
+            // lexical containment check accepts `root/../sibling`.
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("destination {} is not a plain relative path", relative.display()),
+                ))
+            }
+        }
+    }
+    let Some((leaf, directories)) = components.split_last() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "destination is empty",
+        ));
+    };
+
+    let root = cstring(dest_root)?;
+    // SAFETY: `root` is a valid NUL-terminated path for the duration of the
+    // call; the returned descriptor is immediately adopted by OwnedFd.
+    let raw = unsafe { libc::open(root.as_ptr(), libc::O_DIRECTORY | libc::O_CLOEXEC) };
+    if raw < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut current = unsafe { OwnedFd::from_raw_fd(raw) };
+
+    for name in directories {
+        let component = CString::new(name.as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "component holds a NUL"))?;
+        // SAFETY: `current` is an open directory descriptor we own, and
+        // `component` outlives the call.
+        let raw = unsafe {
+            libc::openat(
+                std::os::fd::AsRawFd::as_raw_fd(&current),
+                component.as_ptr(),
+                libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if raw < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        current = unsafe { OwnedFd::from_raw_fd(raw) };
+    }
+
+    Ok(Destination {
+        parent: current,
+        leaf: CString::new(leaf.as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "leaf holds a NUL"))?,
+    })
+}
+
+/// A source must never be a symlink: following one moves the file it points
+/// at, which may sit in a library this run was never aimed at.
+///
+/// Checked inside every primitive, not in the selector. Nothing in the types
+/// enforces a call order, and the clone-to-stream fallback is a second door.
+fn refuse_symlink_source(src: &Path) -> io::Result<std::fs::Metadata> {
+    let meta = std::fs::symlink_metadata(src)?;
+    if meta.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("source is a symlink: {}", src.display()),
+        ));
+    }
+    Ok(meta)
+}
+
+/// Is anything at all sitting at this leaf, symlink included?
+fn occupied(destination: &Destination) -> bool {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: both the descriptor and the name are valid for the call, and
+    // `stat` is only read when fstatat reports success.
+    let rc = unsafe {
+        libc::fstatat(
+            std::os::fd::AsRawFd::as_raw_fd(&destination.parent),
+            destination.leaf.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    rc == 0
+}
+
+/// `renameatx_np(…, RENAME_EXCL)`. Errors `AlreadyExists` rather than clobbering.
+pub fn rename_excl(src: &Path, dest_root: &Path, relative: &Path) -> io::Result<()> {
+    refuse_symlink_source(src)?;
+    let destination = resolve_destination(dest_root, relative)?;
+    let from = cstring(src)?;
+    // SAFETY: both paths are valid NUL-terminated C strings that outlive the
+    // call, and `parent` is an open directory descriptor we own.
+    let rc = unsafe {
+        libc::renameatx_np(
+            libc::AT_FDCWD,
+            from.as_ptr(),
+            std::os::fd::AsRawFd::as_raw_fd(&destination.parent),
+            destination.leaf.as_ptr(),
+            RENAME_EXCL,
+        )
+    };
     if rc == 0 {
         Ok(())
     } else {
@@ -36,74 +159,189 @@ pub fn rename_excl(src: &Path, dst: &Path) -> io::Result<()> {
     }
 }
 
-/// `clonefile`, whose `EEXIST` is native. Flags `0`.
-// shortcut: containment via realpath-per-component; CLONE_RESOLVE_BENEATH
-// would move it into the kernel but libc exports no constant
-pub fn clone_excl(src: &Path, dst: &Path) -> io::Result<()> {
-    let (from, to) = (cstring(src)?, cstring(dst)?);
-    // SAFETY: as above; clonefile takes two borrowed C strings and a flag word.
-    let rc = unsafe { libc::clonefile(from.as_ptr(), to.as_ptr(), 0) };
+/// `clonefile`, whose `EEXIST` is native, with `CLONE_NOFOLLOW_ANY` so the
+/// kernel refuses a symlink anywhere in the path.
+///
+/// Without that flag `clonefile` follows a dangling symlink at the
+/// destination, creates the target and returns `Ok` — the one mechanism of
+/// the three for which no-clobber did not hold.
+pub fn clone_excl(src: &Path, dest_root: &Path, relative: &Path) -> io::Result<()> {
+    refuse_symlink_source(src)?;
+    let destination = resolve_destination(dest_root, relative)?;
+    if occupied(&destination) {
+        // Additive, not a substitute: `clonefileat` still enforces EEXIST for
+        // a regular file. This closes the symlink case the syscall does not.
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("destination already exists: {}", relative.display()),
+        ));
+    }
+    // `clonefileat` would walk the absolute source path, and
+    // CLONE_NOFOLLOW_ANY then trips on `/var`, which is a symlink on macOS.
+    // `fclonefileat` takes a source descriptor, so the flag constrains only
+    // the destination — which is a single leaf under a verified directory.
+    let source = open_nofollow(src)?;
+    // SAFETY: `source` is an open descriptor we own, `parent` likewise, and
+    // `leaf` outlives the call.
+    let rc = unsafe {
+        libc::fclonefileat(
+            std::os::fd::AsRawFd::as_raw_fd(&source),
+            std::os::fd::AsRawFd::as_raw_fd(&destination.parent),
+            destination.leaf.as_ptr(),
+            CLONE_NOFOLLOW_ANY,
+        )
+    };
     if rc == 0 {
         Ok(())
     } else {
         Err(io::Error::last_os_error())
     }
+}
+
+/// Opens a file refusing to follow a final symlink. Paired with
+/// `refuse_symlink_source` so the check and the open cannot disagree.
+fn open_nofollow(path: &Path) -> io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd;
+    let name = cstring(path)?;
+    // SAFETY: `name` is a valid NUL-terminated path for the call; the
+    // descriptor is adopted immediately.
+    let raw = unsafe {
+        libc::open(
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if raw < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) })
 }
 
 /// Temp in the destination directory → `fsync` → compare size and SHA-256 →
-/// `rename_excl` into place. **Never unlinks the source** — `apply` owns that,
-/// after verification.
-/// `dest_root` scopes the containment check. Walking every ancestor instead
-/// refuses almost everything: on macOS `/var` is itself a symlink, so any
-/// destination under a tempdir — or under plenty of real homes — trips it.
-/// The components above the root are the user's own choice of root; only the
-/// ones beneath it can let a row escape the tree.
-pub fn stream_verified(src: &Path, dst: &Path, dest_root: &Path) -> io::Result<()> {
-    let parent = dst
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "destination has no parent"))?;
-    refuse_symlinked_components(dest_root, parent)?;
+/// rename into place. **Never unlinks the source** — `apply` owns that, after
+/// verification.
+pub fn stream_verified(src: &Path, dest_root: &Path, relative: &Path) -> io::Result<()> {
+    refuse_symlink_source(src)?;
+    let destination = resolve_destination(dest_root, relative)?;
 
-    let temp = parent.join(format!(
-        ".comic-renamer.{}.{}.partial",
-        std::process::id(),
-        dst.file_name().map_or(0, |n| n.len())
-    ));
-
-    let result = stream_into(src, &temp).and_then(|()| rename_excl(&temp, dst));
-    if result.is_err() {
-        // Verified-then-renamed means a failure must leave nothing behind.
-        let _ = std::fs::remove_file(&temp);
+    // Occupancy first. Copying before this costs a full read and write of the
+    // payload — 31.2 GiB on the reference bundle — to reach a refusal that
+    // merging into an existing library produces every time.
+    if occupied(&destination) {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("destination already exists: {}", relative.display()),
+        ));
     }
-    result
-}
 
-fn stream_into(src: &Path, temp: &Path) -> io::Result<()> {
+    let (temp, mut file) = Temp::create(&destination)?;
+
     let mut input = std::fs::File::open(src)?;
-    // create_new is O_CREAT|O_EXCL: the temp name is ours or the call fails.
-    let mut output = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(temp)?;
-    io::copy(&mut input, &mut output)?;
-    output.sync_all()?;
-    drop(output);
+    io::copy(&mut input, &mut file)?;
+    file.sync_all()?;
 
     let (src_len, src_hash) = size_and_hash(src)?;
-    let (tmp_len, tmp_hash) = size_and_hash(temp)?;
+    let (tmp_len, tmp_hash) = hash_open_file(&mut file)?;
     if src_len != tmp_len || src_hash != tmp_hash {
+        // `temp` unlinks itself on drop.
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "copy does not match the source",
         ));
     }
+    drop(file);
+
+    let parent = std::os::fd::AsRawFd::as_raw_fd(&destination.parent);
+    // SAFETY: one open directory descriptor, two names that outlive the call.
+    let rc = unsafe {
+        libc::renameatx_np(
+            parent,
+            temp.name.as_ptr(),
+            parent,
+            destination.leaf.as_ptr(),
+            RENAME_EXCL,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    temp.keep();
     Ok(())
 }
 
-/// Streams rather than reading the file in: sources here reach gigabytes.
-fn size_and_hash(path: &Path) -> io::Result<(u64, String)> {
-    let mut file = std::fs::File::open(path)?;
+/// A temp file this code created, unlinked on drop unless it was renamed away.
+///
+/// Everything goes through the parent descriptor. An earlier version derived
+/// the temp name from the destination filename's *length* and cleaned up
+/// unconditionally, so a crafted destination made the error path delete a file
+/// the function had never created.
+struct Temp {
+    parent: std::os::fd::RawFd,
+    name: CString,
+    armed: bool,
+}
+
+impl Temp {
+    fn create(destination: &Destination) -> io::Result<(Temp, std::fs::File)> {
+        use std::os::fd::FromRawFd;
+        // Unique per process and per call, so two rows in one directory never
+        // fight over a name — including under the parallel apply that the
+        // single-threaded shortcut defers.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let name = CString::new(format!(
+            ".comic-renamer.{}.{seq}.partial",
+            std::process::id()
+        ))
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "temp name holds a NUL"))?;
+
+        let parent = std::os::fd::AsRawFd::as_raw_fd(&destination.parent);
+        // O_EXCL: the name is ours or this fails. O_NOFOLLOW: never write
+        // through a planted link. O_RDWR, not O_WRONLY, because the verify
+        // step reads back through this same descriptor.
+        // SAFETY: `parent` is open and `name` outlives the call.
+        let raw = unsafe {
+            libc::openat(
+                parent,
+                name.as_ptr(),
+                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600 as libc::c_uint,
+            )
+        };
+        if raw < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let file = unsafe { std::fs::File::from_raw_fd(raw) };
+        Ok((
+            Temp {
+                parent,
+                name,
+                armed: true,
+            },
+            file,
+        ))
+    }
+
+    fn keep(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for Temp {
+    fn drop(&mut self) {
+        if self.armed {
+            // SAFETY: `parent` is still open for this scope and `name` is valid.
+            unsafe { libc::unlinkat(self.parent, self.name.as_ptr(), 0) };
+        }
+    }
+}
+
+/// Hashes what was actually written, through the descriptor we wrote with,
+/// so no path is re-resolved between writing and verifying.
+fn hash_open_file(file: &mut std::fs::File) -> io::Result<(u64, String)> {
     use sha2::Digest;
+    use std::io::Seek;
+    file.rewind()?;
     let mut buffer = vec![0u8; 1 << 20];
     let mut hasher = sha2::Sha256::new();
     let mut total = 0u64;
@@ -115,40 +353,21 @@ fn size_and_hash(path: &Path) -> io::Result<(u64, String)> {
         total += read as u64;
         hasher.update(&buffer[..read]);
     }
-    let digest = hasher.finalize();
-    Ok((total, sha256_hex_of_digest(&digest)))
+    Ok((total, hex(&hasher.finalize())))
 }
 
-fn sha256_hex_of_digest(digest: &[u8]) -> String {
+fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write;
-    digest.iter().fold(String::with_capacity(64), |mut s, b| {
+    bytes.iter().fold(String::with_capacity(64), |mut s, b| {
         let _ = write!(s, "{b:02x}");
         s
     })
 }
 
-/// §6.11: containment is per component, never a string prefix. A symlinked
-/// subdirectory passes `starts_with(dest_root)` and writes outside the tree.
-fn refuse_symlinked_components(dest_root: &Path, dir: &Path) -> io::Result<()> {
-    let relative = dir.strip_prefix(dest_root).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("destination {} is outside {}", dir.display(), dest_root.display()),
-        )
-    })?;
-    let mut current = dest_root.to_path_buf();
-    for component in relative.components() {
-        current.push(component);
-        if let Ok(meta) = std::fs::symlink_metadata(&current) {
-            if meta.file_type().is_symlink() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("destination passes through a symlink: {}", current.display()),
-                ));
-            }
-        }
-    }
-    Ok(())
+/// Streams rather than reading the file in: sources here reach gigabytes.
+fn size_and_hash(path: &Path) -> io::Result<(u64, String)> {
+    let mut file = std::fs::File::open(path)?;
+    hash_open_file(&mut file)
 }
 
 /// Reads `SF_DATALESS` in `st_flags`, never `st_blocks == 0`, which
@@ -159,20 +378,12 @@ pub fn is_dataless(path: &Path) -> io::Result<bool> {
     Ok(meta.st_flags() & SF_DATALESS != 0)
 }
 
-pub fn select_mechanism(src: &Path, dst: &Path, mode: Mode) -> io::Result<Mechanism> {
-    let meta = std::fs::symlink_metadata(src)?;
-    if meta.file_type().is_symlink() {
-        // Following one would move the file it points at, which may sit in a
-        // library this run was never pointed at.
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("source is a symlink: {}", src.display()),
-        ));
-    }
-    let parent = dst
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "destination has no parent"))?;
-    let same_volume = std::fs::metadata(parent)?.dev() == meta.dev();
+pub fn select_mechanism(src: &Path, dest_root: &Path, mode: Mode) -> io::Result<Mechanism> {
+    let meta = refuse_symlink_source(src)?;
+    // Stat the root, not the destination's parent: the series folder does not
+    // exist yet on a fresh library, and stat'ing it returned NotFound for
+    // every row — forcing apply to mkdir before it could refuse anything.
+    let same_volume = std::fs::metadata(dest_root)?.dev() == meta.dev();
 
     Ok(match (mode, same_volume) {
         // Atomic, zero space, and it cannot truncate a multi-gigabyte PDF.

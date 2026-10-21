@@ -110,24 +110,71 @@ pub fn blocks(path: &Path) -> u64 {
     std::fs::metadata(path).unwrap().blocks()
 }
 
-/// `(len, mtime_ns, sha256 of the first 4 KiB)`, or `None` for a directory.
-type Fingerprint = Option<(u64, i64, String)>;
-
-fn fingerprint(path: &Path) -> Fingerprint {
-    let meta = std::fs::symlink_metadata(path).ok()?;
-    if meta.is_dir() {
-        return None;
-    }
-    // A same-size rewrite has to be caught, so the content is sampled too.
-    let head = std::fs::read(path).map(|b| b[..b.len().min(4096)].to_vec());
-    Some((
-        meta.len(),
-        meta.mtime() * 1_000_000_000 + meta.mtime_nsec(),
-        comic_renamer_core::corpus::sha256_hex(&head.unwrap_or_default()),
-    ))
+/// What a path is, closely enough that any change we care about shows up.
+///
+/// **The inode is in here deliberately.** An earlier version recorded only
+/// `(len, mtime_ns, head-hash)`, and `clonefile` preserves mtime to the
+/// nanosecond — so a clone-and-replace that swapped the file under a path was
+/// invisible to every guarded test. In a project whose invariants are about
+/// inodes, clones and hardlinks, identity is the field that matters most.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Fingerprint {
+    Dir,
+    Symlink(PathBuf),
+    File {
+        len: u64,
+        mtime_ns: i64,
+        inode: u64,
+        nlink: u64,
+        /// Head and tail, so a rewrite past 4 KiB is not invisible either.
+        edges: String,
+    },
 }
 
-fn snapshot(roots: &[&Path]) -> BTreeMap<PathBuf, Fingerprint> {
+fn fingerprint(path: &Path) -> Option<Fingerprint> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if meta.is_dir() {
+        return Some(Fingerprint::Dir);
+    }
+    if meta.file_type().is_symlink() {
+        return Some(Fingerprint::Symlink(
+            std::fs::read_link(path).unwrap_or_default(),
+        ));
+    }
+    Some(Fingerprint::File {
+        len: meta.len(),
+        mtime_ns: meta.mtime() * 1_000_000_000 + meta.mtime_nsec(),
+        inode: meta.ino(),
+        nlink: meta.nlink(),
+        edges: edge_hash(path, meta.len()),
+    })
+}
+
+/// Hashes the first and last 4 KiB. Whole-file hashing is not an option: the
+/// sparse fixtures are 5 GiB.
+fn edge_hash(path: &Path, len: u64) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    const WINDOW: u64 = 4096;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let mut buffer = Vec::new();
+    let mut head = vec![0u8; WINDOW.min(len) as usize];
+    if file.read_exact(&mut head).is_ok() {
+        buffer.extend_from_slice(&head);
+    }
+    if len > WINDOW {
+        let mut tail = vec![0u8; WINDOW.min(len - WINDOW) as usize];
+        if file.seek(SeekFrom::Start(len - tail.len() as u64)).is_ok()
+            && file.read_exact(&mut tail).is_ok()
+        {
+            buffer.extend_from_slice(&tail);
+        }
+    }
+    comic_renamer_core::corpus::sha256_hex(&buffer)
+}
+
+fn snapshot(roots: &[&Path]) -> BTreeMap<PathBuf, Option<Fingerprint>> {
     let mut out = BTreeMap::new();
     for root in roots {
         walk(root, &mut out);
@@ -135,8 +182,12 @@ fn snapshot(roots: &[&Path]) -> BTreeMap<PathBuf, Fingerprint> {
     out
 }
 
-fn walk(path: &Path, out: &mut BTreeMap<PathBuf, Fingerprint>) {
+fn walk(path: &Path, out: &mut BTreeMap<PathBuf, Option<Fingerprint>>) {
     out.insert(path.to_path_buf(), fingerprint(path));
+    // read_dir on a symlink would follow it and recurse outside the root.
+    if !matches!(fingerprint(path), Some(Fingerprint::Dir)) {
+        return;
+    }
     let Ok(entries) = std::fs::read_dir(path) else {
         return;
     };
@@ -151,11 +202,18 @@ fn walk(path: &Path, out: &mut BTreeMap<PathBuf, Fingerprint>) {
 /// an earlier draft asserted only the `Err` variant, so rows 1-3 could execute
 /// before row 4 refused and the suite stayed green. "The function returned
 /// `Err`" and "no files moved" are not the same claim, and only this makes the
-/// second one. A test that means to change something says which paths.
+/// second one.
+///
+/// A test that means to change something says **what kind** of change. An
+/// earlier `expect_changed` exempted a named path from every difference, so a
+/// test that permitted a destination being *created* silently lost the ability
+/// to notice it being *destroyed*.
 pub struct TreeGuard {
     roots: Vec<PathBuf>,
-    before: BTreeMap<PathBuf, Fingerprint>,
-    permitted: Vec<PathBuf>,
+    before: BTreeMap<PathBuf, Option<Fingerprint>>,
+    created: Vec<PathBuf>,
+    removed: Vec<PathBuf>,
+    modified: Vec<PathBuf>,
 }
 
 impl TreeGuard {
@@ -163,13 +221,27 @@ impl TreeGuard {
         TreeGuard {
             roots: roots.iter().map(|p| p.to_path_buf()).collect(),
             before: snapshot(roots),
-            permitted: Vec::new(),
+            created: Vec::new(),
+            removed: Vec::new(),
+            modified: Vec::new(),
         }
     }
 
-    /// Opt in to a change, naming every path that may differ.
-    pub fn expect_changed(mut self, paths: &[&Path]) -> TreeGuard {
-        self.permitted = paths.iter().map(|p| p.to_path_buf()).collect();
+    /// These paths must be absent before and present after.
+    pub fn expect_created(mut self, paths: &[&Path]) -> TreeGuard {
+        self.created = paths.iter().map(|p| p.to_path_buf()).collect();
+        self
+    }
+
+    /// These paths must be present before and absent after.
+    pub fn expect_removed(mut self, paths: &[&Path]) -> TreeGuard {
+        self.removed = paths.iter().map(|p| p.to_path_buf()).collect();
+        self
+    }
+
+    /// These paths must be present before and after, and must differ.
+    pub fn expect_modified(mut self, paths: &[&Path]) -> TreeGuard {
+        self.modified = paths.iter().map(|p| p.to_path_buf()).collect();
         self
     }
 }
@@ -177,34 +249,63 @@ impl TreeGuard {
 impl Drop for TreeGuard {
     fn drop(&mut self) {
         // A panic inside Drop while already unwinding aborts the process and
-        // hides the real failure.
+        // hides the real failure. The cost is that this guard's claim holds
+        // only for tests that otherwise pass.
         if std::thread::panicking() {
             return;
         }
         let roots: Vec<&Path> = self.roots.iter().map(PathBuf::as_path).collect();
         let after = snapshot(&roots);
 
-        let mut unexpected: Vec<String> = Vec::new();
-        let mut paths: Vec<&PathBuf> = self.before.keys().chain(after.keys()).collect();
+        let mut wrong: Vec<String> = Vec::new();
+        // Declared paths are included even when they appear in neither
+        // snapshot, or a promised change that never happened passes silently.
+        let mut paths: Vec<&PathBuf> = self
+            .before
+            .keys()
+            .chain(after.keys())
+            .chain(self.created.iter())
+            .chain(self.removed.iter())
+            .chain(self.modified.iter())
+            .collect();
         paths.sort();
         paths.dedup();
+
         for path in paths {
-            if self.permitted.contains(path) {
-                continue;
-            }
-            let (before, after) = (self.before.get(path), after.get(path));
-            if before != after {
-                unexpected.push(match (before, after) {
-                    (None, Some(_)) => format!("appeared: {}", path.display()),
-                    (Some(_), None) => format!("vanished: {}", path.display()),
-                    _ => format!("modified: {}", path.display()),
+            let was = self.before.get(path).and_then(Option::as_ref);
+            let now = after.get(path).and_then(Option::as_ref);
+            let shown = path.display();
+
+            if self.created.contains(path) {
+                match (was, now) {
+                    (None, Some(_)) => {}
+                    (Some(_), _) => wrong.push(format!("expected created but already there: {shown}")),
+                    (None, None) => wrong.push(format!("expected created, never appeared: {shown}")),
+                }
+            } else if self.removed.contains(path) {
+                match (was, now) {
+                    (Some(_), None) => {}
+                    (None, _) => wrong.push(format!("expected removed but was not there: {shown}")),
+                    (Some(_), Some(_)) => wrong.push(format!("expected removed, still there: {shown}")),
+                }
+            } else if self.modified.contains(path) {
+                match (was, now) {
+                    (Some(a), Some(b)) if a != b => {}
+                    (Some(_), Some(_)) => wrong.push(format!("expected modified, unchanged: {shown}")),
+                    _ => wrong.push(format!("expected modified, but it appeared or vanished: {shown}")),
+                }
+            } else if was != now {
+                wrong.push(match (was, now) {
+                    (None, Some(_)) => format!("unexpected change, appeared: {shown}"),
+                    (Some(_), None) => format!("unexpected change, vanished: {shown}"),
+                    _ => format!("unexpected change, modified: {shown}"),
                 });
             }
         }
         assert!(
-            unexpected.is_empty(),
+            wrong.is_empty(),
             "unexpected change to the tree:\n  {}",
-            unexpected.join("\n  ")
+            wrong.join("\n  ")
         );
     }
 }

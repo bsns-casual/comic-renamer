@@ -4,6 +4,9 @@
 //!
 //! Drop order matters here. `TempDir` is declared before the guard so the
 //! guard drops first; reversed, it would watch the whole tree vanish.
+//!
+//! Where a test can escape the destination, the guard covers the escape
+//! target too — a file arriving outside every guarded root is invisible.
 
 mod common;
 
@@ -12,9 +15,7 @@ use comic_renamer_core::fsops::{
     stream_verified,
 };
 use comic_renamer_core::preset::komga::Komga;
-use comic_renamer_core::types::{
-    Basis, Mechanism, Mode, PlanRow, SourceStat, Status,
-};
+use comic_renamer_core::types::{Basis, Mechanism, Mode, PlanRow, SourceStat, Status};
 use common::{sparse_truncate_only, zero_byte, TreeGuard};
 use std::io::ErrorKind;
 use std::os::unix::fs::MetadataExt;
@@ -29,13 +30,18 @@ fn inode(path: &Path) -> u64 {
     std::fs::metadata(path).unwrap().ino()
 }
 
-/// `src` holds SOURCE, `dst` already holds ORIGINAL.
-fn two_files_distinct_contents(d: &TempDir) -> (PathBuf, PathBuf) {
+fn rel(p: &str) -> PathBuf {
+    PathBuf::from(p)
+}
+
+/// A source file and a destination root that already holds `dst.pdf`.
+fn occupied_root(d: &TempDir) -> (PathBuf, PathBuf) {
     let src = d.path().join("src.pdf");
-    let dst = d.path().join("dst.pdf");
+    let root = d.path().join("dest");
+    std::fs::create_dir(&root).unwrap();
     std::fs::write(&src, "SOURCE").unwrap();
-    std::fs::write(&dst, "ORIGINAL").unwrap();
-    (src, dst)
+    std::fs::write(root.join("dst.pdf"), "ORIGINAL").unwrap();
+    (src, root)
 }
 
 fn row(id: &str, series: &str, volume: Option<u32>, run: u32, ino: u64) -> PlanRow {
@@ -60,16 +66,20 @@ fn row(id: &str, series: &str, volume: Option<u32>, run: u32, ino: u64) -> PlanR
     }
 }
 
+// ---------------------------------------------------------------------------
+// No-clobber, per mechanism
+// ---------------------------------------------------------------------------
+
 #[test]
 fn rename_excl_refuses_and_leaves_both_files() {
     let d = tempdir().unwrap();
-    let (src, dst) = two_files_distinct_contents(&d);
+    let (src, root) = occupied_root(&d);
     let _g = TreeGuard::new(&[d.path()]);
     assert_eq!(
-        rename_excl(&src, &dst).unwrap_err().kind(),
+        rename_excl(&src, &root, &rel("dst.pdf")).unwrap_err().kind(),
         ErrorKind::AlreadyExists
     );
-    assert_eq!(read(&dst), "ORIGINAL");
+    assert_eq!(read(&root.join("dst.pdf")), "ORIGINAL");
     assert!(src.exists());
 }
 
@@ -78,39 +88,186 @@ fn plain_rename_would_have_clobbered() {
     // Pins WHY rename_excl exists; if this fails the platform changed.
     // Deliberately unguarded — this test's whole point is the destruction.
     let d = tempdir().unwrap();
-    let (src, dst) = two_files_distinct_contents(&d);
-    std::fs::rename(&src, &dst).unwrap();
-    assert_eq!(read(&dst), "SOURCE");
+    let (src, root) = occupied_root(&d);
+    std::fs::rename(&src, root.join("dst.pdf")).unwrap();
+    assert_eq!(read(&root.join("dst.pdf")), "SOURCE");
     assert!(!src.exists());
 }
 
 #[test]
 fn rename_excl_succeeds_onto_a_free_path() {
     let d = tempdir().unwrap();
-    let src = d.path().join("src.pdf");
-    let dst = d.path().join("free.pdf");
-    std::fs::write(&src, "SOURCE").unwrap();
-    let g = TreeGuard::new(&[d.path()]).expect_changed(&[&src, &dst]);
-    rename_excl(&src, &dst).unwrap();
+    let (src, root) = occupied_root(&d);
+    let dst = root.join("free.pdf");
+    let g = TreeGuard::new(&[d.path()])
+        .expect_removed(&[&src])
+        .expect_created(&[&dst]);
+    rename_excl(&src, &root, &rel("free.pdf")).unwrap();
     assert_eq!(read(&dst), "SOURCE");
+    assert!(!src.exists(), "a move must not leave the source behind");
     drop(g);
 }
 
 #[test]
 fn clone_excl_refuses_and_is_a_distinct_inode() {
     let d = tempdir().unwrap();
-    let src = d.path().join("src.pdf");
-    let dst = d.path().join("clone.pdf");
-    std::fs::write(&src, "SOURCE").unwrap();
-    let g = TreeGuard::new(&[d.path()]).expect_changed(&[&dst]);
-    clone_excl(&src, &dst).unwrap();
+    let (src, root) = occupied_root(&d);
+    let dst = root.join("clone.pdf");
+    let g = TreeGuard::new(&[d.path()]).expect_created(&[&dst]);
+    clone_excl(&src, &root, &rel("clone.pdf")).unwrap();
     assert_ne!(inode(&src), inode(&dst));
     assert_eq!(
-        clone_excl(&src, &dst).unwrap_err().kind(),
+        clone_excl(&src, &root, &rel("clone.pdf")).unwrap_err().kind(),
         ErrorKind::AlreadyExists
     );
     drop(g);
 }
+
+#[test]
+fn clone_excl_refuses_a_dangling_symlink_destination() {
+    // Without CLONE_NOFOLLOW_ANY, clonefile follows the link, creates the
+    // target and returns Ok — the one mechanism of three for which
+    // no-clobber did not hold (invariant 6).
+    let d = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    let (src, root) = occupied_root(&d);
+    std::os::unix::fs::symlink(outside.path().join("escaped.pdf"), root.join("link.pdf")).unwrap();
+    let _g = TreeGuard::new(&[d.path(), outside.path()]);
+    assert_eq!(
+        clone_excl(&src, &root, &rel("link.pdf")).unwrap_err().kind(),
+        ErrorKind::AlreadyExists
+    );
+    assert!(!outside.path().join("escaped.pdf").exists());
+}
+
+// ---------------------------------------------------------------------------
+// Containment: every mechanism, not just the one selected cross-volume
+// ---------------------------------------------------------------------------
+
+/// `dest_root/Hellboy` is a symlink to a directory on the same volume.
+fn symlinked_series_folder(d: &TempDir) -> (PathBuf, PathBuf, PathBuf) {
+    let src = d.path().join("src.pdf");
+    let root = d.path().join("dest");
+    let elsewhere = d.path().join("elsewhere");
+    std::fs::write(&src, "SOURCE").unwrap();
+    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, root.join("Hellboy")).unwrap();
+    (src, root, elsewhere)
+}
+
+#[test]
+fn no_mechanism_writes_through_a_symlinked_series_folder() {
+    // §6.11 names this attack. Same volume, so Move selects Rename and Copy
+    // selects Clone — neither of which used to be checked at all.
+    for mechanism in ["rename", "clone", "stream"] {
+        let d = tempdir().unwrap();
+        let (src, root, elsewhere) = symlinked_series_folder(&d);
+        let _g = TreeGuard::new(&[d.path()]);
+        let target = rel("Hellboy/book.pdf");
+        let result = match mechanism {
+            "rename" => rename_excl(&src, &root, &target),
+            "clone" => clone_excl(&src, &root, &target),
+            _ => stream_verified(&src, &root, &target),
+        };
+        assert!(result.is_err(), "{mechanism} wrote through a symlink");
+        assert!(
+            !elsewhere.join("book.pdf").exists(),
+            "{mechanism} escaped the destination root"
+        );
+        assert!(src.exists(), "{mechanism} consumed the source");
+    }
+}
+
+#[test]
+fn no_mechanism_accepts_a_parent_dir_component() {
+    // `components()` does not resolve `..`, so a lexical containment check
+    // accepts root/../sibling. These are not lexical checks.
+    let d = tempdir().unwrap();
+    let (src, root) = occupied_root(&d);
+    let sibling = d.path().join("sibling");
+    std::fs::create_dir(&sibling).unwrap();
+    let _g = TreeGuard::new(&[d.path()]);
+    let escape = rel("../sibling/escaped.pdf");
+    assert!(rename_excl(&src, &root, &escape).is_err());
+    assert!(clone_excl(&src, &root, &escape).is_err());
+    assert!(stream_verified(&src, &root, &escape).is_err());
+    assert!(!sibling.join("escaped.pdf").exists());
+}
+
+#[test]
+fn no_mechanism_follows_a_symlinked_source() {
+    // The refusal lives in each primitive, not only in select_mechanism:
+    // nothing in the types enforces a call order, and the clone-to-stream
+    // fallback is a second door straight into the primitives.
+    let d = tempdir().unwrap();
+    let real = d.path().join("real.pdf");
+    std::fs::write(&real, "SOURCE").unwrap();
+    let link = d.path().join("link.pdf");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let root = d.path().join("dest");
+    std::fs::create_dir(&root).unwrap();
+    let _g = TreeGuard::new(&[d.path()]);
+    assert!(rename_excl(&link, &root, &rel("out.pdf")).is_err());
+    assert!(clone_excl(&link, &root, &rel("out.pdf")).is_err());
+    assert!(stream_verified(&link, &root, &rel("out.pdf")).is_err());
+    assert!(select_mechanism(&link, &root, Mode::Move).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Streaming
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stream_verified_copies_and_leaves_the_source() {
+    // It never unlinks: apply owns that, after verification.
+    let d = tempdir().unwrap();
+    let (src, root) = occupied_root(&d);
+    let dst = root.join("out.pdf");
+    let g = TreeGuard::new(&[d.path()]).expect_created(&[&dst]);
+    stream_verified(&src, &root, &rel("out.pdf")).unwrap();
+    assert_eq!(read(&dst), "SOURCE");
+    assert!(src.exists());
+    drop(g);
+}
+
+#[test]
+fn stream_verified_refuses_an_occupied_destination_without_reading_the_source() {
+    // Occupancy is tested before the copy. An unreadable source discriminates:
+    // check-first yields AlreadyExists, copy-first yields PermissionDenied.
+    // Copying first costs a full read and write of the payload — 31.2 GiB on
+    // the reference bundle — on the ordinary merge-into-a-library path.
+    let d = tempdir().unwrap();
+    let (src, root) = occupied_root(&d);
+    let mut perms = std::fs::metadata(&src).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o000);
+    std::fs::set_permissions(&src, perms).unwrap();
+    let _g = TreeGuard::new(&[d.path()]);
+    assert_eq!(
+        stream_verified(&src, &root, &rel("dst.pdf")).unwrap_err().kind(),
+        ErrorKind::AlreadyExists
+    );
+    assert_eq!(read(&root.join("dst.pdf")), "ORIGINAL");
+}
+
+#[test]
+fn a_failed_stream_leaves_no_partial_behind() {
+    let d = tempdir().unwrap();
+    let root = d.path().join("dest");
+    std::fs::create_dir(&root).unwrap();
+    let src = d.path().join("unreadable.pdf");
+    std::fs::write(&src, "SOURCE").unwrap();
+    let mut perms = std::fs::metadata(&src).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o000);
+    std::fs::set_permissions(&src, perms).unwrap();
+    // No permits at all: the guard fails if a .partial survives.
+    let _g = TreeGuard::new(&[d.path()]);
+    assert!(stream_verified(&src, &root, &rel("out.pdf")).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Dataless, mechanism selection
+// ---------------------------------------------------------------------------
 
 #[test]
 fn dataless_ignores_sparse_and_empty_files() {
@@ -121,6 +278,24 @@ fn dataless_ignores_sparse_and_empty_files() {
     let _g = TreeGuard::new(&[d.path()]);
     assert!(!is_dataless(&sparse).unwrap());
     assert!(!is_dataless(&empty).unwrap());
+}
+
+#[test]
+fn a_same_volume_move_is_a_rename_even_for_a_series_folder_that_does_not_exist() {
+    // It stats dest_root, not the destination's parent. Stat'ing the parent
+    // returned NotFound for every row on a fresh library, forcing apply to
+    // mkdir before it could choose a mechanism or refuse anything.
+    let d = tempdir().unwrap();
+    let (src, root) = occupied_root(&d);
+    let _g = TreeGuard::new(&[d.path()]);
+    assert_eq!(
+        select_mechanism(&src, &root, Mode::Move).unwrap(),
+        Mechanism::Rename
+    );
+    assert_eq!(
+        select_mechanism(&src, &root, Mode::Copy).unwrap(),
+        Mechanism::Clone
+    );
 }
 
 #[test]
@@ -192,67 +367,6 @@ fn find_collisions_ignores_the_stored_preview() {
 }
 
 #[test]
-fn refuses_a_symlinked_destination_component() {
-    // §6.11
-    let d = tempdir().unwrap();
-    let outside = tempdir().unwrap();
-    let src = d.path().join("src.pdf");
-    std::fs::write(&src, "SOURCE").unwrap();
-    std::os::unix::fs::symlink(outside.path(), d.path().join("link")).unwrap();
-    let _g = TreeGuard::new(&[d.path(), outside.path()]);
-    assert!(stream_verified(&src, &d.path().join("link/escaped.pdf"), d.path()).is_err());
-}
-
-#[test]
-fn stream_verified_copies_and_leaves_the_source() {
-    // It never unlinks: apply owns that, after verification.
-    let d = tempdir().unwrap();
-    let src = d.path().join("src.pdf");
-    let dst = d.path().join("out.pdf");
-    std::fs::write(&src, "SOURCE").unwrap();
-    let g = TreeGuard::new(&[d.path()]).expect_changed(&[&dst]);
-    stream_verified(&src, &dst, d.path()).unwrap();
-    assert_eq!(read(&dst), "SOURCE");
-    assert!(src.exists());
-    drop(g);
-}
-
-#[test]
-fn stream_verified_refuses_an_occupied_destination() {
-    let d = tempdir().unwrap();
-    let (src, dst) = two_files_distinct_contents(&d);
-    let _g = TreeGuard::new(&[d.path()]);
-    assert_eq!(
-        stream_verified(&src, &dst, d.path()).unwrap_err().kind(),
-        ErrorKind::AlreadyExists
-    );
-    assert_eq!(read(&dst), "ORIGINAL");
-}
-
-#[test]
-fn never_follows_a_symlink_in_the_source() {
-    let d = tempdir().unwrap();
-    let real = d.path().join("real.pdf");
-    std::fs::write(&real, "SOURCE").unwrap();
-    let link = d.path().join("link.pdf");
-    std::os::unix::fs::symlink(&real, &link).unwrap();
-    let _g = TreeGuard::new(&[d.path()]);
-    assert!(select_mechanism(&link, &d.path().join("out.pdf"), Mode::Move).is_err());
-}
-
-#[test]
-fn a_same_volume_move_is_a_rename() {
-    let d = tempdir().unwrap();
-    let src = d.path().join("src.pdf");
-    std::fs::write(&src, "SOURCE").unwrap();
-    let _g = TreeGuard::new(&[d.path()]);
-    assert_eq!(
-        select_mechanism(&src, &d.path().join("out.pdf"), Mode::Move).unwrap(),
-        Mechanism::Rename
-    );
-}
-
-#[test]
 fn two_rows_sharing_an_inode_are_reported_not_executed() {
     let d = tempdir().unwrap();
     let _g = TreeGuard::new(&[d.path()]);
@@ -263,15 +377,4 @@ fn two_rows_sharing_an_inode_are_reported_not_executed() {
         row("b", "Witch", Some(1), 9, 77),
     ];
     assert_eq!(find_collisions(&rows, d.path(), &Komga).len(), 1);
-}
-
-#[test]
-fn stream_verified_refuses_a_destination_outside_the_root() {
-    // The scoped containment check doubles as the containment check.
-    let d = tempdir().unwrap();
-    let elsewhere = tempdir().unwrap();
-    let src = d.path().join("src.pdf");
-    std::fs::write(&src, "SOURCE").unwrap();
-    let _g = TreeGuard::new(&[d.path(), elsewhere.path()]);
-    assert!(stream_verified(&src, &elsewhere.path().join("out.pdf"), d.path()).is_err());
 }
