@@ -5,8 +5,10 @@ use crate::types::{CorpusError, SeriesRecord};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// The corpus schema this build reads.
-pub const SCHEMA_VERSION: u32 = 1;
+/// The `corpus/manifest.json` *format* version this build understands. It
+/// describes the manifest, not the database — `corpus-check.py` never copies
+/// it from upstream, and the extract sets no `PRAGMA user_version`.
+pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
 
 /// The cache filename. `ensure_corpus` installs here and `Corpus::open` reads it.
 pub const CACHE_FILENAME: &str = "gcd.sqlite";
@@ -36,6 +38,12 @@ pub fn load_manifest(path: &Path) -> Result<Manifest, CorpusError> {
     // claims otherwise is either wrong or pointing somewhere it should not.
     if !manifest.licence.starts_with("CC BY-SA") {
         return Err(CorpusError::Licence(manifest.licence));
+    }
+    if manifest.schema_version != MANIFEST_SCHEMA_VERSION {
+        return Err(CorpusError::SchemaVersion {
+            expected: MANIFEST_SCHEMA_VERSION,
+            actual: manifest.schema_version,
+        });
     }
     if manifest.sha256.len() != 64 || !manifest.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(CorpusError::Manifest(format!(
@@ -125,26 +133,25 @@ pub struct Corpus {
 }
 
 impl Corpus {
-    /// Validates `series_count`, `size_bytes` and `schema_version` against the
-    /// manifest, so a truncation test cannot pass by luck of the cut point.
+    /// Validates the **database**: that it carries the columns we read, and
+    /// that its row count matches the manifest, so a short corpus cannot pass
+    /// by luck of where it was cut.
+    ///
+    /// Size and SHA-256 are deliberately not checked here. They pin the
+    /// *download* — a 33.7 MB zip against a 97.7 MB database — and
+    /// `ensure_corpus` is where they belong. Comparing the database against
+    /// `size_bytes` rejects every real corpus.
     pub fn open(db: &Path, manifest: &Manifest) -> Result<Corpus, CorpusError> {
-        let size = std::fs::metadata(db)?.len();
-        if size != manifest.size_bytes {
-            return Err(CorpusError::SizeMismatch {
-                expected: manifest.size_bytes,
-                actual: size,
-            });
-        }
-
         let conn = rusqlite::Connection::open(db)?;
 
-        let schema: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if schema != manifest.schema_version || schema != SCHEMA_VERSION {
-            return Err(CorpusError::SchemaVersion {
-                expected: SCHEMA_VERSION,
-                actual: schema,
-            });
-        }
+        // The real extract ships
+        // `series(id, name, name_key, year_began, year_ended, publisher,
+        // language, issue_count)`: two columns more than we read, in another
+        // order. Selecting by name tolerates both, and `prepare` failing is
+        // the schema check — a missing column errors here, before any work.
+        let mut statement = conn.prepare(
+            "SELECT name, name_key, publisher, language, year_began, issue_count FROM series",
+        )?;
 
         // sqlite integers are i64; rusqlite has no FromSql for u64.
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM series", [], |r| r.get(0))?;
@@ -160,9 +167,6 @@ impl Corpus {
         // punctuation-expansion variants. Indexing them separately resolved
         // `witcheromnibus` to the series *Witch*.
         let mut index: HashMap<String, Vec<SeriesRecord>> = HashMap::new();
-        let mut statement = conn.prepare(
-            "SELECT name, name_key, publisher, language, year_began, issue_count FROM series",
-        )?;
         let rows = statement.query_map([], |r| {
             Ok((
                 SeriesRecord {

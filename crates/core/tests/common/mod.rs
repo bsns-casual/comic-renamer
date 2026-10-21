@@ -5,7 +5,7 @@
 
 #![allow(dead_code)] // each test binary uses a different subset
 
-use comic_renamer_core::corpus::{Corpus, Manifest, SCHEMA_VERSION};
+use comic_renamer_core::corpus::{Corpus, Manifest, MANIFEST_SCHEMA_VERSION};
 use std::path::Path;
 use tempfile::TempDir;
 
@@ -14,17 +14,16 @@ pub type Row<'a> = (&'a str, &'a str, &'a str, &'a str, u16, u32);
 
 pub fn write_db(path: &Path, rows: &[Row<'_>]) {
     let conn = rusqlite::Connection::open(path).unwrap();
-    conn.execute_batch(&format!(
-        "PRAGMA user_version = {SCHEMA_VERSION};
-         CREATE TABLE series (
+    conn.execute_batch(
+        "CREATE TABLE series (
              name        TEXT    NOT NULL,
              name_key    TEXT    NOT NULL,
              publisher   TEXT    NOT NULL,
              language    TEXT    NOT NULL,
              year_began  INTEGER NOT NULL,
              issue_count INTEGER NOT NULL
-         );"
-    ))
+         );",
+    )
     .unwrap();
     for (name, name_key, publisher, language, year, run) in rows {
         conn.execute(
@@ -42,7 +41,7 @@ pub fn manifest_for(path: &Path, series_count: u64) -> Manifest {
         sha256: comic_renamer_core::corpus::sha256_hex(&std::fs::read(path).unwrap()),
         size_bytes: std::fs::metadata(path).unwrap().len(),
         series_count,
-        schema_version: SCHEMA_VERSION,
+        schema_version: MANIFEST_SCHEMA_VERSION,
         licence: "CC BY-SA 4.0".into(),
         dump_date: "2026-09-15".into(),
         attribution: "Grand Comics Database (https://www.comics.org)".into(),
