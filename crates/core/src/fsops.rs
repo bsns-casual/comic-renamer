@@ -452,6 +452,33 @@ pub fn find_collisions(rows: &[PlanRow], dest_root: &Path, preset: &dyn Preset) 
             }),
     );
 
+    // Two rows whose series folders are one directory on a folding volume and
+    // two on a case-sensitive one (invariant 7). Grouping on the whole path
+    // misses these, because the leaves differ.
+    let mut by_folder: BTreeMap<String, BTreeMap<String, Vec<String>>> = BTreeMap::new();
+    for (id, destination) in &destinations {
+        if let Some(first) = destination.components().next() {
+            let literal = first.as_os_str().to_string_lossy().into_owned();
+            by_folder
+                .entry(collision_key(&literal))
+                .or_default()
+                .entry(literal)
+                .or_default()
+                .push(id.clone());
+        }
+    }
+    found.extend(
+        by_folder
+            .into_iter()
+            // One key, several spellings: the rows disagree about the folder.
+            .filter(|(_, spellings)| spellings.len() > 1)
+            .map(|(key, spellings)| Collision {
+                key,
+                row_ids: spellings.into_values().flatten().collect(),
+                existing: None,
+            }),
+    );
+
     // Two rows over one underlying file. Under `--move` the first executes and
     // the second is left pointing at nothing.
     let mut by_inode: BTreeMap<u64, Vec<String>> = BTreeMap::new();
@@ -495,16 +522,34 @@ fn existing_conflict(dest_root: &Path, relative: &Path) -> Option<PathBuf> {
     for component in relative.components() {
         let name = component.as_os_str().to_string_lossy().into_owned();
         let key = collision_key(&name);
-        let existing = std::fs::read_dir(&current).ok()?.flatten().find_map(|e| {
-            let found = e.file_name().to_string_lossy().into_owned();
-            (collision_key(&found) == key).then_some(found)
-        })?;
-        if existing != name {
-            // A case or normalisation variant of this component is already
-            // there; the row would merge into it.
-            return Some(current.join(existing));
+
+        let entries = match std::fs::read_dir(&current) {
+            Ok(entries) => entries,
+            // Nothing is here, so nothing can conflict.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return None,
+            // Unreadable, or not a directory at all — a plain file named
+            // `Hellboy` sitting where a series folder belongs. Treating that
+            // as "no conflict" makes the plan promise a row that `apply`
+            // cannot execute.
+            Err(_) => return Some(current),
+        };
+
+        // Every match, not the first: with both `Hellboy/` and `hellboy/`
+        // present, descending into whichever `read_dir` yielded first could
+        // miss the book under the other spelling, nondeterministically.
+        let matches: Vec<String> = entries
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|found| collision_key(found) == key)
+            .collect();
+
+        match matches.as_slice() {
+            [] => return None,
+            [only] if *only == name => current = current.join(only),
+            // A case or normalisation variant is already there, or the
+            // destination holds several spellings of one name at once.
+            _ => return Some(current.join(&matches[0])),
         }
-        current = current.join(existing);
     }
     // Every component matched literally, so the whole path is occupied.
     Some(current)

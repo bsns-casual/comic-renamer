@@ -105,3 +105,12 @@ fn the_shipped_overrides_file_loads() {
         .is_some());
     assert!(o.lookup("SOA_04", "HumbleBOOMBundle").is_some());
 }
+
+#[test]
+fn a_punctuation_only_bundle_discriminator_is_rejected() {
+    // squash("!!!") is empty and folder.contains("") is always true, so the
+    // entry fired on every folder — the bare-filename key §6.2.1 forbids,
+    // wearing a disguise.
+    let (_d, path) = write("[\"SOME_Key\"]\nseries = \"S\"\nbundle = \"!!!\"\n");
+    assert!(Overrides::load(&path).is_err());
+}

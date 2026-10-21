@@ -378,3 +378,68 @@ fn two_rows_sharing_an_inode_are_reported_not_executed() {
     ];
     assert_eq!(find_collisions(&rows, d.path(), &Komga).len(), 1);
 }
+
+#[test]
+fn two_series_differing_only_in_case_are_one_folder() {
+    // Invariant 7: Hellboy/ and hellboy/ are one directory on APFS and two
+    // series on a Linux server. Grouping on the whole path misses it, because
+    // the leaves differ.
+    let d = tempdir().unwrap();
+    let _g = TreeGuard::new(&[d.path()]);
+    let rows = [
+        row("a", "Hellboy", Some(1), 9, 1),
+        row("b", "hellboy", Some(2), 9, 2),
+    ];
+    assert_eq!(find_collisions(&rows, d.path(), &Komga).len(), 1);
+}
+
+#[test]
+fn titles_that_sanitise_onto_one_folder_are_reported() {
+    // `Hellboy` and `Hellboy.` used to share a folder and keep distinct
+    // leaves, so two series merged on disk and nothing reported it.
+    let d = tempdir().unwrap();
+    let _g = TreeGuard::new(&[d.path()]);
+    for other in ["Hellboy.", "Hellboy ", "\u{200b}Hellboy"] {
+        let rows = [
+            row("a", "Hellboy", Some(1), 9, 1),
+            row("b", other, Some(1), 9, 2),
+        ];
+        assert_eq!(
+            find_collisions(&rows, d.path(), &Komga).len(),
+            1,
+            "{other:?} did not collide with Hellboy"
+        );
+    }
+}
+
+#[test]
+fn a_plain_file_where_a_series_folder_belongs_is_a_collision() {
+    // read_dir fails with NotADirectory. Reading that as "no conflict" makes
+    // the plan promise a row apply cannot execute.
+    let d = tempdir().unwrap();
+    std::fs::write(d.path().join("Hellboy"), b"not a directory").unwrap();
+    let _g = TreeGuard::new(&[d.path()]);
+    let rows = [row("a", "Hellboy", None, 1, 1)];
+    assert_eq!(find_collisions(&rows, d.path(), &Komga).len(), 1);
+}
+
+#[test]
+fn both_spellings_already_present_is_a_collision() {
+    // Descending into whichever read_dir yielded first could miss the book
+    // under the other spelling, nondeterministically.
+    //
+    // Needs a case-sensitive destination — a Linux server or a case-sensitive
+    // APFS volume. The default macOS volume folds case, so the two
+    // directories cannot both exist and there is nothing to test; skip rather
+    // than assert something the platform decided.
+    let d = tempdir().unwrap();
+    std::fs::create_dir(d.path().join("Hellboy")).unwrap();
+    if std::fs::create_dir(d.path().join("hellboy")).is_err() {
+        eprintln!("skipped: destination volume folds case");
+        return;
+    }
+    std::fs::write(d.path().join("hellboy/Hellboy.pdf"), b"x").unwrap();
+    let _g = TreeGuard::new(&[d.path()]);
+    let rows = [row("a", "Hellboy", None, 1, 1)];
+    assert!(!find_collisions(&rows, d.path(), &Komga).is_empty());
+}

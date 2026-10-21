@@ -66,6 +66,12 @@ impl Overrides {
                 return Err(OverrideError::DuplicateKey(key));
             }
             let bundle = squash(&entry.bundle);
+            // `squash("!!!")` is empty and `contains("")` is always true, so a
+            // punctuation-only discriminator fires on every folder — which is
+            // the bare-filename key §6.2.1 forbids, wearing a disguise.
+            if bundle.is_empty() {
+                return Err(OverrideError::MissingBundle(key));
+            }
             entries.push((squashed, bundle, entry));
         }
         Ok(Overrides { entries })

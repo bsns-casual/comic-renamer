@@ -115,3 +115,41 @@ fn preset_by_id_resolves_komga_and_nothing_else() {
     assert_eq!(preset_by_id("komga").unwrap().id(), "komga");
     assert!(preset_by_id("plex").is_none());
 }
+
+#[test]
+fn zero_width_characters_do_not_survive_into_a_path() {
+    // §6.11 forbids them in rule data; corpus titles are sanitised instead.
+    // CLAUDE.md records Humble prefixing promo items with a "Free Issue"
+    // marker containing one, so this arrives with real input.
+    let plain = Komga.destination(&res("Hellboy", None, 1, None), "pdf");
+    for invisible in ['\u{200b}', '\u{feff}', '\u{ad}', '\u{202e}'] {
+        let spiked = format!("Hell{invisible}boy");
+        assert_eq!(
+            Komga.destination(&res(&spiked, None, 1, None), "pdf"),
+            plain,
+            "{invisible:?} survived into the path"
+        );
+    }
+}
+
+#[test]
+fn an_extension_longer_than_the_budget_does_not_underflow() {
+    // MAX_COMPONENT_BYTES - suffix.len() panicked in debug and wrapped in
+    // release, skipping the 255-byte cap entirely.
+    let p = Komga.destination(&res("S", None, 1, None), &"x".repeat(300));
+    let name = p.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(!name.is_empty());
+}
+
+#[test]
+fn the_folder_and_the_filename_sanitise_the_same_way() {
+    // Building the stem from the raw series while the folder used the
+    // sanitised one let two titles merge in the folder and stay distinct in
+    // the leaf — invisible to a collision check that keys on the whole path.
+    for title in ["Hellboy.", "Hellboy ", "CON"] {
+        let p = Komga.destination(&res(title, None, 1, None), "pdf");
+        let folder = p.components().next().unwrap().as_os_str().to_string_lossy().into_owned();
+        let stem = p.file_stem().unwrap().to_string_lossy().into_owned();
+        assert_eq!(folder, stem, "{title:?} sanitised two different ways");
+    }
+}

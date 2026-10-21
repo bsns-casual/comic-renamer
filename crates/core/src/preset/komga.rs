@@ -44,7 +44,12 @@ impl Preset for Komga {
         // Volume before subtitle: Komga assigns number and numberSort
         // positionally after a natural sort, so filename order is reading
         // order (§6.8.1).
-        let mut stem = resolved.series.clone();
+        //
+        // Built from the *sanitized* series. Building it from the raw one
+        // made `Hellboy` and `Hellboy.` share a folder while keeping distinct
+        // leaves, so two series merged on disk and the collision detector,
+        // which keys on the whole path, reported nothing.
+        let mut stem = series.clone();
         if let Some(volume) = resolved.volume {
             stem.push_str(&format!(" Vol. {}", pad(volume, resolved.run)));
         }
@@ -58,7 +63,10 @@ impl Preset for Komga {
         } else {
             format!(".{ext}")
         };
-        let stem = truncate_bytes(&sanitize(&stem), MAX_COMPONENT_BYTES - suffix.len());
+        // saturating: a pathological extension longer than the whole budget
+        // underflowed, which panics in debug and wraps in release.
+        let budget = MAX_COMPONENT_BYTES.saturating_sub(suffix.len());
+        let stem = truncate_bytes(&sanitize(&stem), budget);
 
         PathBuf::from(series).join(format!("{stem}{suffix}"))
     }
@@ -76,7 +84,7 @@ pub fn pad(volume: u32, run: u32) -> String {
 pub fn sanitize(component: &str) -> String {
     let mapped: String = nfc(component)
         .chars()
-        .filter(|c| !c.is_control())
+        .filter(|c| !c.is_control() && !is_invisible(*c))
         .map(|c| {
             SUBSTITUTIONS
                 .iter()
@@ -102,6 +110,20 @@ pub fn sanitize(component: &str) -> String {
     } else {
         capped
     }
+}
+
+/// §6.11 forbids these in contributed rule data. Corpus titles are sanitised
+/// rather than rejected, but they must not survive into a path either: Humble
+/// prefixes promo items with a "Free Issue" marker containing a zero-width
+/// character, and `Hellboy` beside `Hell<U+200B>boy` is two folders no one
+/// can tell apart in Finder or in a diff.
+fn is_invisible(c: char) -> bool {
+    matches!(c,
+        '\u{ad}'
+        | '\u{200b}'..='\u{200f}'
+        | '\u{202a}'..='\u{202e}'
+        | '\u{2066}'..='\u{2069}'
+        | '\u{feff}')
 }
 
 /// A trailing dot or space is legal on APFS and silently stripped by Windows,
