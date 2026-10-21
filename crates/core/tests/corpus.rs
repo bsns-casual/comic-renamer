@@ -413,3 +413,64 @@ fn the_publisher_hint_does_not_make_titles_worse() {
     );
     assert_eq!(worse, 0, "the hint asserted {worse} wrong titles");
 }
+
+/// Reports located and ready rates over the held-out set. Ignored: needs the
+/// corpus. Task 14 owns the real gate; this is instrumentation, and it claims
+/// no silent-false-positive number — §7 and D26 reserve that for the graded
+/// ground-truth run.
+#[test]
+#[ignore]
+fn report_coverage_over_the_heldout_set() {
+    let Ok(zip_path) = std::env::var("COMIC_RENAMER_TEST_ZIP") else {
+        panic!("set COMIC_RENAMER_TEST_ZIP to a downloaded gcd-*.zip");
+    };
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/manifest.json");
+    let mut manifest = load_manifest(&repo).unwrap();
+    manifest.url = format!("file://{zip_path}");
+    let cache = TempDir::new().unwrap();
+    let db = ensure_corpus(&manifest, cache.path()).unwrap();
+    let corpus = Corpus::open(&db, &manifest).unwrap();
+    let overrides = Overrides::default();
+
+    let names = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/heldout-filenames.txt");
+    let text = std::fs::read_to_string(&names).unwrap();
+
+    let (mut total, mut located, mut ready) = (0usize, 0usize, 0usize);
+    let mut buckets: std::collections::BTreeMap<&str, usize> = Default::default();
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let stem = line.rsplit_once('.').map_or(line, |(s, _)| s);
+        // No folder hint: §6.3's "the no-publisher case is the common case".
+        let r = resolve(stem, "", &PublisherHint(None), &corpus, &overrides, "en");
+        total += 1;
+        let bucket = match &r.status {
+            Status::Ready(_) => {
+                ready += 1;
+                located += 1;
+                "ready"
+            }
+            Status::Review(reason) => {
+                located += 1;
+                match reason {
+                    comic_renamer_core::types::ReviewReason::Ambiguous(_) => "review:ambiguous",
+                    comic_renamer_core::types::ReviewReason::UnsplitSubtitle(_) => "review:subtitle",
+                    comic_renamer_core::types::ReviewReason::NoLanguageMatch => "review:language",
+                    comic_renamer_core::types::ReviewReason::VolumeInfeasible => "review:volume",
+                }
+            }
+            Status::Failed => {
+                if std::env::var("SHOW_FAILURES").is_ok() {
+                    println!("  FAIL {stem}");
+                }
+                "failed"
+            }
+        };
+        *buckets.entry(bucket).or_default() += 1;
+    }
+    let pct = |n: usize| 100.0 * n as f64 / total as f64;
+    println!("heldout: {total} names");
+    println!("  located {:.1}%   gate >= 92.3%", pct(located));
+    println!("  ready   {:.1}%   gate >= 66.0%", pct(ready));
+    for (bucket, count) in &buckets {
+        println!("  {bucket:<18} {:>5.1}%  ({count})", pct(*count));
+    }
+}

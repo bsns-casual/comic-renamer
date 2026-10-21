@@ -317,3 +317,33 @@ fn a_two_letter_publisher_needs_its_own_word() {
     // "dc" inside a longer word must not match.
     assert_eq!(publisher_hint("Humble Abdcef Bundle", &c).0, None);
 }
+
+#[test]
+fn feasibility_outranks_the_publisher_preference() {
+    // §6.3: step 2 is a preference, step 3 a hard constraint. issue_count
+    // counts one publisher's run, not a collected line — Lady Mechanika Vol. 6
+    // is real, but the English line spans three publishers and no single
+    // record reaches 6.
+    let (_d, c) = corpus(&[
+        ("Lady Mechanika", "ladymechanika", "Benitez Productions", "en", 2015, 7),
+        ("Lady Mechanika", "ladymechanika", "Image", "en", 2022, 5),
+        ("Lady Mechanika", "ladymechanika", "Image", "en", 2021, 1),
+    ]);
+    let hint = PublisherHint(Some("Image".into()));
+    let r = resolve("ladymechanika_vol6", "", &hint, &c, &no_ov(), "en");
+    assert_eq!(r.status, Status::Ready(Basis::VolumeFeasibility));
+    assert_eq!(r.series, "Lady Mechanika");
+    assert_eq!(r.record.unwrap().run, 7);
+}
+
+#[test]
+fn a_volume_no_record_can_hold_is_still_infeasible() {
+    // Review Focus 2 must keep working: dropping the publisher preference is
+    // not the same as dropping the constraint.
+    let (_d, c) = short_runs();
+    let hint = PublisherHint(Some("Image".into()));
+    assert!(matches!(
+        resolve("someseries_vol13", "", &hint, &c, &no_ov(), "en").status,
+        Status::Review(ReviewReason::VolumeInfeasible)
+    ));
+}

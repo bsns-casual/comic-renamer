@@ -88,19 +88,38 @@ pub fn resolve(
     if let Some(v) = volume {
         let feasible: Vec<SeriesRecord> = narrowed.iter().filter(|r| r.run >= v).cloned().collect();
         if feasible.is_empty() {
-            return Resolved {
-                series: String::new(),
-                volume,
-                subtitle,
-                run: 0,
-                status: Status::Review(ReviewReason::VolumeInfeasible),
-                record: None,
-            };
-        }
-        if feasible.len() < narrowed.len() {
+            // The publisher preference and the feasibility constraint
+            // disagree. §6.3 ranks them: step 2 is a preference, step 3 is a
+            // hard constraint, so the constraint wins and the preference is
+            // dropped rather than the row refused.
+            //
+            // This matters because `issue_count` counts one publisher's run,
+            // not a collected-edition line. *Lady Mechanika* Vol. 6 is real,
+            // but the English line spans Aspen, Benitez and Image and no
+            // single record reaches 6 — so narrowing to Image first made a
+            // legitimate book infeasible.
+            let line: Vec<SeriesRecord> =
+                in_language.iter().filter(|r| r.run >= v).cloned().collect();
+            if line.is_empty() {
+                // Review Focus 2: no record of this series, under any
+                // publisher, holds that many volumes.
+                return Resolved {
+                    series: String::new(),
+                    volume,
+                    subtitle,
+                    run: 0,
+                    status: Status::Review(ReviewReason::VolumeInfeasible),
+                    record: None,
+                };
+            }
+            narrowed = line;
             basis = Basis::VolumeFeasibility;
+        } else {
+            if feasible.len() < narrowed.len() {
+                basis = Basis::VolumeFeasibility;
+            }
+            narrowed = feasible;
         }
-        narrowed = feasible;
     }
 
     // 4. Shortest feasible run, and only with a volume in hand: without one,

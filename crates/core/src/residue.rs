@@ -202,6 +202,15 @@ fn to_roman(mut n: u32) -> String {
     out
 }
 
+/// Quality and variant markers distributors append before the numeric id
+/// (§6.1). Observed in the held-out set: `_hd` 33 times, `_optimized` 12,
+/// `_c` 7, `_downsampled` 4, `_update` 1.
+///
+/// An explicit list, not "whatever sits before the id":
+/// `valiantmasters_ninjak_1410912611` is *Valiant Masters: Ninjak*, and a
+/// positional rule would eat the title.
+const CRUFT_MARKERS: [&str; 5] = ["optimized", "downsampled", "hd", "c", "update"];
+
 /// Removes distributor cruft such as `_optimized_1420484117`.
 pub fn strip_cruft(s: &str) -> String {
     let mut t = s;
@@ -211,7 +220,10 @@ pub fn strip_cruft(s: &str) -> String {
         // real `_vol_1` survives. Raise the floor if a distributor ships
         // shorter ids.
         let is_id = segment.len() >= 6 && segment.chars().all(|c| c.is_ascii_digit());
-        if is_id || segment.eq_ignore_ascii_case("optimized") {
+        let is_marker = CRUFT_MARKERS
+            .iter()
+            .any(|m| segment.eq_ignore_ascii_case(m));
+        if is_id || is_marker {
             t = &t[..i];
         } else {
             break;
@@ -254,6 +266,28 @@ mod tests {
     fn a_word_that_merely_looks_roman_is_not_a_volume() {
         let r = eat("volcivilwar");
         assert_eq!((r.tokens.as_slice(), r.leftover.as_str()), (&[][..], "volcivilwar"));
+    }
+
+    #[test]
+    fn strips_every_observed_distributor_marker() {
+        for (raw, clean) in [
+            ("archerandarmstrong_vol1_hd_1410891143", "archerandarmstrong_vol1"),
+            ("AlexAndAda_Vol1_c_1420484117", "AlexAndAda_Vol1"),
+            ("GHA_Vol1_downsampled_1420484117", "GHA_Vol1"),
+            ("ODY-C_01_update_1420484117", "ODY-C_01"),
+        ] {
+            assert_eq!(strip_cruft(raw), clean);
+        }
+    }
+
+    #[test]
+    fn never_eats_a_title_word_that_sits_where_a_marker_would() {
+        // valiantmasters_ninjak is *Valiant Masters: Ninjak*. A positional
+        // rule -- strip whatever precedes the id -- would destroy it.
+        assert_eq!(
+            strip_cruft("valiantmasters_ninjak_1410912611"),
+            "valiantmasters_ninjak"
+        );
     }
 
     #[test]
