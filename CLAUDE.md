@@ -76,9 +76,9 @@ Dated `YYYY-MM-DD-<topic>.md`.
 
 ## State
 
-Design approved. **Phase 0 is complete. Phase 1 Tasks 1-9 are complete** —
-the library is built up to and including the syscall layer. Tasks 10-15 are
-untouched.
+Design approved. **Phase 0 is complete. Phase 1 Tasks 1-9 are complete and
+have passed their adversarial review** — the library is built up to and
+including the syscall layer. Tasks 10-15 are untouched.
 
 ```
 done   repo harness, CI, corpus manifest            (this file, .github/, corpus/)
@@ -92,9 +92,10 @@ done   T4   Layer B overrides            T8   sparse fixtures + TreeGuard
 done   T5   resolver ladder              T9   no-clobber syscalls + collisions
 ```
 
-**81 tests pass** (`cargo test --workspace`), plus one `#[ignore]`d test that
-runs the whole corpus path against the real release — set
-`COMIC_RENAMER_TEST_ZIP` to a downloaded `gcd-*.zip` and run `--ignored`.
+**106 tests pass** (`cargo test --workspace`), plus four `#[ignore]`d tests
+that run against the real corpus release — set `COMIC_RENAMER_TEST_ZIP` to a
+downloaded `gcd-*.zip` and run `--ignored`. They cover install-and-open,
+coverage rates, and the publisher hint's effect on real titles.
 
 Two environment notes: `cargo` lives in `~/.cargo/bin` and is not on a
 non-interactive shell's PATH, and clippy is not installed, so no lint run has
@@ -105,59 +106,55 @@ The Phase 1 plan is written and survived three adversarial reviews:
 
 ### Pick up here
 
-**The Task 9 adversarial review, before anything else.** T9 is the syscall
-layer, one of the two places this project stops for a fresh pair of eyes.
+**Task 10, `scan` — the first usable artifact.** Read-only by construction, so
+run `cargo run -- scan …` against the live 31.2 GiB bundle before `apply`
+exists.
 
-A ledger with every ruling made along the way is at
+The Task 9 adversarial review is **done**: two fresh reviewers, 18 confirmed
+defects, all fixed. The full list and every ruling is in
 `.superpowers/sdd/2026-10-20-phase-1-implementation/progress.md` (git-ignored).
-Five interface changes the skeleton did not carry:
+What it changed that a reader needs to know:
 
-- `Manifest` was snake_case with `deny_unknown_fields` and could not parse
-  `corpus/manifest.json` at all. Now camelCase with the four missing fields,
-  and a test reads the real file.
-- `resolve` takes `source_folder`, or Layer B is unreachable — the plan's own
-  step 3 says it must.
-- `Basis` gains `Publisher`. A row narrowed by a folder-name guess was
-  reporting `unambiguous` on the user's review surface.
-- `stream_verified` takes `dest_root`. Walking every ancestor for symlinks
-  refused every destination, because `/var` is itself a symlink on macOS.
-- `collisions` is public; the plan's tests call it directly.
+- Every write primitive takes `dest_root` and a relative path and resolves the
+  parent through an `O_NOFOLLOW` walk, holding the directory **descriptor**.
+  There is no call order to get wrong, and a component swapped for a symlink
+  after the walk cannot redirect the write. The clone path uses
+  `fclonefileat` with `CLONE_NOFOLLOW_ANY` — **not** `clonefileat`, which
+  walks the absolute source path where the flag trips on `/var`.
+- `TreeGuard` fingerprints the **inode**. `clonefile` preserves mtime to the
+  nanosecond, so a clone-and-replace swap was invisible to every guarded test.
+  `expect_changed` is gone; use `expect_created` / `expect_removed` /
+  `expect_modified`, and a declared change that never happens now fails.
+- Volume feasibility outranks the publisher hint (§6.3 ranks a hard constraint
+  above a preference). `issue_count` counts one publisher's run, not a
+  collected line — *Lady Mechanika* Vol. 6 spans three publishers.
+- The publisher hint matches on **word boundaries**, drops the distributor's
+  own name, and yields nothing when two publishers compete. Substring matching
+  fired on 2,223 of 2,223 rows.
 
-**Both earlier open risks are closed**, by downloading the real release and
-running against it rather than reasoning about it:
+### Known gaps against the gate, both spec-level
 
-- The manifest pins the **zip**: 35,341,426 bytes, sha256 matching exactly,
-  one member `gcd.sqlite` at 102,490,112 bytes. `ensure_corpus` now verifies
-  then extracts (zip 4.6.1 — 9.x needs a newer MSRV than the workspace's
-  declared 1.80, and bumping that is a plan change).
-- The schema is
-  `series(id, name, name_key, year_began, year_ended, publisher, language,
-  issue_count)` — two columns more than we read, in another order, which the
-  named `SELECT` already tolerated. `PRAGMA user_version` is **0**; the
-  extract publishes its version in a `meta` table as `meta.schema_version`.
+```
+located 91.6%   gate >= 92.3%
+ready   63.6%   gate >= 66.0%
+```
 
-Finding that cost two real bugs in T3, both of which rejected every real
-corpus and both of which the local fixtures were shaped to hide: `Corpus::open`
-compared the 97.7 MB database against the manifest's 33.7 MB `sizeBytes`, and
-compared `PRAGMA user_version` against the manifest. Fixtures now carry a
-`meta` table and a test builds the real schema shape.
+- `located`: *Domestic Girlfriend* and *Altair* are absent from the corpus —
+  manga romanisation, the gap §6.2.1 gives Layer B. And
+  `mirkaandolfosmercy_vol1` is the reverse match direction: the filename is a
+  prefix **of** the corpus name, where §6.1 specifies the opposite. Making
+  matching bidirectional is a spec change with real false-positive risk.
+- `ready`: largely the cost of implementing D28 correctly. Rows the original
+  measurement picked with the withdrawn earliest-edition tiebreaker now go to
+  review. **The 66% target wants re-deriving against the implemented ladder**
+  before Task 14 writes a gate that blocks merges.
 
-On the real 229,836-series corpus the ladder behaves as §6.3 describes: nine
-*Velvet* records across five languages, the hard language filter leaves the
-three English ones, shortest feasible run picks Image 2014. Whole path in a
-release build — verify, extract, index, two resolutions — **0.69s**, so the
-`// shortcut:` on per-variant cloning stays inside its stated budget.
+Three §6.11 items stay unenforced on purpose — total path budget, rule-count
+cap, file-size cap. All three govern *contributed* rule data, which is Phase 3;
+`data/overrides.toml` is first-party and CI already validates it.
 
-**Execution method: native** — `cargo check`/`cargo test` as the per-task gate.
 **Still stop for a fresh adversarial review after Task 12 (`apply`
 execution)**, the other place a mistake costs files rather than time.
-
-After the review: T10 `scan`, the first usable artifact. It is read-only by
-construction, so run `cargo run -- scan …` against the live 31.2 GiB bundle
-before `apply` exists.
-
-`tests/common/mod.rs` arrived at T5 rather than T8 — T5 is the first test that
-needed a shared fixture. T8 added the sparse generators and `TreeGuard` to it.
 
 Phase 0b — the 13-app research spike — runs *parallel* to Phase 1 and gates
 Phase 2 only. Nothing in Phase 1 waits on it.
