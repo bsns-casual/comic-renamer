@@ -7,7 +7,7 @@
 //! reasonable-looking shortcut.
 
 use crate::fsops::{
-    ensure_root, prune_empty_dirs, remove_at, rename_excl_at, stat_at, stream_verified,
+    ensure_root, prune_empty_dirs, resolve_at, stat_at, stream_verified,
 };
 use crate::types::{Mechanism, Mode, UndoError, UndoReport};
 use std::io::{self, Write};
@@ -258,9 +258,12 @@ fn reverse_one(
     plain_relative(&row.dest_relative)?;
     let source_name = single_component(&row.source_name)?;
 
-    // stat through a walked parent descriptor, so the check and the deletion
-    // that follows see the same directory.
-    let meta = match stat_at(dest_root, &row.dest_relative) {
+    // Resolved once and held: the identity check and whatever acts on it go
+    // through the same directory descriptor, so a component swapped between
+    // the two cannot redirect the second.
+    let entry = resolve_at(dest_root, &row.dest_relative)
+        .map_err(|e| format!("cannot resolve {}: {e}", row.dest_relative.display()))?;
+    let meta = match entry.metadata() {
         Ok(meta) => meta,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(e) => {
@@ -300,7 +303,7 @@ fn reverse_one(
                     source_name.display()
                 )),
                 Ok(_) => {
-                    remove_at(dest_root, &row.dest_relative).map_err(|e| e.to_string())?;
+                    entry.remove().map_err(|e| e.to_string())?;
                     prune_empty_dirs(dest_root, &row.dest_relative).map_err(|e| e.to_string())?;
                     Ok(true)
                 }
@@ -311,7 +314,7 @@ fn reverse_one(
             // on identity: inferring it from the filesystem produced a branch
             // that could never run.
             Ok(_) if row.status == Status::Placed => {
-                remove_at(dest_root, &row.dest_relative).map_err(|e| e.to_string())?;
+                entry.remove().map_err(|e| e.to_string())?;
                 prune_empty_dirs(dest_root, &row.dest_relative).map_err(|e| e.to_string())?;
                 Ok(true)
             }
@@ -321,12 +324,7 @@ fn reverse_one(
                 // The common case is a user who deleted the emptied bundle
                 // folder; `ensure_parent` is a no-op for a single component.
                 ensure_root(source_root).map_err(|e| e.to_string())?;
-                let restore = rename_excl_at(
-                    dest_root,
-                    &row.dest_relative,
-                    source_root,
-                    Path::new(source_name),
-                );
+                let restore = entry.rename_into(source_root, Path::new(source_name));
                 match restore {
                     Ok(()) => {
                         prune_empty_dirs(dest_root, &row.dest_relative)
@@ -343,7 +341,7 @@ fn reverse_one(
                         let from = dest_root.join(&row.dest_relative);
                         stream_verified(&from, source_root, Path::new(source_name))
                             .map_err(|e| e.to_string())?;
-                        match remove_at(dest_root, &row.dest_relative) {
+                        match entry.remove() {
                             Ok(()) => {
                                 prune_empty_dirs(dest_root, &row.dest_relative)
                                     .map_err(|e| e.to_string())?;

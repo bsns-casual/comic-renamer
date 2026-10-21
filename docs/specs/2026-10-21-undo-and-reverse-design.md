@@ -102,14 +102,20 @@ the same class of bug as the `starts_with` check this design exists to remove.
 
 So `fsops` gains, over one `resolve_destination` walk each:
 
-- `stat_at(root, relative)` — `fstatat` with `AT_SYMLINK_NOFOLLOW`
-- `remove_at(root, relative)` — `unlinkat`
-- `rename_excl_at(from_root, from_rel, to_root, to_rel)` — `renameatx_np`
-  with a descriptor on **both** sides, which it already accepts
+- `resolve_at(root, relative) -> Entry` — one walk, holding the parent
+  descriptor open
+- `Entry::metadata()`, `Entry::remove()`, `Entry::rename_into(to_root,
+  to_rel)` — all through that one descriptor
+- `stat_at(root, relative)` — a one-shot `metadata` where nothing destructive
+  follows
 - `ensure_root(root)` — `mkdir` the root itself when it is absent
+- `prune_empty_dirs(root, relative)` — `rmdir` upward, ignoring `ENOTEMPTY`
 
-The identity check and the destructive call that follows it must share the
-same parent descriptor, or the check is check-then-act on a name. `apply`'s
+**A handle, not a pair of functions.** `stat_at` followed by `remove_at`
+resolves twice, and a component swapped between the two walks means the check
+and the act saw different directories. macOS has no `funlinkat`, so the leaf
+name is still re-looked-up inside the parent at unlink time; holding the
+parent is what closes the part that can be closed. `apply`'s
 forward path moves to `rename_excl_at` too, since `verify_inside_source_root`
 already establishes its source as `source_root` + one component.
 

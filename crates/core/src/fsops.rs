@@ -159,50 +159,85 @@ pub fn rename_excl(src: &Path, dest_root: &Path, relative: &Path) -> io::Result<
     }
 }
 
-/// `fstatat` with `AT_SYMLINK_NOFOLLOW`, through a walked parent descriptor.
+/// A destination resolved **once**, held open, so a caller can stat it and
+/// then act on it through the same directory descriptor.
 ///
-/// The point of taking `(root, relative)` rather than a joined path: a joined
-/// path is resolved by the kernel, which follows a symlinked series directory
-/// beneath the root. `undo` stats a path it is about to delete, so the check
-/// and the deletion must see the same directory.
-pub fn stat_at(root: &Path, relative: &Path) -> io::Result<std::fs::Metadata> {
-    let destination = resolve_destination(root, relative)?;
-    // There is no safe std wrapper for fstatat, so the metadata is read
-    // through a descriptor opened on the leaf instead — O_SYMLINK so a
-    // symlink is described rather than followed.
-    use std::os::fd::{AsRawFd, FromRawFd};
-    // SAFETY: `parent` is an open directory we own and `leaf` outlives the call.
-    let raw = unsafe {
-        libc::openat(
-            destination.parent.as_raw_fd(),
-            destination.leaf.as_ptr(),
-            libc::O_RDONLY | libc::O_SYMLINK | libc::O_CLOEXEC,
-        )
-    };
-    if raw < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: a fresh descriptor we own; File takes it over and closes it.
-    let file = unsafe { std::fs::File::from_raw_fd(raw) };
-    file.metadata()
+/// `stat_at` followed by `remove_at` resolves twice, and a component can be
+/// swapped between the two walks — the check and the act would then see
+/// different directories. macOS has no `funlinkat`, so the name is still
+/// re-looked-up inside the parent at unlink time; holding the parent is what
+/// closes the part that can be closed.
+pub struct Entry {
+    destination: Destination,
 }
 
-/// `unlinkat` through a walked parent descriptor, for the same reason.
-pub fn remove_at(root: &Path, relative: &Path) -> io::Result<()> {
-    let destination = resolve_destination(root, relative)?;
-    // SAFETY: as above.
-    let rc = unsafe {
-        libc::unlinkat(
-            std::os::fd::AsRawFd::as_raw_fd(&destination.parent),
-            destination.leaf.as_ptr(),
-            0,
-        )
-    };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
+/// One walk. Every subsequent operation goes through the descriptor it holds.
+pub fn resolve_at(root: &Path, relative: &Path) -> io::Result<Entry> {
+    Ok(Entry {
+        destination: resolve_destination(root, relative)?,
+    })
+}
+
+impl Entry {
+    /// Describes a symlink rather than following it.
+    pub fn metadata(&self) -> io::Result<std::fs::Metadata> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        // SAFETY: `parent` is an open directory we own and `leaf` outlives
+        // the call; the descriptor is adopted by File immediately.
+        let raw = unsafe {
+            libc::openat(
+                self.destination.parent.as_raw_fd(),
+                self.destination.leaf.as_ptr(),
+                libc::O_RDONLY | libc::O_SYMLINK | libc::O_CLOEXEC,
+            )
+        };
+        if raw < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        unsafe { std::fs::File::from_raw_fd(raw) }.metadata()
     }
+
+    pub fn remove(&self) -> io::Result<()> {
+        // SAFETY: as above.
+        let rc = unsafe {
+            libc::unlinkat(
+                std::os::fd::AsRawFd::as_raw_fd(&self.destination.parent),
+                self.destination.leaf.as_ptr(),
+                0,
+            )
+        };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    /// Renames out of this entry's own directory, no-clobber.
+    pub fn rename_into(&self, to_root: &Path, to_relative: &Path) -> io::Result<()> {
+        let to = resolve_destination(to_root, to_relative)?;
+        // SAFETY: two open directory descriptors we own, two names that
+        // outlive the call.
+        let rc = unsafe {
+            libc::renameatx_np(
+                std::os::fd::AsRawFd::as_raw_fd(&self.destination.parent),
+                self.destination.leaf.as_ptr(),
+                std::os::fd::AsRawFd::as_raw_fd(&to.parent),
+                to.leaf.as_ptr(),
+                RENAME_EXCL,
+            )
+        };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+}
+
+/// Convenience for a one-shot stat where nothing destructive follows.
+pub fn stat_at(root: &Path, relative: &Path) -> io::Result<std::fs::Metadata> {
+    resolve_at(root, relative)?.metadata()
 }
 
 /// `renameatx_np` with a walked descriptor on **both** sides.
