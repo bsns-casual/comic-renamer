@@ -4,7 +4,9 @@
 mod common;
 
 use comic_renamer_core::corpus::{ensure_corpus, load_manifest, Corpus, Manifest};
-use comic_renamer_core::types::CorpusError;
+use comic_renamer_core::overrides::Overrides;
+use comic_renamer_core::resolve::resolve;
+use comic_renamer_core::types::{Basis, CorpusError, PublisherHint, Status};
 use common::{manifest_for, write_db};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -65,17 +67,116 @@ fn rejects_hash_mismatch_and_leaves_no_cache() {
     assert!(!dir.path().join("gcd.sqlite").exists());
 }
 
+/// A release-shaped archive: one deflated `.sqlite` member, as the real one
+/// has. `entry_name` is a parameter so zip-slip can be exercised.
+fn zip_containing(dir: &Path, entry_name: &str, body: &[u8]) -> PathBuf {
+    use std::io::Write;
+    let path = dir.join("release.zip");
+    let file = std::fs::File::create(&path).unwrap();
+    let mut writer = zip::ZipWriter::new(file);
+    writer
+        .start_file(entry_name, zip::write::SimpleFileOptions::default())
+        .unwrap();
+    writer.write_all(body).unwrap();
+    writer.finish().unwrap();
+    path
+}
+
 #[test]
 fn installs_a_corpus_whose_hash_matches() {
     // The other half of the pair: verification must not refuse everything.
     let dir = TempDir::new().unwrap();
-    let source = dir.path().join("source.bin");
-    std::fs::write(&source, b"pretend corpus").unwrap();
+    let source = zip_containing(dir.path(), "gcd.sqlite", b"pretend corpus");
     let m = manifest_for(&source, 1);
     let cache = TempDir::new().unwrap();
     let installed = ensure_corpus(&m, cache.path()).unwrap();
     assert_eq!(installed, cache.path().join("gcd.sqlite"));
+    // The database, not the archive: the release ships a 33.7 MB zip holding
+    // a 97.7 MB database, so installing the bytes verbatim installs a zip.
     assert_eq!(std::fs::read(&installed).unwrap(), b"pretend corpus");
+}
+
+#[test]
+fn an_archive_without_a_database_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let source = zip_containing(dir.path(), "README.txt", b"nothing useful");
+    let m = manifest_for(&source, 1);
+    let cache = TempDir::new().unwrap();
+    assert!(matches!(
+        ensure_corpus(&m, cache.path()),
+        Err(CorpusError::Archive(_))
+    ));
+    assert!(!cache.path().join("gcd.sqlite").exists());
+    assert!(!cache.path().join("gcd.sqlite.partial").exists());
+}
+
+#[test]
+fn a_zip_slip_entry_name_cannot_steer_the_write() {
+    // A member named ../../escape.sqlite must still land at the cache path.
+    let dir = TempDir::new().unwrap();
+    let source = zip_containing(dir.path(), "../../escape.sqlite", b"payload");
+    let m = manifest_for(&source, 1);
+    let cache = TempDir::new().unwrap();
+    let nested = cache.path().join("a/b");
+    std::fs::create_dir_all(&nested).unwrap();
+
+    let installed = ensure_corpus(&m, &nested).unwrap();
+    assert_eq!(installed, nested.join("gcd.sqlite"));
+    assert!(!cache.path().join("escape.sqlite").exists());
+}
+
+/// End-to-end against the real release. Ignored because it needs the 33.7 MB
+/// artifact; point `COMIC_RENAMER_TEST_ZIP` at a downloaded copy and run with
+/// `--ignored` to exercise ensure_corpus and Corpus::open on the real thing.
+#[test]
+#[ignore]
+fn the_real_release_installs_and_opens() {
+    let Ok(zip_path) = std::env::var("COMIC_RENAMER_TEST_ZIP") else {
+        panic!("set COMIC_RENAMER_TEST_ZIP to a downloaded gcd-*.zip");
+    };
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/manifest.json");
+    let mut manifest = load_manifest(&repo).unwrap();
+    manifest.url = format!("file://{zip_path}");
+
+    let cache = TempDir::new().unwrap();
+    let db = ensure_corpus(&manifest, cache.path()).expect("real release must install");
+    let corpus = Corpus::open(&db, &manifest).expect("real corpus must open");
+
+    // Nine records, one title, five languages — the case §6.3 is built
+    // around, and bigger than the spec's three-record example.
+    assert_eq!(corpus.lookup("velvet").len(), 9);
+    // The punctuation-expansion variant the index is supposed to carry (D16).
+    assert!(!corpus.lookup("hackandslash").is_empty());
+
+    // The ladder on real data: the language filter takes nine records to the
+    // three English ones, then shortest feasible run takes Image 2014.
+    let overrides = Overrides::default();
+    let resolved = resolve(
+        "velvet_vol1",
+        "",
+        &PublisherHint(None),
+        &corpus,
+        &overrides,
+        "en",
+    );
+    assert_eq!(resolved.status, Status::Ready(Basis::ShortestRun));
+    let record = resolved.record.unwrap();
+    assert_eq!(
+        (record.name.as_str(), record.publisher.as_str(), record.year_began),
+        ("Velvet", "Image", 2014)
+    );
+
+    // The boundary-guard case the kill test found: a naive longest-prefix
+    // match resolves this to the series *Witch*.
+    let witcher = resolve(
+        "witcheromnibus",
+        "",
+        &PublisherHint(None),
+        &corpus,
+        &overrides,
+        "en",
+    );
+    assert_eq!(witcher.series, "The Witcher Omnibus");
 }
 
 #[test]
@@ -126,7 +227,9 @@ fn the_repo_manifest_parses() {
 fn write_upstream_shaped_db(path: &Path, rows: usize) {
     let conn = rusqlite::Connection::open(path).unwrap();
     conn.execute_batch(
-        "CREATE TABLE series (
+        "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+         INSERT INTO meta VALUES ('schema_version', '1');
+         CREATE TABLE series (
              id          INTEGER PRIMARY KEY,
              name        TEXT    NOT NULL,
              name_key    TEXT    NOT NULL,

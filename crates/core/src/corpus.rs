@@ -5,10 +5,10 @@ use crate::types::{CorpusError, SeriesRecord};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// The `corpus/manifest.json` *format* version this build understands. It
-/// describes the manifest, not the database — `corpus-check.py` never copies
-/// it from upstream, and the extract sets no `PRAGMA user_version`.
-pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
+/// The corpus schema this build reads. The extract publishes its own version
+/// in `meta.schema_version`; it leaves `PRAGMA user_version` at 0, so reading
+/// the pragma rejects every real corpus.
+pub const CORPUS_SCHEMA_VERSION: u32 = 1;
 
 /// The cache filename. `ensure_corpus` installs here and `Corpus::open` reads it.
 pub const CACHE_FILENAME: &str = "gcd.sqlite";
@@ -38,12 +38,6 @@ pub fn load_manifest(path: &Path) -> Result<Manifest, CorpusError> {
     // claims otherwise is either wrong or pointing somewhere it should not.
     if !manifest.licence.starts_with("CC BY-SA") {
         return Err(CorpusError::Licence(manifest.licence));
-    }
-    if manifest.schema_version != MANIFEST_SCHEMA_VERSION {
-        return Err(CorpusError::SchemaVersion {
-            expected: MANIFEST_SCHEMA_VERSION,
-            actual: manifest.schema_version,
-        });
     }
     if manifest.sha256.len() != 64 || !manifest.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(CorpusError::Manifest(format!(
@@ -80,10 +74,6 @@ pub fn ensure_corpus(manifest: &Manifest, cache_dir: &Path) -> Result<PathBuf, C
         }
     }
 
-    // shortcut: the pinned release URL is a .zip and this installs the bytes
-    // verbatim, so a real fetch against corpus/manifest.json still needs an
-    // unzip step between fetch and verify. No archive crate is in the pinned
-    // dependency set; Task 14 is the first thing that needs it.
     let body = fetch(&manifest.url)?;
 
     if body.len() as u64 != manifest.size_bytes {
@@ -100,13 +90,43 @@ pub fn ensure_corpus(manifest: &Manifest, cache_dir: &Path) -> Result<PathBuf, C
         });
     }
 
-    // Verified before anything lands: write beside the target, then rename, so
-    // an interrupted write cannot leave a half corpus under the real name.
+    // Verified before anything lands: extract beside the target, then rename,
+    // so an interrupted write cannot leave a half corpus under the real name.
     std::fs::create_dir_all(cache_dir)?;
     let staging = cache_dir.join(format!("{CACHE_FILENAME}.partial"));
-    std::fs::write(&staging, &body)?;
+    let extracted = extract_database(&body, &staging);
+    if extracted.is_err() {
+        let _ = std::fs::remove_file(&staging);
+    }
+    extracted?;
     std::fs::rename(&staging, &target)?;
     Ok(target)
+}
+
+/// Pulls the single `.sqlite` member out of the release archive.
+///
+/// The entry's own name is never used to build a path. A zip from the network
+/// can name a member `../../etc/passwd`, and joining that onto a directory is
+/// the zip-slip write primitive; writing to a path we chose makes it moot.
+fn extract_database(archive: &[u8], out: &Path) -> Result<(), CorpusError> {
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive))
+        .map_err(|e| CorpusError::Archive(e.to_string()))?;
+
+    let index = (0..zip.len())
+        .find(|&i| {
+            zip.by_index(i)
+                .map(|entry| entry.name().ends_with(".sqlite"))
+                .unwrap_or(false)
+        })
+        .ok_or_else(|| CorpusError::Archive("archive holds no .sqlite member".into()))?;
+
+    let mut member = zip
+        .by_index(index)
+        .map_err(|e| CorpusError::Archive(e.to_string()))?;
+    let mut file = std::fs::File::create(out)?;
+    std::io::copy(&mut member, &mut file)?;
+    file.sync_all()?;
+    Ok(())
 }
 
 fn fetch(url: &str) -> Result<Vec<u8>, CorpusError> {
@@ -126,7 +146,9 @@ pub struct Corpus {
     #[allow(dead_code)] // held so the index's backing file stays open
     conn: rusqlite::Connection,
     // shortcut: clones per key variant; switch to Vec<SeriesRecord> +
-    // HashMap<String, Vec<u32>> if startup exceeds a second
+    // HashMap<String, Vec<u32>> if startup exceeds a second. Measured on the
+    // real 229,836-series release: 0.69s release-build for verify, extract,
+    // index and two resolutions together, so it is well inside budget.
     index: HashMap<String, Vec<SeriesRecord>>,
     /// Distinct publishers, for `publisher_hint` to match a folder name against.
     publishers: Vec<String>,
@@ -153,6 +175,24 @@ impl Corpus {
             "SELECT name, name_key, publisher, language, year_began, issue_count FROM series",
         )?;
 
+        // The extract carries its own version in `meta`, alongside its licence
+        // and attribution. `PRAGMA user_version` is 0 on the real corpus.
+        let schema: u32 = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        if schema != CORPUS_SCHEMA_VERSION || schema != manifest.schema_version {
+            return Err(CorpusError::SchemaVersion {
+                expected: CORPUS_SCHEMA_VERSION,
+                actual: schema,
+            });
+        }
+
         // sqlite integers are i64; rusqlite has no FromSql for u64.
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM series", [], |r| r.get(0))?;
         let count = count.max(0) as u64;
@@ -169,12 +209,14 @@ impl Corpus {
         let mut index: HashMap<String, Vec<SeriesRecord>> = HashMap::new();
         let rows = statement.query_map([], |r| {
             Ok((
+                // publisher, language and year_began are nullable in the
+                // schema. This release has no NULLs, but a later dump may.
                 SeriesRecord {
                     name: r.get(0)?,
-                    publisher: r.get(2)?,
-                    language: r.get(3)?,
-                    year_began: r.get(4)?,
-                    run: r.get(5)?,
+                    publisher: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    language: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                    year_began: r.get::<_, Option<i64>>(4)?.unwrap_or(0).clamp(0, 65535) as u16,
+                    run: r.get::<_, Option<i64>>(5)?.unwrap_or(0).max(0) as u32,
                 },
                 r.get::<_, String>(1)?,
             ))

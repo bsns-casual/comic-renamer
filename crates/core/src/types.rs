@@ -187,6 +187,8 @@ pub enum CorpusError {
     Licence(String),
     #[error("malformed manifest: {0}")]
     Manifest(String),
+    #[error("corpus archive is unusable: {0}")]
+    Archive(String),
     #[error("fetching the corpus failed: {0}")]
     Fetch(String),
     #[error(transparent)]
