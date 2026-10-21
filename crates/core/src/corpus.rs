@@ -74,7 +74,7 @@ pub fn ensure_corpus(manifest: &Manifest, cache_dir: &Path) -> Result<PathBuf, C
         }
     }
 
-    let body = fetch(&manifest.url)?;
+    let body = fetch(&manifest.url, manifest.size_bytes)?;
 
     if body.len() as u64 != manifest.size_bytes {
         return Err(CorpusError::SizeMismatch {
@@ -129,15 +129,24 @@ fn extract_database(archive: &[u8], out: &Path) -> Result<(), CorpusError> {
     Ok(())
 }
 
-fn fetch(url: &str) -> Result<Vec<u8>, CorpusError> {
+/// `expected` bounds the read. ureq defaults to a 10 MiB body limit, which
+/// silently refuses a 33.7 MiB corpus — every test uses `file://`, so only a
+/// real fetch found it. Bounding it to the pinned size is also the safer
+/// shape: a redirect cannot stream more than the manifest accounts for.
+fn fetch(url: &str, expected: u64) -> Result<Vec<u8>, CorpusError> {
     if let Some(path) = url.strip_prefix("file://") {
         return std::fs::read(path).map_err(Into::into);
     }
+    // One spare byte, so an over-long body overshoots the size check rather
+    // than being silently truncated to exactly the expected length.
+    let limit = expected.saturating_add(1) as usize;
     let mut response = ureq::get(url)
         .call()
         .map_err(|e| CorpusError::Fetch(e.to_string()))?;
     response
         .body_mut()
+        .with_config()
+        .limit(limit as u64)
         .read_to_vec()
         .map_err(|e| CorpusError::Fetch(e.to_string()))
 }

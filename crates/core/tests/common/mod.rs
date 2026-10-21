@@ -309,3 +309,12 @@ impl Drop for TreeGuard {
         );
     }
 }
+
+/// A source tree of named, **zero-byte** files. Invariant 3: size zero is
+/// never an error, and the whole fixture suite depends on it — `scan` stats
+/// these but never opens them.
+pub fn tree_from_names(dir: &Path, names: &[&str]) {
+    for name in names {
+        std::fs::File::create(dir.join(name)).unwrap();
+    }
+}
