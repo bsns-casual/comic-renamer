@@ -154,6 +154,19 @@ pub struct Progress {
     pub current: String,
 }
 
+/// What `reverse` actually did. It used to return `()`, so a run that
+/// restored nothing reported success — including when a permission error
+/// made `Path::exists()` answer `false`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct UndoReport {
+    pub restored: usize,
+    /// Already reversed, or never executed. Nothing to do.
+    pub skipped: usize,
+    /// Left alone and why: the destination is not what the manifest recorded,
+    /// the original path is occupied, or the row could not be examined.
+    pub refused: Vec<String>,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ApplyResult {
     pub executed: usize,
@@ -281,6 +294,12 @@ pub enum ApplyError {
 pub enum UndoError {
     #[error("{0} is occupied; refusing to reverse onto it")]
     Reoccupied(PathBuf),
+    #[error("another run holds the undo lock")]
+    Locked,
+    #[error("manifest records no destination root")]
+    NoRoot,
+    #[error("{0} is outside the manifest's destination root")]
+    OutsideRoot(PathBuf),
     #[error("line {line}: {message}")]
     Parse { line: usize, message: String },
     #[error(transparent)]

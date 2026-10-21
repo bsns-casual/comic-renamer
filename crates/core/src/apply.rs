@@ -148,9 +148,11 @@ fn apply_inner(
         });
     }
 
-    // `O_EXCL`: re-running a plan must not truncate the previous run's
-    // manifest, the only record of where those files went.
-    let mut undo = UndoWriter::create(&undo_path(plan))?;
+    // Created lazily, on the first row that actually executes. Creating it
+    // up front meant a run that refused every row still wrote a header-only
+    // manifest, and `O_EXCL` then rejected the plan forever — so fixing the
+    // collision and re-running was impossible.
+    let mut undo: Option<UndoWriter> = None;
 
     let total = runnable.len() as u64;
     let mut executed = 0usize;
@@ -160,7 +162,16 @@ fn apply_inner(
             total,
             current: row.source.to_string_lossy().into_owned(),
         });
-        execute(row, &header, preset.as_ref(), &mut undo, progress)?;
+        let writer = match &mut undo {
+            Some(writer) => writer,
+            None => {
+                // `O_EXCL`: re-running a plan must not truncate the previous
+                // run's manifest, the only record of where those files went.
+                undo = Some(UndoWriter::create(&undo_path(plan), &header.dest_root)?);
+                undo.as_mut().expect("just created")
+            }
+        };
+        execute(row, &header, preset.as_ref(), writer, progress)?;
         executed += 1;
     }
     progress(Progress {
@@ -236,7 +247,9 @@ fn execute(
         }
     }
 
-    undo.record_done(seq)?;
+    // The destination's identity, so `reverse` can refuse anything that is
+    // not the file this row put there.
+    undo.record_done(seq, &absolute)?;
     Ok(())
 }
 
@@ -328,11 +341,17 @@ fn verify_mechanism(row: &PlanRow, header: &PlanHeader) -> Result<(), ApplyError
 /// Only streaming rows consume space; a rename moves nothing and a clone is
 /// copy-on-write.
 fn verify_space(eligible: &[&PlanRow], header: &PlanHeader) -> Result<(), ApplyError> {
-    let required: u64 = eligible
-        .iter()
-        .filter(|row| row.mechanism == Mechanism::Stream)
-        .map(|row| row.source_stat.size)
-        .sum();
+    // Clone rows count too. `select_mechanism` returns Clone for any
+    // same-volume copy without probing the filesystem, and execution falls
+    // back to streaming when the clone fails — so a --copy run of nothing but
+    // Clone rows was checked against zero bytes and then streamed the lot.
+    // Measured on HFS+: 919 MiB free, usable() 0, a 400 MiB payload admitted
+    // and written.
+    //
+    // A clone that succeeds is copy-on-write and costs nothing, so this
+    // over-reserves on APFS. Refusing a run that would have fitted is
+    // recoverable; ENOSPC half way through a 31 GiB copy is not.
+    let required = required_bytes(eligible);
     if required == 0 {
         return Ok(());
     }
@@ -344,6 +363,24 @@ fn verify_space(eligible: &[&PlanRow], header: &PlanHeader) -> Result<(), ApplyE
         }),
         _ => Ok(()),
     }
+}
+
+/// Bytes a run may actually write.
+///
+/// Clone rows count. `select_mechanism` returns Clone for any same-volume
+/// copy without probing the filesystem, and execution falls back to streaming
+/// when the clone fails — so a `--copy` run of nothing but Clone rows was
+/// checked against zero and then streamed the lot. Measured on HFS+: 919 MiB
+/// free, `usable()` 0, a 400 MiB payload admitted and written.
+///
+/// A clone that succeeds is copy-on-write and costs nothing, so this
+/// over-reserves on APFS. Refusing a run that would have fitted is
+/// recoverable; ENOSPC half way through a 31 GiB copy is not.
+pub fn required_bytes(rows: &[&PlanRow]) -> u64 {
+    rows.iter()
+        .filter(|row| matches!(row.mechanism, Mechanism::Stream | Mechanism::Clone))
+        .map(|row| row.source_stat.size)
+        .sum()
 }
 
 /// Free space a run may consume: everything above a reserve of whichever is
@@ -366,6 +403,36 @@ mod tests {
         assert_eq!(usable(100 * GIB), 90 * GIB);
         // Exactly at the crossover both give the same answer.
         assert_eq!(usable(10 * GIB), 9 * GIB);
+    }
+
+    #[test]
+    fn a_clone_row_reserves_its_full_size() {
+        let row = |mechanism, size| PlanRow {
+            id: "r".into(),
+            source: PathBuf::from("/src/a.pdf"),
+            destination_preview: PathBuf::new(),
+            extension: "pdf".into(),
+            series: "S".into(),
+            volume: None,
+            subtitle: None,
+            run: 1,
+            status: Status::Ready(crate::types::Basis::Unambiguous),
+            mechanism,
+            source_stat: crate::types::SourceStat {
+                size,
+                mtime_ns: 0,
+                inode: 1,
+            },
+            record: None,
+        };
+        let rows = [
+            row(Mechanism::Clone, 400),
+            row(Mechanism::Stream, 30),
+            row(Mechanism::Rename, 1_000_000),
+        ];
+        let borrowed: Vec<&PlanRow> = rows.iter().collect();
+        // Clone and Stream count; a rename moves no bytes.
+        assert_eq!(required_bytes(&borrowed), 430);
     }
 
     #[test]

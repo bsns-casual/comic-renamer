@@ -306,3 +306,27 @@ fn an_edited_plan_cannot_make_the_roots_overlap() {
         Err(ApplyError::RootsOverlap)
     ));
 }
+
+#[test]
+fn a_run_that_executes_nothing_does_not_burn_the_plan() {
+    // The manifest was created before the loop, so refusing every row still
+    // wrote a header-only .undo.csv — and O_EXCL then rejected the plan
+    // forever, so fixing the collision and re-running was impossible.
+    let (_g, c) = gcd();
+    let f = Fixture::new(&["mazebook.pdf"], &c);
+    std::fs::create_dir(f.dest.join("Mazebook")).unwrap();
+    std::fs::write(f.dest.join("Mazebook/Mazebook.pdf"), b"in the way").unwrap();
+
+    let r = comic_renamer_core::apply::apply(&f.plan, false, &mut |_| {}).unwrap();
+    assert_eq!((r.executed, r.skipped), (0, 1));
+    assert!(
+        !comic_renamer_core::apply::undo_path(&f.plan).exists(),
+        "a run that moved nothing still created a manifest"
+    );
+
+    // The user clears the collision and re-runs the same plan.
+    std::fs::remove_dir_all(f.dest.join("Mazebook")).unwrap();
+    let r = comic_renamer_core::apply::apply(&f.plan, false, &mut |_| {}).unwrap();
+    assert_eq!(r.executed, 1, "the plan was unusable after a refused run");
+}
+

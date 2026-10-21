@@ -105,8 +105,8 @@ fn collect(dir: &Path, out: &mut Vec<String>) {
 fn create_refuses_an_existing_manifest() {
     let d = tempdir().unwrap();
     let path = d.path().join("run.undo.csv");
-    let _first = UndoWriter::create(&path).expect("first create");
-    let second = UndoWriter::create(&path);
+    let _first = UndoWriter::create(&path, d.path()).expect("first create");
+    let second = UndoWriter::create(&path, d.path());
     assert_eq!(
         second.err().map(|e| e.kind()),
         Some(ErrorKind::AlreadyExists),
@@ -118,7 +118,7 @@ fn create_refuses_an_existing_manifest() {
 fn pending_is_on_disk_before_the_operation() {
     let d = tempdir().unwrap();
     let path = d.path().join("run.undo.csv");
-    let mut writer = UndoWriter::create(&path).unwrap();
+    let mut writer = UndoWriter::create(&path, d.path()).unwrap();
     writer
         .record_pending(
             Path::new("/src/a.pdf"),
@@ -132,23 +132,174 @@ fn pending_is_on_disk_before_the_operation() {
 }
 
 #[test]
-fn a_comma_in_a_title_survives_the_round_trip() {
-    // The GCD lists *Hellboy, the Corpse and the Iron Shoes*.
+fn awkward_filenames_survive_the_manifest_round_trip() {
+    // The GCD lists *Hellboy, the Corpse and the Iron Shoes*; newlines are
+    // legal on APFS and arrive from bundle filenames. The writer quoted both
+    // correctly all along — the reader used `str::lines`, which splits inside
+    // a quoted field, so one such name made the whole run unreversible.
     let d = tempdir().unwrap();
-    let path = d.path().join("run.undo.csv");
-    let awkward = d.path().join("Hellboy, the Corpse and the \"Iron\" Shoes.pdf");
-    std::fs::write(&awkward, b"x").unwrap();
-    let mut writer = UndoWriter::create(&path).unwrap();
-    writer
-        .record_pending(&awkward, &awkward, Mechanism::Clone, Mode::Copy)
+    for name in [
+        "Hellboy, the Corpse and the \"Iron\" Shoes.pdf",
+        "two\nlines.pdf",
+    ] {
+        let run = d.path().join(format!("run{}.csv", name.len()));
+        let dest = d.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        let victim = dest.join(name);
+        std::fs::write(&victim, b"copied here by the tool").unwrap();
+
+        let mut writer = UndoWriter::create(&run, &dest).unwrap();
+        let seq = writer
+            .record_pending(Path::new("/src/x.pdf"), &victim, Mechanism::Clone, Mode::Copy)
+            .unwrap();
+        writer.record_done(seq, &victim).unwrap();
+        drop(writer);
+
+        let report = reverse(&run).unwrap();
+        assert_eq!(report.restored, 1, "{name:?} did not round-trip: {report:?}");
+        assert!(!victim.exists());
+    }
+}
+
+#[test]
+fn reverse_refuses_a_destination_it_did_not_create() {
+    // The manifest used to record no identity at all, so `reverse` deleted
+    // or relocated whatever sat at the path. Replace a library file with a
+    // better scan, run undo, and the replacement was taken.
+    let d = tempdir().unwrap();
+    let run = d.path().join("run.csv");
+    let dest = d.path().join("dest");
+    std::fs::create_dir_all(&dest).unwrap();
+    let path = dest.join("Mazebook.pdf");
+    std::fs::write(&path, b"what the tool copied").unwrap();
+
+    let mut writer = UndoWriter::create(&run, &dest).unwrap();
+    let seq = writer
+        .record_pending(Path::new("/src/x.pdf"), &path, Mechanism::Clone, Mode::Copy)
         .unwrap();
+    writer.record_done(seq, &path).unwrap();
     drop(writer);
 
-    let text = std::fs::read_to_string(&path).unwrap();
-    assert!(text.contains("\"\"Iron\"\""), "quotes are not doubled: {text}");
-    // reverse parses it back and finds the file, which is the real proof.
-    reverse(&path).unwrap();
-    assert!(!awkward.exists(), "a copy reverses by deleting the destination");
+    // The user replaces it with a better scan.
+    std::fs::write(&path, b"THE GOOD SCAN, much larger than before").unwrap();
+
+    let report = reverse(&run).unwrap();
+    assert_eq!(report.restored, 0);
+    assert_eq!(report.refused.len(), 1, "{report:?}");
+    assert!(path.exists(), "reverse deleted a file the tool never created");
+}
+
+#[test]
+fn reverse_refuses_a_destination_outside_the_manifests_root() {
+    // A manifest is as untrusted as a plan (§6.11): a hand-written one used
+    // to make `reverse` delete any file on the system.
+    let d = tempdir().unwrap();
+    let outside = d.path().join("private");
+    std::fs::create_dir_all(&outside).unwrap();
+    let victim = outside.join("tax-return.pdf");
+    std::fs::write(&victim, b"PRIVATE").unwrap();
+    let dest = d.path().join("dest");
+    std::fs::create_dir_all(&dest).unwrap();
+
+    let run = d.path().join("hand-written.csv");
+    std::fs::write(
+        &run,
+        format!(
+            "seq,status,mode,mechanism,source,destination,size,inode\n\
+             0,root,,,,'{},,\n\
+             1,pending,copy,clone,'/src/x.pdf,'{},7,1\n",
+            dest.display(),
+            victim.display()
+        ),
+    )
+    .unwrap();
+
+    let report = reverse(&run).unwrap();
+    assert_eq!(report.restored, 0);
+    assert!(victim.exists(), "reverse deleted a file outside its own root");
+}
+
+#[test]
+fn a_torn_final_line_does_not_abandon_the_rows_before_it() {
+    // The crash this manifest exists to survive. A truncated last record used
+    // to abort the whole file, leaving every completed row stranded.
+    let (_g, c) = gcd();
+    let f = Fixture::new(&["mazebook.pdf"], &c, Mode::Move);
+    apply(&f.plan, false, &mut |_| {}).unwrap();
+
+    let mut text = std::fs::read_to_string(f.manifest()).unwrap();
+    text.push_str("2,pending,move,ren");
+    std::fs::write(f.manifest(), text).unwrap();
+
+    let report = reverse(&f.manifest()).unwrap();
+    assert_eq!(report.restored, 1, "{report:?}");
+    assert_eq!(report.refused.len(), 1, "the torn tail was not reported");
+    assert!(f.source.join("mazebook.pdf").exists());
+}
+
+#[test]
+fn one_refused_row_does_not_block_the_others() {
+    // Rows unwind newest-first, and the first Reoccupied used to return,
+    // so an earlier successful row never came back — forever, on every
+    // re-run.
+    let (_g, c) = gcd();
+    let f = Fixture::new(&["mazebook.pdf", "birdking_vol1.pdf"], &c, Mode::Move);
+    apply(&f.plan, false, &mut |_| {}).unwrap();
+    assert!(f.files_under(&f.source).is_empty());
+
+    // A squatter at one original path.
+    std::fs::write(f.source.join("birdking_vol1.pdf"), b"squatter").unwrap();
+
+    let report = reverse(&f.manifest()).unwrap();
+    assert_eq!(report.restored, 1, "{report:?}");
+    assert_eq!(report.refused.len(), 1, "{report:?}");
+    assert!(f.source.join("mazebook.pdf").exists(), "the other row never came back");
+}
+
+#[test]
+fn reverse_reports_what_it_could_not_examine() {
+    // Path::exists() answers false on EACCES, so a permission problem read as
+    // "already reversed" and reverse returned success having done nothing.
+    let (_g, c) = gcd();
+    let f = Fixture::new(&["mazebook.pdf"], &c, Mode::Move);
+    apply(&f.plan, false, &mut |_| {}).unwrap();
+
+    let series = f.dest.join("Mazebook");
+    let mut locked = std::fs::metadata(&series).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut locked, 0o000);
+    std::fs::set_permissions(&series, locked).unwrap();
+
+    let report = reverse(&f.manifest());
+
+    let mut restore = std::fs::metadata(&series).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut restore, 0o700);
+    std::fs::set_permissions(&series, restore).unwrap();
+
+    let report = report.unwrap();
+    assert_eq!(report.restored, 0);
+    assert!(
+        !report.refused.is_empty(),
+        "an unreadable destination was reported as nothing to do: {report:?}"
+    );
+}
+
+#[test]
+fn reverse_takes_the_lock() {
+    // Task 11: "the lock is an O_EXCL file beside the plan; undo takes it
+    // too." It did not, so an apply and an undo could interleave.
+    let (_g, c) = gcd();
+    let f = Fixture::new(&["mazebook.pdf"], &c, Mode::Move);
+    apply(&f.plan, false, &mut |_| {}).unwrap();
+
+    let mut held = f.manifest().into_os_string();
+    held.push(".lock");
+    std::fs::write(&held, b"").unwrap();
+    assert!(matches!(
+        reverse(&f.manifest()),
+        Err(comic_renamer_core::types::UndoError::Locked)
+    ));
+    std::fs::remove_file(&held).unwrap();
+    assert_eq!(reverse(&f.manifest()).unwrap().restored, 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -340,7 +491,11 @@ fn reverse_refuses_to_overwrite_a_squatter() {
     apply(&f.plan, false, &mut |_| {}).unwrap();
     std::fs::write(f.source.join("mazebook.pdf"), b"squatter").unwrap();
 
-    assert!(reverse(&f.manifest()).is_err());
+    // Per-row now, not a whole-manifest error: one bad row must not strand
+    // every other row in the file.
+    let report = reverse(&f.manifest()).unwrap();
+    assert_eq!(report.restored, 0);
+    assert_eq!(report.refused.len(), 1, "{report:?}");
     assert_eq!(
         std::fs::read_to_string(f.source.join("mazebook.pdf")).unwrap(),
         "squatter",
