@@ -280,15 +280,32 @@ fn publisher_hint_matches_a_camel_case_folder_on_word_boundaries() {
 }
 
 #[test]
-fn publisher_hint_is_absent_when_two_publishers_match() {
-    // §6.3 step 2 lets the hint promote a row to `ready`, so a wrong one is a
-    // silent-wrongness path. Step 5: never silently pick.
+fn the_distributor_name_does_not_outrank_the_real_publisher() {
+    // The corpus holds a small publisher literally called "Humble Comics", and
+    // taking the longest match preferred it over the IDW named in the same
+    // folder. Dropping the shop's own name from the front settles it.
     let (_d, c) = corpus(&[
         ("A", "a", "Humble Comics", "en", 2004, 3),
         ("B", "b", "IDW", "en", 2004, 3),
     ]);
     assert_eq!(
-        publisher_hint("Humble Comics Bundle: Godzilla by IDW", &c).0,
+        publisher_hint("Humble Comics Bundle: Godzilla by IDW", &c)
+            .0
+            .as_deref(),
+        Some("IDW")
+    );
+}
+
+#[test]
+fn publisher_hint_is_absent_when_two_publishers_match() {
+    // §6.3 step 2 lets the hint promote a row to `ready`, so a wrong one is a
+    // silent-wrongness path. Step 5: never silently pick.
+    let (_d, c) = corpus(&[
+        ("A", "a", "Dark Horse", "en", 2004, 3),
+        ("B", "b", "Image", "en", 2004, 3),
+    ]);
+    assert_eq!(
+        publisher_hint("Dark Horse and Image Crossover Showcase", &c).0,
         None
     );
 }
