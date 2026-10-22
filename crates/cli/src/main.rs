@@ -10,10 +10,11 @@
 
 use clap::{Parser, Subcommand, ValueEnum};
 use comic_renamer_core::corpus::{ensure_corpus, parse_manifest, Corpus};
-use comic_renamer_core::fsops::is_dataless;
+use comic_renamer_core::fsops::{find_collisions, is_dataless};
+use comic_renamer_core::preset::{preset_by_id, Preset};
 use comic_renamer_core::overrides::Overrides;
 use comic_renamer_core::types::{
-    Mechanism, Mode, OverrideError, PlanRow, Progress, ScanOpts, Status, UndoReport,
+    Collision, Mechanism, Mode, OverrideError, PlanRow, Progress, ScanOpts, Status, UndoReport,
 };
 use comic_renamer_core::{apply, komga_api, plan, scan};
 use std::io::Write;
@@ -23,6 +24,9 @@ use std::process::ExitCode;
 /// Pinned at build time (§6.5): the repository holds the manifest, the tool
 /// fetches and hash-verifies the corpus on first use, then caches it.
 const MANIFEST: &str = include_str!("../../../corpus/manifest.json");
+
+/// Enough to act on, not a wall of text. The rest are counted.
+const COLLISIONS_SHOWN: usize = 5;
 
 #[derive(Parser)]
 #[command(name = "comic-renamer", version, about = "Rename comic bundles into a library layout")]
@@ -246,13 +250,35 @@ fn run_apply(
         .iter()
         .filter(|row| matches!(row.status, Status::Ready(_)))
         .collect();
-    if eligible.is_empty() {
-        println!("No row is ready. Nothing to do.");
-        return Ok(());
+
+    // Canonical, like `apply`'s: an uncanonicalised root walks a different
+    // tree through a symlinked library and would miss an existing file.
+    let dest_root = std::fs::canonicalize(&header.dest_root)
+        .map_err(|e| format!("{}: {e}", header.dest_root.display()))?;
+    let preset = preset_by_id(&header.preset)
+        .ok_or_else(|| format!("unknown preset {:?}", header.preset))?;
+    let facts = Facts::gather(
+        header.mode,
+        &eligible,
+        &rows,
+        &dest_root,
+        preset.as_ref(),
+        edited,
+    )
+    .map_err(|e| e.to_string())?;
+    if facts.files == 0 {
+        // Nothing to consent to, so no mode block and no prompt: a MOVE
+        // prompt over a run that will move nothing teaches the user that the
+        // prompt does not mean anything.
+        print!("{}", nothing_to_do(&facts));
+        if rows.is_empty() {
+            return Ok(());
+        }
+        // A caller cannot tell "the library now matches the plan" from "it
+        // does not" out of an exit code that is zero either way.
+        return Err("nothing was placed".into());
     }
 
-    let facts = Facts::gather(header.mode, &eligible, rows.len(), edited)
-        .map_err(|e| e.to_string())?;
     print!("{}", disclose(&facts));
     if !yes {
         confirm(header.mode)?;
@@ -264,8 +290,13 @@ fn run_apply(
         "\n{} placed · {} skipped · {} failed",
         result.executed, result.skipped, result.failed
     );
-    println!("undo manifest: {}", apply::undo_path(path).display());
-    println!("  comic-renamer undo {}", path.display());
+    // The manifest is created lazily, on the first row that executes, so
+    // naming it after a run that placed nothing points at a file that is not
+    // there.
+    if result.executed > 0 {
+        println!("undo manifest: {}", apply::undo_path(path).display());
+        println!("  comic-renamer undo {}", path.display());
+    }
     Ok(())
 }
 
@@ -282,9 +313,11 @@ fn render_progress(p: Progress) {
 
 /// What the disclosure states, measured rather than assumed.
 ///
-/// Totals are over the **eligible** rows, never the plan's header: a scan of
-/// 412 files whose review queue holds 150 of them would otherwise disclose a
-/// payload `apply` is not going to touch.
+/// Every total is over the rows `apply` will actually run — not the plan's
+/// header, and not the ready rows either. Two sets get dropped on the way and
+/// both have to be subtracted before a number is honest: rows still in review,
+/// and rows `apply` refuses for a collision. `files` counted the ready rows
+/// and so promised a file that a destination collision was about to skip.
 struct Facts {
     mode: Mode,
     files: usize,
@@ -301,6 +334,12 @@ struct Facts {
     /// disclosure that counted only the ready rows would leave a third of the
     /// bundle sitting in the source with no word about why.
     not_ready: usize,
+    /// Rows `apply` will refuse, and why — a path already in the library, or
+    /// two rows wanting one name. §6.10 calls merging into a library that
+    /// already holds `Hellboy/` the common case, not the rare one, so a
+    /// disclosure that reported the count without the reason would leave the
+    /// user with "0 placed · 1 skipped" and nothing to act on.
+    collisions: Vec<String>,
     edited: bool,
 }
 
@@ -308,16 +347,53 @@ impl Facts {
     fn gather(
         mode: Mode,
         eligible: &[&PlanRow],
-        total_rows: usize,
+        rows: &[PlanRow],
+        dest_root: &Path,
+        preset: &dyn Preset,
         edited: bool,
     ) -> std::io::Result<Facts> {
+        // The same call `apply` makes, on the same inputs, so the two cannot
+        // disagree about which rows are going to run.
+        let found = find_collisions(rows, dest_root, preset);
+        let colliding: Vec<&str> = found
+            .iter()
+            .flat_map(|c| c.row_ids.iter().map(String::as_str))
+            .collect();
+        let runnable: Vec<&PlanRow> = eligible
+            .iter()
+            .filter(|row| !colliding.contains(&row.id.as_str()))
+            .copied()
+            .collect();
+
+        let describe = |c: &Collision| match &c.existing {
+            // The path already in the library, in the library's own terms.
+            Some(_) => format!(
+                "{} is already in the library",
+                preview_of(rows, &c.row_ids).unwrap_or_else(|| c.key.clone())
+            ),
+            None if c.row_ids.len() > 1 => format!(
+                "{} rows want one name: {}",
+                c.row_ids.len(),
+                preview_of(rows, &c.row_ids).unwrap_or_else(|| c.key.clone())
+            ),
+            None => format!("cannot be placed: {}", c.key),
+        };
+
         let mut placeholders = 0usize;
         let mut placeholder_bytes = 0u64;
-        for row in eligible {
+        for row in &runnable {
             // Re-read rather than trust the scan: a placeholder hydrated since
             // then is no longer a download, and the user is owed the current
             // number. An error here means the tree moved under us, which
             // `apply`'s own re-stat is about to refuse — so it propagates.
+            //
+            // shortcut: this accumulation is unprovable locally. `SF_DATALESS`
+            // is kernel-managed and `chflags` cannot set it, so no generated
+            // fixture is dataless and a mutation that reports zero
+            // placeholders survives the suite. `is_dataless` itself is pinned
+            // in core against both sparse cases (invariant 8); what is not
+            // pinned is that these two lines add up. Verified by hand against
+            // a real Dropbox placeholder during D23.
             if is_dataless(&row.source)? {
                 placeholders += 1;
                 placeholder_bytes += row.source_stat.size;
@@ -325,18 +401,78 @@ impl Facts {
         }
         Ok(Facts {
             mode,
-            files: eligible.len(),
-            bytes: eligible.iter().map(|row| row.source_stat.size).sum(),
-            reserve: apply::required_bytes(eligible),
-            cross_volume: eligible
+            files: runnable.len(),
+            bytes: runnable.iter().map(|row| row.source_stat.size).sum(),
+            reserve: apply::required_bytes(&runnable),
+            cross_volume: runnable
                 .iter()
                 .any(|row| row.mechanism == Mechanism::Stream),
             placeholders,
             placeholder_bytes,
-            not_ready: total_rows.saturating_sub(eligible.len()),
+            not_ready: rows.len() - eligible.len(),
+            // Only the ones that cost this run a row. `find_collisions`
+            // scans every row, so two review rows wanting one name would
+            // otherwise be reported as a refusal of work nobody asked for.
+            collisions: found
+                .iter()
+                .filter(|c| {
+                    c.row_ids
+                        .iter()
+                        .any(|id| eligible.iter().any(|row| &row.id == id))
+                })
+                .map(describe)
+                .collect(),
             edited,
         })
     }
+}
+
+/// The plan's own `destination_preview` for the first of `ids`, which is what
+/// that field is for: display data a reviewer reads, never an instruction
+/// anything acts on (D14).
+fn preview_of(rows: &[PlanRow], ids: &[String]) -> Option<String> {
+    let first = ids.first()?;
+    let row = rows.iter().find(|row| &row.id == first)?;
+    Some(row.destination_preview.display().to_string())
+}
+
+/// Why a run that will place nothing is going to place nothing. The mode
+/// block is deliberately absent: there is no consequence to disclose and
+/// nothing to type a word over.
+fn nothing_to_do(f: &Facts) -> String {
+    let mut out = String::from("\n  Nothing to do — not one row can be placed.\n");
+    if f.not_ready > 0 {
+        out.push_str(&format!(
+            "\n  Needs a human: {}. Edit the plan's metadata, not its paths.\n",
+            plural(f.not_ready, "row")
+        ));
+    }
+    out.push_str(&collision_lines(f));
+    out.push('\n');
+    out
+}
+
+/// Listed, not just counted. §6.10 refuses the row and never overwrites or
+/// auto-suffixes, so what the user does next depends entirely on which row it
+/// was and why — "0 placed · 1 skipped" on its own is unactionable.
+fn collision_lines(f: &Facts) -> String {
+    if f.collisions.is_empty() {
+        return String::new();
+    }
+    let mut out = format!(
+        "\n  Refused and left alone: {}.\n",
+        plural(f.collisions.len(), "row")
+    );
+    for reason in f.collisions.iter().take(COLLISIONS_SHOWN) {
+        out.push_str(&format!("    {reason}\n"));
+    }
+    if f.collisions.len() > COLLISIONS_SHOWN {
+        out.push_str(&format!(
+            "    ...and {} more\n",
+            f.collisions.len() - COLLISIONS_SHOWN
+        ));
+    }
+    out
 }
 
 /// §6.10: the mode, its consequence, disk arithmetic and **download cost
@@ -399,6 +535,8 @@ fn disclose(f: &Facts) -> String {
             f.not_ready + f.files
         ));
     }
+
+    out.push_str(&collision_lines(f));
 
     // Reported apart from disk, always. A plan whose sources are dataless
     // transfers these bytes whatever mechanism is chosen, and "no extra disk
@@ -545,6 +683,7 @@ mod tests {
             placeholders: 0,
             placeholder_bytes: 0,
             not_ready: 0,
+            collisions: Vec::new(),
             edited: false,
         }
     }
@@ -636,6 +775,14 @@ mod tests {
         assert!(out.contains("1 file ·"), "{out}");
         assert!(!out.contains("1 files"), "{out}");
         assert!(out.contains("1 file is a cloud placeholder"), "{out}");
+
+        // And the other side: 412 is not "412 file".
+        let mut many = facts(Mode::Move, false);
+        many.placeholders = 38;
+        many.placeholder_bytes = 1 << 20;
+        let out = disclose(&many);
+        assert!(out.contains("412 files ·"), "{out}");
+        assert!(out.contains("38 files are cloud placeholders"), "{out}");
     }
 
     #[test]

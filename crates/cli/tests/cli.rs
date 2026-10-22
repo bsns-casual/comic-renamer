@@ -133,7 +133,15 @@ fn write_plan(
 }
 
 fn run(args: &[&str], stdin: &str) -> Output {
-    let mut child = Command::new(EXE)
+    run_with_env(args, stdin, &[])
+}
+
+fn run_with_env(args: &[&str], stdin: &str, env: &[(&str, &str)]) -> Output {
+    let mut command = Command::new(EXE);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let mut child = command
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -155,6 +163,36 @@ fn stdout(out: &Output) -> String {
 
 fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+/// Serves `body` once, as JSON, and returns its base URL.
+///
+/// Hand-rolled rather than reaching for a mock-HTTP crate: the pre-flight
+/// needs one request answered, and `TcpListener` already does that.
+fn one_shot_json(body: &'static str) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        use std::io::{BufRead, BufReader};
+        let Ok((mut socket, _)) = listener.accept() else {
+            return;
+        };
+        // Drain the request head, or the client sees a reset before its read.
+        let mut reader = BufReader::new(socket.try_clone().unwrap());
+        let mut line = String::new();
+        while reader.read_line(&mut line).is_ok_and(|n| n > 2) {
+            line.clear();
+        }
+        let _ = socket.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        );
+    });
+    url
 }
 
 /// Every path under `roots`, with what it is. The claim a refusal has to make
@@ -339,9 +377,7 @@ fn a_copy_keeps_the_original() {
 }
 
 #[test]
-fn applying_twice_refuses_rather_than_overwriting() {
-    // Invariant 6, through the CLI: the second run finds the destination
-    // occupied and the syscall refuses it.
+fn applying_a_move_twice_refuses_because_the_source_is_gone() {
     let f = fixture(Mode::Move);
     assert!(run(&["apply", f.plan.to_str().unwrap(), "--yes"], "")
         .status
@@ -349,15 +385,84 @@ fn applying_twice_refuses_rather_than_overwriting() {
 
     let before = listing(&[&f.source, &f.dest]);
     let out = run(&["apply", f.plan.to_str().unwrap(), "--yes"], "");
-    assert_eq!(before, listing(&[&f.source, &f.dest]), "the second run wrote");
-    // Nothing is ready any more — the source is gone — so this reports
-    // rather than executes. What it must not do is place anything.
+
+    // Named, not an either-or: an assertion that accepts two outcomes stops
+    // telling you which one happened, and the weaker branch is the one that
+    // would hide a regression.
+    assert!(!out.status.success(), "{}", stdout(&out));
     assert!(
-        stdout(&out).contains("Nothing to do") || !out.status.success(),
-        "stdout: {}\nstderr: {}",
-        stdout(&out),
+        stderr(&out).contains("changed since the scan"),
+        "{}",
         stderr(&out)
     );
+    assert_eq!(before, listing(&[&f.source, &f.dest]), "the second run wrote");
+}
+
+#[test]
+fn applying_a_copy_twice_refuses_and_leaves_the_destination_alone() {
+    // A copy leaves the source in place, so the second run passes every
+    // *source* check and is stopped by the collision check instead.
+    //
+    // This is not invariant 6's syscall-level no-clobber: `find_collisions`
+    // catches the occupied destination first, so the CLI cannot reach
+    // `clone_excl`'s native EEXIST from here. Core's Task 9 suite covers the
+    // syscall. What this covers is the layer above it — the refusal is
+    // reported, the file already in the library is untouched, and the exit
+    // code says nothing was placed.
+    let f = fixture(Mode::Copy);
+    assert!(run(&["apply", f.plan.to_str().unwrap(), "--yes"], "")
+        .status
+        .success());
+    assert!(f.placed.exists());
+
+    // Distinguishable content, so an overwrite cannot look like a no-op.
+    std::fs::write(&f.placed, b"the file already in the library").unwrap();
+    let before = listing(&[&f.source, &f.dest]);
+
+    let out = run(&["apply", f.plan.to_str().unwrap(), "--yes"], "");
+    assert!(!out.status.success(), "{}", stdout(&out));
+    assert_eq!(before, listing(&[&f.source, &f.dest]), "the second run wrote");
+    assert_eq!(
+        std::fs::read(&f.placed).unwrap(),
+        b"the file already in the library",
+        "the destination was overwritten"
+    );
+    // Named, with the reason, not just counted.
+    let said = stdout(&out);
+    assert!(said.contains("already in the library"), "{said}");
+    assert!(said.contains("Hellboy Vol. 01.pdf"), "{said}");
+    // And no mode block over a run that will do nothing: a MOVE prompt that
+    // moves nothing teaches the user the prompt does not mean anything.
+    assert!(!said.contains("COPY MODE"), "{said}");
+}
+
+#[test]
+fn a_plan_with_no_ready_row_says_so_and_does_not_exit_zero() {
+    // A caller cannot tell "the library matches the plan" from "it does not"
+    // out of an exit code that is zero either way.
+    let f = fixture(Mode::Move);
+    let text = std::fs::read_to_string(&f.plan).unwrap();
+    let (header, row) = text.split_once('\n').unwrap();
+    std::fs::write(
+        &f.plan,
+        format!(
+            "{header}\n{}\n",
+            row.replace(
+                r#""status":{"ready":"unambiguous"}"#,
+                r#""status":{"review":"no-language-match"}"#
+            )
+        ),
+    )
+    .unwrap();
+
+    let before = listing(&[&f.source, &f.dest]);
+    let out = run(&["apply", f.plan.to_str().unwrap(), "--yes"], "");
+    assert!(!out.status.success(), "{}", stdout(&out));
+    let said = stdout(&out);
+    assert!(said.contains("Nothing to do"), "{said}");
+    assert!(said.contains("Needs a human: 1 row"), "{said}");
+    assert!(!said.contains("MOVE MODE"), "{said}");
+    assert_eq!(before, listing(&[&f.source, &f.dest]));
 }
 
 #[test]
@@ -422,4 +527,122 @@ fn a_cross_volume_plan_says_so_before_the_prompt() {
     assert!(said.find("ACROSS VOLUMES") < said.find("Type MOVE"), "{said}");
 
     let _ = std::fs::remove_dir_all(&dest);
+}
+
+// ---------------------------------------------------------------------------
+// Komga pre-flight (§6.8.2). Hashing switched on after a rename cannot help,
+// so this refuses rather than warns — and a warning a user scrolls past is
+// exactly the silent loss D35 is about.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_unsafe_komga_library_refuses_and_moves_nothing() {
+    for body in [
+        // Hashing off: a deleted record can never acquire a hash afterwards.
+        r#"[{"name":"Comics","hashFiles":false,"emptyTrashAfterScan":false}]"#,
+        // Trash emptied on scan: the deleted record is purged before restore.
+        r#"[{"name":"Comics","hashFiles":true,"emptyTrashAfterScan":true}]"#,
+        // One bad library among good ones. The plan does not say which the
+        // user is renaming into, so refusing only the named one is a guess.
+        r#"[{"name":"A","hashFiles":true,"emptyTrashAfterScan":false},
+            {"name":"B","hashFiles":false,"emptyTrashAfterScan":false}]"#,
+    ] {
+        let f = fixture(Mode::Move);
+        let before = listing(&[&f.source, &f.dest]);
+        let url = one_shot_json(body);
+        let out = run_with_env(
+            &["apply", f.plan.to_str().unwrap(), "--komga-url", &url, "--yes"],
+            "",
+            &[("COMIC_RENAMER_KOMGA_TOKEN", "test-token")],
+        );
+        assert!(!out.status.success(), "accepted {body}");
+        assert!(stderr(&out).contains("hashFiles"), "{}", stderr(&out));
+        assert_eq!(before, listing(&[&f.source, &f.dest]), "moved a file: {body}");
+    }
+}
+
+#[test]
+fn a_safe_komga_library_lets_the_run_proceed() {
+    let f = fixture(Mode::Move);
+    let url = one_shot_json(r#"[{"name":"Comics","hashFiles":true,"emptyTrashAfterScan":false}]"#);
+    let out = run_with_env(
+        &["apply", f.plan.to_str().unwrap(), "--komga-url", &url, "--yes"],
+        "",
+        &[("COMIC_RENAMER_KOMGA_TOKEN", "test-token")],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(f.placed.exists());
+}
+
+#[test]
+fn a_komga_url_without_a_token_refuses_rather_than_skipping_the_check() {
+    // Silently skipping would turn the flag into decoration.
+    let f = fixture(Mode::Move);
+    let before = listing(&[&f.source, &f.dest]);
+    let out = run(
+        &["apply", f.plan.to_str().unwrap(), "--komga-url", "http://127.0.0.1:1", "--yes"],
+        "",
+    );
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("COMIC_RENAMER_KOMGA_TOKEN"), "{}", stderr(&out));
+    assert_eq!(before, listing(&[&f.source, &f.dest]));
+}
+
+#[test]
+fn no_komga_url_skips_the_check_entirely() {
+    // Not everyone runs Komga, and the check must not become mandatory by
+    // accident. Covered by every other apply test, pinned here on purpose.
+    let f = fixture(Mode::Move);
+    assert!(run(&["apply", f.plan.to_str().unwrap(), "--yes"], "")
+        .status
+        .success());
+}
+
+// ---------------------------------------------------------------------------
+// Ordering: what refuses, refuses before the user is asked for anything
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_plan_that_will_refuse_refuses_before_disclosing_or_prompting() {
+    // The pre-flight runs first on purpose. Disclosing a 31 GiB move and
+    // taking the typed word, only to refuse afterwards, asks a user to
+    // consent to something that was never going to happen.
+    let f = fixture(Mode::Move);
+    std::fs::write(f.source.join("hellboy_vol1.pdf"), b"changed since the scan").unwrap();
+
+    let out = run(&["apply", f.plan.to_str().unwrap()], "MOVE\n");
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("changed since the scan"), "{}", stderr(&out));
+    let said = stdout(&out);
+    assert!(!said.contains("MOVE MODE"), "disclosed a doomed run:\n{said}");
+    assert!(!said.contains("Type MOVE"), "prompted for a doomed run:\n{said}");
+    assert!(!f.placed.exists());
+}
+
+// ---------------------------------------------------------------------------
+// undo's exit code is the only signal a script gets
+// ---------------------------------------------------------------------------
+
+#[test]
+fn undo_exits_non_zero_when_a_row_cannot_be_reversed() {
+    let f = fixture(Mode::Move);
+    assert!(run(&["apply", f.plan.to_str().unwrap(), "--yes"], "")
+        .status
+        .success());
+
+    // Something else is at the destination now, so this is not the file the
+    // run put there and reversing it would move a stranger's file.
+    std::fs::write(&f.placed, b"a different file entirely").unwrap();
+
+    let out = run(&["undo", f.plan.to_str().unwrap()], "");
+    assert!(
+        !out.status.success(),
+        "a refusal exited zero, so a script would read the undo as clean:\nstdout: {}\nstderr: {}",
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(stdout(&out).contains("1 refused"), "{}", stdout(&out));
+    assert!(stderr(&out).contains("refused:"), "{}", stderr(&out));
+    // And it left the stranger alone rather than reversing over it.
+    assert!(f.placed.exists());
 }

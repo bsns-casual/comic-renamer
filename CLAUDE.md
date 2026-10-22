@@ -97,7 +97,7 @@ done   T7   JSONL plan + checksum       T13  CLI: apply, undo, disclosure
 todo   T14  the gate — see below      T15  Homebrew — see below
 ```
 
-**192 tests pass** (`cargo test --workspace`), plus seven `#[ignore]`d ones that
+**200 tests pass** (`cargo test --workspace`), plus seven `#[ignore]`d ones that
 need real hardware. **CI runs all of them** — `.github/workflows/verify.yml`
 has a macOS job that mounts a RAM disk, because a same-volume move is a rename
 and the streamed path, the `placed` state and abort-on-failure are otherwise
@@ -144,10 +144,31 @@ Three, all deliberate, none hidden. Each is pinned by a test in
   just described it. The first smoke run said "0 bytes free needed" for a
   2.9 MiB copy, which is how this was found.
 
-And one addition §6.10 does not ask for: the disclosure states **how many rows
-are not ready and stay where they are**. §6.9 measures one to two rows in
-three needing a human, so a block that counted only the ready rows would leave
-a third of the bundle in the source with no word about why.
+And two additions §6.10 does not ask for, both found by mutation-testing the
+CLI's own tests:
+
+- The disclosure states **how many rows are not ready and stay where they
+  are**. §6.9 measures one to two rows in three needing a human, so a block
+  that counted only the ready rows would leave a third of the bundle in the
+  source with no word about why.
+- It **names every collision and why**, and excludes those rows from the
+  headline count. `Collision.existing` is no longer unread. Before this,
+  merging into a library that already held the file — which §6.10 calls the
+  common case, not the rare one — printed "0 placed · 1 skipped" and nothing
+  else, over a disclosure that had just promised to place it.
+
+A run that can place nothing prints the reasons, skips the mode block and the
+prompt entirely, and **exits non-zero**. A prompt over a run that will move
+nothing teaches the user that the prompt does not mean anything, and an exit
+code that is zero either way cannot tell a caller "the library matches the
+plan" from "it does not".
+
+**The CLI's tests are mutation-tested**, which is how the three findings above
+were found. 14 mutations, 13 caught. The survivor — `Facts::gather` reporting
+zero cloud placeholders — is unprovable locally: `SF_DATALESS` is
+kernel-managed, `chflags` cannot set it, so no generated fixture is dataless.
+It carries a `shortcut:` comment saying so. Re-run with the script in the
+session scratchpad, or write your own; it is fifteen string substitutions.
 
 `undo` takes the **plan** path, per D38. The Phase 1 plan's Task 13 still
 writes `undo <undo-manifest.csv>`; D38 reversed that and the plan document was
