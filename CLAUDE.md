@@ -170,6 +170,14 @@ kernel-managed, `chflags` cannot set it, so no generated fixture is dataless.
 It carries a `shortcut:` comment saying so. Re-run with the script in the
 session scratchpad, or write your own; it is fifteen string substitutions.
 
+One conformance bug the departures list nearly hid: the disclosure advertised
+`--copy` while `scan` only took `--mode copy`, so §6.10's own example block
+named a flag `clap` rejected — the same defect the `--hardlink` guard exists to
+prevent, one line below it. The guard's test looked for the literal string
+"hardlink" and nothing else. It now scrapes every `--flag` out of a real
+disclosure and asserts some command accepts it, and `scan` takes `--move` and
+`--copy` as §6.13 writes them.
+
 `undo` takes the **plan** path, per D38. The Phase 1 plan's Task 13 still
 writes `undo <undo-manifest.csv>`; D38 reversed that and the plan document was
 never updated.

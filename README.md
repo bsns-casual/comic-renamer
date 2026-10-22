@@ -17,7 +17,7 @@ cargo build --release
 alias comic-renamer=./target/release/comic-renamer
 
 # Identify everything and write a plan. Touches nothing.
-comic-renamer scan ~/Bundles/humble-dark-horse --dest ~/Comics
+comic-renamer scan ~/Bundles/humble-dark-horse --dest ~/Comics   # add --copy to keep the originals
 
 # Read the plan, fix what needs fixing, delete rows you do not want.
 $EDITOR comic-renamer-plan.jsonl
@@ -46,7 +46,7 @@ assistant or attach to a pull request.
 | Flag | On | Does |
 |---|---|---|
 | `--dest <dir>` | `scan` | Where the library goes. Required. |
-| `--mode copy` | `scan` | Keeps the originals. Clones on APFS, so it usually costs nothing. |
+| `--copy` | `scan` | Keeps the originals. Clones on APFS, so it usually costs nothing. |
 | `-o <file>` | `scan` | Where to write the plan. |
 | `--lang <code>` | `scan` | Which language's editions to match. Defaults to `en`, and never falls back to another. |
 | `--komga-url <url>` | `apply` | Refuses unless your Komga can survive a rename. Token from `COMIC_RENAMER_KOMGA_TOKEN`. |

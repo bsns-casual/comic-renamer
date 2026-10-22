@@ -241,6 +241,43 @@ fn apply_rejects_a_mode_flag() {
 }
 
 #[test]
+fn every_flag_the_disclosure_advertises_actually_exists() {
+    // The unit-test version of this checked for the string "hardlink" and
+    // nothing else, so it passed while the block advertised `--copy` against
+    // a CLI that only took `--mode copy`. Scrape the flags out of a real
+    // disclosure instead of naming the ones to look for.
+    let f = fixture(Mode::Move);
+    let said = stdout(&run(&["apply", f.plan.to_str().unwrap()], "no\n"));
+    assert!(said.contains("MOVE MODE"), "no disclosure to scrape:\n{said}");
+
+    let help: String = ["--help", "scan", "apply", "undo"]
+        .iter()
+        .map(|a| {
+            let args: Vec<&str> = if *a == "--help" {
+                vec!["--help"]
+            } else {
+                vec![a, "--help"]
+            };
+            stdout(&run(&args, ""))
+        })
+        .collect();
+
+    let mut advertised = 0usize;
+    for word in said.split_whitespace() {
+        let flag = word.trim_end_matches([',', '.', ':', ';']);
+        if !flag.starts_with("--") || flag.len() < 4 {
+            continue;
+        }
+        advertised += 1;
+        assert!(
+            help.contains(flag),
+            "the disclosure advertises {flag}, which no command accepts:\n{said}"
+        );
+    }
+    assert!(advertised > 0, "scraped no flags, so this asserts nothing");
+}
+
+#[test]
 fn the_help_does_not_cite_the_spec_at_the_user() {
     // Every flag here has a decision behind it and the temptation is to cite
     // it. "(D23)" and "(§6.8.2)" mean nothing to someone holding a bundle of

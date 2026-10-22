@@ -8,13 +8,13 @@
 //! `undo` takes the **plan**, not the manifest (D38). The manifest is still
 //! the record of what happened; the plan is what anchors it.
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use comic_renamer_core::corpus::{ensure_corpus, parse_manifest, Corpus};
 use comic_renamer_core::fsops::{find_collisions, is_dataless};
 use comic_renamer_core::preset::{preset_by_id, Preset};
 use comic_renamer_core::overrides::Overrides;
 use comic_renamer_core::types::{
-    Collision, Mechanism, Mode, OverrideError, PlanRow, Progress, ScanOpts, Status, UndoReport,
+    human_bytes as size, Collision, Mechanism, Mode, OverrideError, PlanRow, Progress, ScanOpts, Status, UndoReport,
 };
 use comic_renamer_core::{apply, komga_api, plan, scan};
 use std::io::Write;
@@ -53,10 +53,12 @@ enum Command {
         /// Which language's editions to match. Never falls back to another.
         #[arg(long, default_value = "en")]
         lang: String,
-        /// `move` relocates and the originals stop existing; `copy` keeps
-        /// them, and clones rather than copying where it can.
-        #[arg(long, value_enum, default_value_t = ModeArg::Move)]
-        mode: ModeArg,
+        /// Relocate the files; the originals stop existing. The default.
+        #[arg(long = "move")]
+        move_: bool,
+        /// Keep the originals. Clones on APFS, so it usually costs nothing.
+        #[arg(long, conflicts_with = "move_")]
+        copy: bool,
     },
 
     // The mode flag is on `scan`, not here: §6.10 selects a per-row mechanism
@@ -96,12 +98,6 @@ enum Command {
     },
 }
 
-#[derive(Clone, Copy, ValueEnum)]
-enum ModeArg {
-    Move,
-    Copy,
-}
-
 fn main() -> ExitCode {
     let Cli { command } = Cli::parse();
     let outcome = match command {
@@ -111,8 +107,18 @@ fn main() -> ExitCode {
             out,
             preset,
             lang,
-            mode,
-        } => run_scan(source, dest, out, preset, lang, mode),
+            // Move is the default, so `--move` states it rather than
+            // changing it. clap enforces that the two cannot both be set.
+            move_: _,
+            copy,
+        } => run_scan(
+            source,
+            dest,
+            out,
+            preset,
+            lang,
+            if copy { Mode::Copy } else { Mode::Move },
+        ),
         Command::Apply {
             plan,
             allow_cloud_move,
@@ -140,7 +146,7 @@ fn run_scan(
     out: Option<PathBuf>,
     preset: String,
     lang: String,
-    mode: ModeArg,
+    mode: Mode,
 ) -> Result<(), String> {
     let manifest = parse_manifest(MANIFEST).map_err(|e| e.to_string())?;
     let cache = cache_dir()?;
@@ -163,10 +169,7 @@ fn run_scan(
         source_root: source,
         dest_root: dest,
         preset,
-        mode: Some(match mode {
-            ModeArg::Move => Mode::Move,
-            ModeArg::Copy => Mode::Copy,
-        }),
+        mode: Some(mode),
         lang,
     };
 
@@ -641,19 +644,6 @@ fn plural(n: usize, noun: &str) -> String {
     } else {
         format!("{n} {noun}s")
     }
-}
-
-/// Picks a unit. `{:.1} GiB` alone prints "0.0 GiB" for a real payload, and a
-/// safety disclosure that reports zero bytes for a non-empty run is worse than
-/// one that reports an awkward unit.
-fn size(bytes: u64) -> String {
-    const UNITS: [(u64, &str); 3] = [(1 << 30, "GiB"), (1 << 20, "MiB"), (1 << 10, "KiB")];
-    for (scale, unit) in UNITS {
-        if bytes >= scale {
-            return format!("{:.1} {unit}", bytes as f64 / scale as f64);
-        }
-    }
-    format!("{bytes} bytes")
 }
 
 /// `$XDG_CACHE_HOME/comic-renamer`, or `~/Library/Caches/comic-renamer`.
