@@ -76,10 +76,11 @@ Dated `YYYY-MM-DD-<topic>.md`.
 
 ## State
 
-Design approved. **Phase 0 is complete. Phase 1 Tasks 1-12 are complete, and
-Task 13's Komga pre-flight with them.** `scan` runs against the real bundle.
-`apply` and `undo` exist, are tested, and are **deliberately not wired to the
-CLI** — the tool can currently only scan.
+Design approved. **Phase 0 is complete. Phase 1 Tasks 1-13 are complete.**
+`scan`, `apply` and `undo` all run from the CLI, and the whole round trip is
+verified against a real bundle, a real second volume and a real Komga-shaped
+HTTP server. **The tool is usable** — Tasks 14 (the gate) and 15 (Homebrew)
+are the remainder, and neither blocks a user.
 
 ```
 done   repo harness, CI, corpus manifest            (this file, .github/, corpus/)
@@ -92,10 +93,11 @@ done   T3   corpus, verified fetch       T9   no-clobber syscalls + collisions
 done   T4   Layer B overrides            T10  scan + a CLI that runs it
 done   T5   resolver ladder              T11  apply pre-flight (refusals only)
 done   T6   Komga preset                 T12  apply execution + undo
-done   T7   JSONL plan + checksum       T13  Komga pre-flight (CLI half open)
+done   T7   JSONL plan + checksum       T13  CLI: apply, undo, disclosure
+todo   T14  the gate — see below      T15  Homebrew — see below
 ```
 
-**169 tests pass** (`cargo test --workspace`), plus six `#[ignore]`d ones that
+**191 tests pass** (`cargo test --workspace`), plus six `#[ignore]`d ones that
 need real hardware. **CI runs all of them** — `.github/workflows/verify.yml`
 has a macOS job that mounts a RAM disk, because a same-volume move is a rename
 and the streamed path, the `placed` state and abort-on-failure are otherwise
@@ -112,37 +114,68 @@ unreachable.
   refused by the free-space reserve**, which is how the reserve is specified.
 
 Two environment notes: `cargo` lives in `~/.cargo/bin` and is not on a
-non-interactive shell's PATH, and clippy is not installed, so no lint run has
-happened.
+non-interactive shell's PATH, and **clippy is now installed** —
+`cargo clippy --workspace --all-targets` is clean for `crates/cli`, and leaves
+five warnings in `crates/core` plus three unused-variable warnings in `xtask`'s
+Task 14 stubs. `rust-version` was bumped 1.80 → 1.85: `ErrorKind::CrossesDevices`
+has needed 1.85 since Task 12, so the old claim could never have built.
 
 The Phase 1 plan is written and survived three adversarial reviews:
 `docs/plans/2026-10-20-phase-1-implementation.md`, 15 tasks.
 
+### Task 13's departures from the written text
+
+Three, all deliberate, none hidden. Each is pinned by a test in
+`crates/cli/src/main.rs`'s `mod tests`.
+
+- **`--hardlink` is not advertised** in the disclosure. §6.10's example block
+  lists it; D27 defers it out of Phase 1, so printing it would offer a flag
+  `clap` rejects.
+- **Typed confirmation runs on every `apply`**, not only "on first run and
+  whenever the plan is cross-volume" (§6.10). Nothing persists a notion of
+  first run, and the cheapest home for one — a marker beside the corpus — is
+  state whose only purpose is to ask less. Stricter than the spec rather than
+  looser. `--yes` is the explicit non-interactive consent; EOF reads as a
+  refusal. The marker is the upgrade path if the prompt ever annoys.
+- **The `--copy` advertisement states the whole payload**, not §6.10's literal
+  "0 GiB extra disk". `apply::required_bytes` counts Clone rows, because
+  `select_mechanism` picks Clone without probing and execution falls back to
+  streaming — so a free-copy promise would be refused by the gate that had
+  just described it. The first smoke run said "0 bytes free needed" for a
+  2.9 MiB copy, which is how this was found.
+
+And one addition §6.10 does not ask for: the disclosure states **how many rows
+are not ready and stay where they are**. §6.9 measures one to two rows in
+three needing a human, so a block that counted only the ready rows would leave
+a third of the bundle in the source with no word about why.
+
+`undo` takes the **plan** path, per D38. The Phase 1 plan's Task 13 still
+writes `undo <undo-manifest.csv>`; D38 reversed that and the plan document was
+never updated.
+
 ### Pick up here
 
-**Task 13's CLI half.** `komga_api` is done; what remains is wiring `apply`
-and `undo` as subcommands, §6.10's mode disclosure and its typed
-confirmation, and `crates/cli/tests/cli.rs`.
+**Task 14, the gate — and it does not pass today.** `cargo xtask measure` is
+still `todo!()`. Before wiring it into CI, settle the targets:
 
-Two things to settle when you write it:
+```
+located 91.6%   gate >= 92.3%   <- fails
+ready   63.6%   gate >= 66.0%   <- fails
+```
 
-- §6.10's disclosure block advertises `--hardlink`, which **D27 defers out of
-  Phase 1**. Printing it would offer a flag that does not exist. Drop the
-  line and record the departure.
-- Typed confirmation is required "on first run and whenever the plan is
-  cross-volume". Nothing currently persists a notion of first run; the
-  cheapest honest home is a marker beside the corpus in the cache directory.
+Re-deriving those two numbers against the implemented ladder is an owner
+decision, not a refactor: lowering a quality gate to match the code is how a
+gate stops meaning anything, and D28's withdrawn tiebreaker is a legitimate
+reason the ready rate moved. The silent-false-positive rate — the one that
+actually matters — has **not** been re-measured against the implemented
+resolver at all; 0.48% is the research number.
 
-`apply` and `undo` are not exposed on purpose. Wiring them is the commit that
-first lets a user move a file, so it is worth doing deliberately rather than
-as a side effect of finishing Task 13.
+**Task 15, Homebrew.** Do not write the formula blind. This repo has twice
+been wrong about a packaging claim that failed on contact with a real build,
+and a formula that cannot be `brew install --build-from-source`-tested in the
+session that writes it is the third instance waiting to happen.
 
 ### Known gaps, all spec-level
-
-```
-located 91.6%   gate >= 92.3%
-ready   63.6%   gate >= 66.0%
-```
 
 - `located`: *Domestic Girlfriend* and *Altair* are absent from the corpus —
   manga romanisation, the gap §6.2.1 gives Layer B. And

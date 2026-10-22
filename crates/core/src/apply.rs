@@ -420,7 +420,10 @@ fn verify_inside_source_root(row: &PlanRow, source_root: &Path) -> Result<(), Ap
 }
 
 fn canonical_dir(path: &Path) -> Result<PathBuf, ApplyError> {
-    let resolved = std::fs::canonicalize(path)?;
+    // Named, not bare: see `scan::directory`.
+    let resolved = std::fs::canonicalize(path).map_err(|e| {
+        ApplyError::Io(std::io::Error::new(e.kind(), format!("{}: {e}", path.display())))
+    })?;
     if !resolved.is_dir() {
         return Err(ApplyError::Io(std::io::Error::new(
             std::io::ErrorKind::NotADirectory,

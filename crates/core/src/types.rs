@@ -181,6 +181,19 @@ pub struct KomgaLibrary {
     pub empty_trash_after_scan: bool,
 }
 
+/// Picks a unit. `{:.1} GiB` alone prints "0.0 GiB" for a real payload, and a
+/// refusal that reports zero bytes is worse than one that reports an awkward
+/// unit. Lives here because the error messages need it as much as the CLI does.
+pub fn human_bytes(bytes: u64) -> String {
+    const UNITS: [(u64, &str); 3] = [(1 << 30, "GiB"), (1 << 20, "MiB"), (1 << 10, "KiB")];
+    for (scale, unit) in UNITS {
+        if bytes >= scale {
+            return format!("{:.1} {unit}", bytes as f64 / scale as f64);
+        }
+    }
+    format!("{bytes} bytes")
+}
+
 // ---------------------------------------------------------------------------
 // Errors. One enum per module, all declared here so later tasks cannot invent
 // a variant that another module's test already names.
@@ -266,7 +279,7 @@ pub enum ApplyError {
     Locked,
     #[error("source {0} changed since the scan")]
     SourceChanged(PathBuf),
-    #[error("need {required} bytes, {available} available after the reserve")]
+    #[error("need {}, only {} available after the reserve", human_bytes(*required), human_bytes(*available))]
     InsufficientSpace { required: u64, available: u64 },
     #[error("row {0}: stored destination does not match the recomputed one")]
     Tampered(String),

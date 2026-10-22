@@ -162,7 +162,12 @@ pub fn scan(
 /// `realpath`, and it has to be a directory. Resolving first is what makes the
 /// overlap check meaningful — a string comparison misses a symlinked root.
 fn directory(path: &Path) -> Result<PathBuf, ScanError> {
-    let resolved = std::fs::canonicalize(path)?;
+    // Named, not bare: `canonicalize` reports which *syscall* failed and not
+    // which of the two roots, and a user who has not created the destination
+    // yet got "No such file or directory" with nothing to act on.
+    let resolved = std::fs::canonicalize(path).map_err(|e| {
+        ScanError::Io(std::io::Error::new(e.kind(), format!("{}: {e}", path.display())))
+    })?;
     if !resolved.is_dir() {
         return Err(ScanError::NotADirectory(path.to_path_buf()));
     }

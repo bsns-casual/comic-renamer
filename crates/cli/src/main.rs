@@ -218,7 +218,7 @@ fn run_apply(
     if let Some(url) = komga_url {
         let libraries = komga_api::check_libraries(url).map_err(|e| e.to_string())?;
         komga_api::assert_safe(&libraries).map_err(|e| {
-            format!("{e}\nFix it in Komga, then scan again. Renaming now loses read progress.")
+            format!("{e}\nTurn hashing on and trash-emptying off in Komga, let the hash\ntasks drain, then run apply again. The plan is still good. Renaming\nnow would lose read progress, read lists and thumbnails.")
         })?;
     }
 
@@ -231,7 +231,8 @@ fn run_apply(
         return Ok(());
     }
 
-    let facts = Facts::gather(header.mode, &eligible, edited).map_err(|e| e.to_string())?;
+    let facts = Facts::gather(header.mode, &eligible, rows.len(), edited)
+        .map_err(|e| e.to_string())?;
     print!("{}", disclose(&facts));
     if !yes {
         confirm(header.mode)?;
@@ -275,11 +276,21 @@ struct Facts {
     cross_volume: bool,
     placeholders: usize,
     placeholder_bytes: u64,
+    /// Rows this run will not touch. §6.9 measures one to two rows in three
+    /// needing a human, so this is the normal case and not an edge one — a
+    /// disclosure that counted only the ready rows would leave a third of the
+    /// bundle sitting in the source with no word about why.
+    not_ready: usize,
     edited: bool,
 }
 
 impl Facts {
-    fn gather(mode: Mode, eligible: &[&PlanRow], edited: bool) -> std::io::Result<Facts> {
+    fn gather(
+        mode: Mode,
+        eligible: &[&PlanRow],
+        total_rows: usize,
+        edited: bool,
+    ) -> std::io::Result<Facts> {
         let mut placeholders = 0usize;
         let mut placeholder_bytes = 0u64;
         for row in eligible {
@@ -302,6 +313,7 @@ impl Facts {
                 .any(|row| row.mechanism == Mechanism::Stream),
             placeholders,
             placeholder_bytes,
+            not_ready: total_rows.saturating_sub(eligible.len()),
             edited,
         })
     }
@@ -353,6 +365,19 @@ fn disclose(f: &Facts) -> String {
                 size(f.reserve)
             ));
         }
+    }
+
+    // §6.9 measures one to two rows in three needing a human, so this is the
+    // normal case. Counting only the ready rows would leave a third of the
+    // bundle in the source with no word about why.
+    if f.not_ready > 0 {
+        out.push_str(&format!(
+            // Phrased without a verb that has to agree: "1 of 2 rows are" is
+            // the same defect as "1 files", and the count genuinely reaches 1.
+            "\n  Not ready, so left where they are: {} of {} rows.\n",
+            f.not_ready,
+            f.not_ready + f.files
+        ));
     }
 
     // Reported apart from disk, always. A plan whose sources are dataless
@@ -499,6 +524,7 @@ mod tests {
             cross_volume,
             placeholders: 0,
             placeholder_bytes: 0,
+            not_ready: 0,
             edited: false,
         }
     }
@@ -562,6 +588,21 @@ mod tests {
         let mut f = facts(Mode::Move, false);
         f.edited = true;
         assert!(disclose(&f).contains("edited since the scan"));
+    }
+
+    #[test]
+    fn rows_left_behind_are_disclosed_not_silently_dropped() {
+        // §6.9 measures one to two rows in three needing a human. A user who
+        // applies 260 of 412 rows and is told only about the 260 finds a third
+        // of the bundle still in the source with no explanation.
+        let mut f = facts(Mode::Move, false);
+        f.files = 260;
+        f.not_ready = 152;
+        let out = disclose(&f);
+        assert!(out.contains("left where they are: 152 of 412 rows"), "{out}");
+
+        // And says nothing when there is nothing to say.
+        assert!(!disclose(&facts(Mode::Move, false)).contains("not ready"));
     }
 
     #[test]
