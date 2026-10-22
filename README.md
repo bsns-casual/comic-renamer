@@ -7,7 +7,7 @@ every proposed rename. Nothing moves until you approve the plan. Files it cannot
 identify are flagged for review rather than guessed at.
 
 **Status: scan, apply and undo work. Komga is the only preset, and there is no
-Homebrew formula yet** — install from source, which is two commands. See
+Homebrew formula yet** — install from source, which is three commands. See
 [`docs/specs/`](docs/specs/) for the design and
 [`docs/research/`](docs/research/) for the measurements behind it.
 
