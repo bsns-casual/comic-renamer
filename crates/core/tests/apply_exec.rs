@@ -771,3 +771,51 @@ fn an_unterminated_quote_does_not_silently_swallow_the_rest() {
         "the swallowed records were reported as one incomplete record: {report:?}"
     );
 }
+
+#[test]
+fn a_manifest_with_no_header_keeps_its_first_row() {
+    // read_manifest skipped records[0] unconditionally, so a hand-edited
+    // manifest without the column header silently lost its first data row —
+    // the input invariant 1 exists for.
+    let r = Recorded::new("Mazebook.pdf", b"copied here", Mode::Copy, true);
+    let text = std::fs::read_to_string(&r.manifest).unwrap();
+    let headerless: String = text.lines().skip(1).collect::<Vec<_>>().join("\n") + "\n";
+    std::fs::write(&r.manifest, headerless).unwrap();
+
+    let report = r.reverse().unwrap();
+    assert_eq!(report.restored, 1, "the roots row was eaten as a header: {report:?}");
+}
+
+#[test]
+fn a_record_without_a_trailing_newline_is_not_discarded() {
+    // A complete final record simply lacking "\n" was dropped and labelled
+    // incomplete. Losing a `placed` that way downgrades a clone row to bare
+    // `pending`, which is then refused forever.
+    let r = Recorded::new("Mazebook.pdf", b"copied here", Mode::Copy, true);
+    let text = std::fs::read_to_string(&r.manifest).unwrap();
+    std::fs::write(&r.manifest, text.trim_end_matches('\n')).unwrap();
+
+    let report = r.reverse().unwrap();
+    assert_eq!(report.restored, 1, "{report:?}");
+    assert!(report.refused.is_empty(), "{report:?}");
+}
+
+#[test]
+fn a_duplicate_sequence_is_reported_not_processed_twice() {
+    // Both rows parsed and set_status updated only the first, so the second
+    // ran as a bare `pending`.
+    let r = Recorded::new("Mazebook.pdf", b"copied here", Mode::Copy, true);
+    let text = std::fs::read_to_string(&r.manifest).unwrap();
+    let pending = text
+        .lines()
+        .find(|l| l.contains(",pending,"))
+        .unwrap()
+        .to_string();
+    std::fs::write(&r.manifest, format!("{text}{pending}\n")).unwrap();
+
+    let report = r.reverse().unwrap();
+    assert!(
+        report.refused.iter().any(|m| m.contains("duplicate row")),
+        "{report:?}"
+    );
+}

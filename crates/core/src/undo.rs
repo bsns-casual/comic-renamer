@@ -428,8 +428,15 @@ fn read_manifest(manifest: &Path) -> Result<Parsed, UndoError> {
         unreadable.push(problem);
     }
 
-    for (index, columns) in records.iter().enumerate().skip(1) {
+    for (index, columns) in records.iter().enumerate() {
         let line = index + 1;
+        // Skip the column header only if that is what it is. Skipping
+        // records[0] unconditionally loses the first data row of a manifest
+        // that has no header — a hand-edited file, which is exactly the
+        // input invariant 1 exists for.
+        if index == 0 && columns.first().map(String::as_str) == Some("seq") {
+            continue;
+        }
         if columns.iter().all(|c| c.is_empty()) {
             continue;
         }
@@ -463,6 +470,9 @@ fn read_manifest(manifest: &Path) -> Result<Parsed, UndoError> {
             continue;
         };
         match columns[1].as_str() {
+            "pending" if rows.iter().any(|r| r.seq == seq) => {
+                unreadable.push(format!("line {line}: duplicate row {seq}"));
+            }
             "pending" => {
                 let Some(mode) = parse_mode(&columns[2]) else {
                     unreadable.push(format!("line {line}: unknown mode {:?}", columns[2]));
@@ -567,6 +577,14 @@ fn parse_records(text: &str) -> (Vec<Vec<String>>, Option<String>) {
             '\r' if !quoted => {}
             _ => current.push(c),
         }
+    }
+    if !quoted && (!current.is_empty() || !fields.is_empty()) {
+        // A complete record that simply lacks a trailing newline. Dropping
+        // it loses a `placed`, which downgrades a clone row to bare
+        // `pending` and makes `expected()` refuse it forever.
+        fields.push(current);
+        records.push(fields);
+        return (records, None);
     }
     if quoted || !current.is_empty() || !fields.is_empty() {
         fields.push(current);

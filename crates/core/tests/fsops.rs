@@ -428,3 +428,64 @@ fn both_spellings_already_present_is_a_collision() {
     let rows = [row("a", "Hellboy", None, 1, 1)];
     assert!(!find_collisions(&rows, d.path(), &Komga).is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Invariant 3: containment is structural. These drive the primitives
+// directly, because a test that writes `..` into a manifest and asserts a
+// refusal pins invariant 9 — the preset-recompute check fires first — and
+// says nothing about containment at all.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn resolve_at_refuses_a_parent_dir_component() {
+    let d = tempdir().unwrap();
+    let root = d.path().join("dest");
+    std::fs::create_dir(&root).unwrap();
+    let sibling = d.path().join("sibling");
+    std::fs::create_dir(&sibling).unwrap();
+    std::fs::write(sibling.join("victim.pdf"), b"PRIVATE").unwrap();
+
+    let _g = TreeGuard::new(&[d.path()]);
+    assert!(comic_renamer_core::fsops::resolve_at(&root, Path::new("../sibling/victim.pdf")).is_err());
+    assert!(comic_renamer_core::fsops::stat_at(&root, Path::new("../sibling/victim.pdf")).is_err());
+}
+
+#[test]
+fn resolve_at_refuses_a_symlinked_component_beneath_the_root() {
+    // The series folder is a symlink to somewhere else on the same volume.
+    // An absolute join plus symlink_metadata would follow it; the walk does
+    // not.
+    let d = tempdir().unwrap();
+    let root = d.path().join("dest");
+    let elsewhere = d.path().join("elsewhere");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::write(elsewhere.join("book.pdf"), b"SOMEONE ELSE'S").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, root.join("Hellboy")).unwrap();
+
+    let _g = TreeGuard::new(&[d.path()]);
+    let through = Path::new("Hellboy/book.pdf");
+    assert!(
+        comic_renamer_core::fsops::resolve_at(&root, through).is_err(),
+        "the walk followed a symlinked series folder"
+    );
+    // And the entry that would have deleted it cannot be built at all.
+    assert!(comic_renamer_core::fsops::stat_at(&root, through).is_err());
+    assert!(elsewhere.join("book.pdf").exists());
+}
+
+#[test]
+fn an_entry_removes_only_through_its_own_resolved_parent() {
+    // The positive half: a legitimate path resolves, stats and removes.
+    let d = tempdir().unwrap();
+    let root = d.path().join("dest");
+    std::fs::create_dir_all(root.join("Hellboy")).unwrap();
+    let book = root.join("Hellboy/book.pdf");
+    std::fs::write(&book, b"x").unwrap();
+
+    let g = TreeGuard::new(&[d.path()]).expect_removed(&[&book]);
+    let entry = comic_renamer_core::fsops::resolve_at(&root, Path::new("Hellboy/book.pdf")).unwrap();
+    assert_eq!(entry.identity().unwrap().0, 1);
+    entry.remove().unwrap();
+    drop(g);
+}
