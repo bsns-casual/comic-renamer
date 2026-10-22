@@ -37,6 +37,12 @@ Between one and two rows in three need a human, so reading the plan is the
 normal path and not an escape hatch. Rows still marked `review` are left where
 they are; `apply` never guesses.
 
+Merging into a library that already holds some of these books is the ordinary
+case, not the awkward one. A file already at the destination is refused by
+name and left exactly as it is — never overwritten, never renamed around. The
+disclosure says which ones before you confirm, and a run that can place
+nothing tells you why and exits non-zero rather than reporting success.
+
 Editing the plan means editing the **metadata** — the series, the volume, the
 subtitle. It does not mean editing paths: the destination is recomputed from
 metadata every time, so a path typed into a plan file is ignored rather than
