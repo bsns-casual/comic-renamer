@@ -745,3 +745,29 @@ fn a_partial_undo_can_be_resumed() {
     // And the plan is runnable again.
     assert_eq!(apply(&f.plan, false, &mut |_| {}).unwrap().executed, 2);
 }
+
+#[test]
+fn an_unterminated_quote_does_not_silently_swallow_the_rest() {
+    // A6. One stray quote put the reader into quoted state, so every record
+    // after it became part of one open field — and the report called that
+    // "one incomplete final record" while three valid rows stayed in the
+    // library.
+    let (_g, c) = gcd();
+    let f = Fixture::new(&["mazebook.pdf", "birdking_vol1.pdf"], &c, Mode::Move);
+    apply(&f.plan, false, &mut |_| {}).unwrap();
+
+    let text = std::fs::read_to_string(f.manifest()).unwrap();
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    // A stray quote partway through, with records after it.
+    lines[2].push('"');
+    std::fs::write(f.manifest(), lines.join("\n") + "\n").unwrap();
+
+    let report = undo(&f.plan).unwrap();
+    assert!(
+        report
+            .refused
+            .iter()
+            .any(|r| r.contains("unterminated quote") && r.contains("line")),
+        "the swallowed records were reported as one incomplete record: {report:?}"
+    );
+}

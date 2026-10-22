@@ -355,9 +355,26 @@ fn reverse_one(
                     // reversed by streaming. `rename` fails EXDEV on exactly
                     // the runs where the move was most expensive.
                     Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
+                        // shortcut: stream_verified re-opens the source by
+                        // path, so the intermediate components are resolved
+                        // a second time. Closing that needs an fd-taking
+                        // variant; the destination is re-checked below
+                        // instead, which is the half that could lose data.
                         let from = dest_root.join(&row.dest_relative);
                         stream_verified(&from, source_root, Path::new(source_name))
                             .map_err(|e| e.to_string())?;
+                        // Re-read through the handle before deleting: the
+                        // copy was verified against whatever was read, which
+                        // is not the same as against what this row recorded.
+                        match entry.identity() {
+                            Ok(still) if still == expected => {}
+                            _ => {
+                                return Err(format!(
+                                    "{} changed while it was being restored; it was left in place",
+                                    row.dest_relative.display()
+                                ))
+                            }
+                        }
                         match entry.remove() {
                             Ok(()) => {
                                 prune_empty_dirs(dest_root, &row.dest_relative)
@@ -407,8 +424,8 @@ fn read_manifest(manifest: &Path) -> Result<Parsed, UndoError> {
     let mut roots: Option<(PathBuf, PathBuf)> = None;
     let mut rows: Vec<Row> = Vec::new();
     let mut unreadable: Vec<String> = Vec::new();
-    if let Some(tail) = torn {
-        unreadable.push(format!("ignored an incomplete final record: {tail}"));
+    if let Some(problem) = torn {
+        unreadable.push(problem);
     }
 
     for (index, columns) in records.iter().enumerate().skip(1) {
@@ -553,7 +570,21 @@ fn parse_records(text: &str) -> (Vec<Vec<String>>, Option<String>) {
     }
     if quoted || !current.is_empty() || !fields.is_empty() {
         fields.push(current);
-        return (records, Some(fields.join(",")));
+        let tail = fields.join(",");
+        // An unterminated quote absorbs the rest of the file into one field,
+        // so every record after it is lost — not "one incomplete final
+        // record", which is what the report used to say while three valid
+        // rows stayed in the library. Count what was swallowed.
+        let lost = tail.matches('\n').count();
+        let message = if quoted {
+            format!(
+                "unterminated quote from record {}: {lost} further line(s) could not be read",
+                records.len() + 1
+            )
+        } else {
+            format!("incomplete final record: {tail}")
+        };
+        return (records, Some(message));
     }
     (records, None)
 }

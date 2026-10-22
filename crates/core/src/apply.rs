@@ -207,7 +207,6 @@ fn execute(
     // `destination_preview` here made that true only by loop ordering, which
     // nothing in the types enforces.
     let relative = &preset.destination(&row.resolved(), &row.extension);
-    let absolute = header.dest_root.join(relative);
     let source_name = Path::new(row.source.file_name().unwrap_or_default());
 
     // Pending lands and is fsynced before the operation is attempted. A
@@ -235,7 +234,7 @@ fn execute(
     // the duplicate. Writing `failed` over it throws away the one piece of
     // information the state depends on.
     let mut created = false;
-    let outcome = perform(row, header, relative, &absolute, seq, undo, &mut created, progress);
+    let outcome = perform(row, header, relative, seq, undo, &mut created, progress);
     if outcome.is_err() {
         if !created {
             let _ = undo.record_failed(seq);
@@ -251,7 +250,6 @@ fn perform(
     row: &PlanRow,
     header: &PlanHeader,
     relative: &Path,
-    absolute: &Path,
     seq: u64,
     undo: &mut UndoWriter,
     created: &mut bool,
@@ -280,7 +278,7 @@ fn perform(
                     // RLIMIT_FSIZE, but nothing in the suite distinguishes
                     // this ordering from the wrong one.
                     *created = true;
-                    placed(undo, seq, absolute)?;
+                    placed(undo, seq, &header.dest_root, relative)?;
                 }
                 // An occupied destination stays a refusal; it is never a
                 // reason to try again by another route.
@@ -300,7 +298,7 @@ fn perform(
                     });
                     stream_verified(&row.source, &header.dest_root, relative)?;
                     *created = true;
-                    placed(undo, seq, absolute)?;
+                    placed(undo, seq, &header.dest_root, relative)?;
                 }
             }
             if header.mode == Mode::Move {
@@ -315,7 +313,7 @@ fn perform(
             // is a bare `pending` with the source gone and the destination's
             // inode unrecorded — the user's only copy in the library under a
             // name `reverse` will not touch.
-            placed(undo, seq, absolute)?;
+            placed(undo, seq, &header.dest_root, relative)?;
             if header.mode == Mode::Move {
                 // THEN unlink. stream_verified never touches the source, so
                 // this is the only place a move loses its original, and it
@@ -330,16 +328,17 @@ fn perform(
 /// Records the destination's own identity. Never with an empty field: the
 /// same bytes would mean both "this status carries none" and "the stat
 /// failed", and `reverse` would silently fall back to a weaker match.
-fn placed(undo: &mut UndoWriter, seq: u64, absolute: &Path) -> Result<(), ApplyError> {
-    let meta = std::fs::symlink_metadata(absolute)?;
-    undo.record_placed(
-        seq,
-        (
-            meta.len(),
-            meta.ino(),
-            meta.mtime() * 1_000_000_000 + meta.mtime_nsec(),
-        ),
-    )?;
+fn placed(
+    undo: &mut UndoWriter,
+    seq: u64,
+    dest_root: &Path,
+    relative: &Path,
+) -> Result<(), ApplyError> {
+    // Through a resolved descriptor, not `symlink_metadata` on a joined
+    // path: a component swapped between the write and the stat would record
+    // an identity belonging to something else, and every later `reverse`
+    // would refuse the row.
+    undo.record_placed(seq, crate::fsops::stat_at(dest_root, relative)?)?;
     Ok(())
 }
 
