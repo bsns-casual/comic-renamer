@@ -76,9 +76,9 @@ Dated `YYYY-MM-DD-<topic>.md`.
 
 ## State
 
-Design approved. **Phase 0 is complete. Phase 1 Tasks 1-9 are complete and
-have passed their adversarial review** — the library is built up to and
-including the syscall layer. Tasks 10-15 are untouched.
+Design approved. **Phase 0 is complete. Phase 1 Tasks 1-12 are complete.**
+Tasks 13-15 are untouched. `scan` runs against the real bundle; `apply` and
+`undo` exist but are not wired to the CLI.
 
 ```
 done   repo harness, CI, corpus manifest            (this file, .github/, corpus/)
@@ -86,16 +86,26 @@ done   D23  cloning a placeholder hydrates it -- move stays the default
 done   D26  ground truth, 2,223 verified rows; the gate is measured at 0.48%
 done   D34  Komga convention, specified from source (sections 6.8.1, 6.8.2)
 done   T1   workspace skeleton; `cargo check --workspace --all-targets` clean
-done   T2   normalise + residue          T6   Komga preset
-done   T3   corpus, verified fetch       T7   JSONL plan + checksum
-done   T4   Layer B overrides            T8   sparse fixtures + TreeGuard
-done   T5   resolver ladder              T9   no-clobber syscalls + collisions
+done   T2   normalise + residue          T8   sparse fixtures + TreeGuard
+done   T3   corpus, verified fetch       T9   no-clobber syscalls + collisions
+done   T4   Layer B overrides            T10  scan + a CLI that runs it
+done   T5   resolver ladder              T11  apply pre-flight (refusals only)
+done   T6   Komga preset                 T12  apply execution + undo
+done   T7   JSONL plan + checksum
 ```
 
-**106 tests pass** (`cargo test --workspace`), plus four `#[ignore]`d tests
-that run against the real corpus release — set `COMIC_RENAMER_TEST_ZIP` to a
-downloaded `gcd-*.zip` and run `--ignored`. They cover install-and-open,
-coverage rates, and the publisher hint's effect on real titles.
+**150 tests pass** (`cargo test --workspace`), plus six `#[ignore]`d ones that
+need real hardware:
+
+- `COMIC_RENAMER_TEST_ZIP=<gcd-*.zip>` — four tests against the real corpus
+  release: install-and-open, coverage rates, and the publisher hint's effect
+  on real titles.
+- `COMIC_RENAMER_TEST_VOLUME=<mount on another device>` — two tests that need
+  a genuine second volume, because a same-volume move is a rename and cannot
+  reach the streamed path. A 1.3 GiB HFS+ RAM disk works:
+  `hdiutil attach -nomount ram://2726297` then
+  `diskutil eraseVolume "HFS+" CRTEST <dev>`. **Under ~1.1 GiB every run is
+  refused by the free-space reserve**, which is how the reserve is specified.
 
 Two environment notes: `cargo` lives in `~/.cargo/bin` and is not on a
 non-interactive shell's PATH, and clippy is not installed, so no lint run has
@@ -106,33 +116,31 @@ The Phase 1 plan is written and survived three adversarial reviews:
 
 ### Pick up here
 
-**Task 10, `scan` — the first usable artifact.** Read-only by construction, so
-run `cargo run -- scan …` against the live 31.2 GiB bundle before `apply`
-exists.
+**Task 13 — CLI, disclosure, Komga pre-flight.** `apply` and `undo` exist and
+are tested but are deliberately not wired to the CLI, so the tool can
+currently only `scan`. §6.10's mode disclosure and §6.8.2's Komga pre-flight
+are both Task 13's, and both gate exposing `apply` to a user.
 
-The Task 9 adversarial review is **done**: two fresh reviewers, 18 confirmed
-defects, all fixed. The full list and every ruling is in
-`.superpowers/sdd/2026-10-20-phase-1-implementation/progress.md` (git-ignored).
-What it changed that a reader needs to know:
+Both mandated review gates are behind you. They were expensive and they were
+worth it: Task 9's review found 18 defects, Task 12's found 16, and between
+them seven were ways to destroy a file permanently that a green suite did not
+catch.
 
-- Every write primitive takes `dest_root` and a relative path and resolves the
-  parent through an `O_NOFOLLOW` walk, holding the directory **descriptor**.
-  There is no call order to get wrong, and a component swapped for a symlink
-  after the walk cannot redirect the write. The clone path uses
-  `fclonefileat` with `CLONE_NOFOLLOW_ANY` — **not** `clonefileat`, which
-  walks the absolute source path where the flag trips on `/var`.
-- `TreeGuard` fingerprints the **inode**. `clonefile` preserves mtime to the
-  nanosecond, so a clone-and-replace swap was invisible to every guarded test.
-  `expect_changed` is gone; use `expect_created` / `expect_removed` /
-  `expect_modified`, and a declared change that never happens now fails.
-- Volume feasibility outranks the publisher hint (§6.3 ranks a hard constraint
-  above a preference). `issue_count` counts one publisher's run, not a
-  collected line — *Lady Mechanika* Vol. 6 spans three publishers.
-- The publisher hint matches on **word boundaries**, drops the distributor's
-  own name, and yields nothing when two publishers compete. Substring matching
-  fired on 2,223 of 2,223 rows.
+**Read `docs/specs/2026-10-21-undo-and-reverse-design.md` before touching
+`undo.rs`.** That file was written three times. The first two implementations
+drew 6 and then 11 confirmed data-loss findings; the third was written to a
+design that was reviewed before any code existed. The failure pattern both
+times was the same and will recur: *each fix addressed the trigger a reviewer
+handed over, not the class it belonged to.* The clearest example — Task 9
+replaced a lexical `strip_prefix` containment check in `fsops` with a
+descriptor walk, and three days later `undo.rs` was written with
+`starts_with`, the same bug in a different file with the correct machinery two
+modules away.
 
-### Known gaps against the gate, both spec-level
+The design's invariants and its test-obligations table are the contract. D38
+records why `undo` takes the plan rather than the manifest.
+
+### Known gaps, all spec-level
 
 ```
 located 91.6%   gate >= 92.3%
@@ -141,20 +149,23 @@ ready   63.6%   gate >= 66.0%
 
 - `located`: *Domestic Girlfriend* and *Altair* are absent from the corpus —
   manga romanisation, the gap §6.2.1 gives Layer B. And
-  `mirkaandolfosmercy_vol1` is the reverse match direction: the filename is a
-  prefix **of** the corpus name, where §6.1 specifies the opposite. Making
-  matching bidirectional is a spec change with real false-positive risk.
+  `mirkaandolfosmercy_vol1` is the reverse match direction, where §6.1
+  specifies the opposite; making matching bidirectional is a spec change with
+  real false-positive risk.
 - `ready`: largely the cost of implementing D28 correctly. Rows the original
   measurement picked with the withdrawn earliest-edition tiebreaker now go to
-  review. **The 66% target wants re-deriving against the implemented ladder**
-  before Task 14 writes a gate that blocks merges.
-
-Three §6.11 items stay unenforced on purpose — total path budget, rule-count
-cap, file-size cap. All three govern *contributed* rule data, which is Phase 3;
-`data/overrides.toml` is first-party and CI already validates it.
-
-**Still stop for a fresh adversarial review after Task 12 (`apply`
-execution)**, the other place a mistake costs files rather than time.
+  review. **Re-derive the 66% target against the implemented ladder** before
+  Task 14 turns it into a merge gate.
+- The free-space reserve is `max(1 GiB, 10%)` taken literally from the plan,
+  so **no run is possible on a volume with under ~1.1 GiB free**. Correct per
+  spec, harsh in practice.
+- Three §6.11 items stay unenforced on purpose — total path budget,
+  rule-count cap, file-size cap. All three govern *contributed* rule data,
+  which is Phase 3; `data/overrides.toml` is first-party and CI validates it.
+- `ApplyResult.failed` and `Collision.existing` are unread today. Both are
+  Task 1 skeleton fields, and `Collision.existing` is what Task 13's
+  disclosure table needs to say what is already at a destination. Deferred,
+  not dead.
 
 Phase 0b — the 13-app research spike — runs *parallel* to Phase 1 and gates
 Phase 2 only. Nothing in Phase 1 waits on it.
