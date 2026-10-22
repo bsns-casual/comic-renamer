@@ -179,22 +179,34 @@ pub fn resolve_at(root: &Path, relative: &Path) -> io::Result<Entry> {
 }
 
 impl Entry {
-    /// Describes a symlink rather than following it.
-    pub fn metadata(&self) -> io::Result<std::fs::Metadata> {
-        use std::os::fd::{AsRawFd, FromRawFd};
-        // SAFETY: `parent` is an open directory we own and `leaf` outlives
-        // the call; the descriptor is adopted by File immediately.
-        let raw = unsafe {
-            libc::openat(
-                self.destination.parent.as_raw_fd(),
+    /// `(size, inode, mtime_ns)` of the leaf, without following a symlink.
+    ///
+    /// `fstatat`, not `openat`. Opening the file to stat it blocks forever on
+    /// a FIFO — and `reverse` holds the plan lock while it hangs, so the one
+    /// recovery path for the library becomes unavailable — and it fails
+    /// outright on a file the user cannot read, which a stat should answer.
+    pub fn identity(&self) -> io::Result<(u64, u64, i64)> {
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: `parent` is an open directory we own, `leaf` outlives the
+        // call, and `stat` is only read once fstatat reports success.
+        let rc = unsafe {
+            libc::fstatat(
+                std::os::fd::AsRawFd::as_raw_fd(&self.destination.parent),
                 self.destination.leaf.as_ptr(),
-                libc::O_RDONLY | libc::O_SYMLINK | libc::O_CLOEXEC,
+                stat.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
             )
         };
-        if raw < 0 {
+        if rc != 0 {
             return Err(io::Error::last_os_error());
         }
-        unsafe { std::fs::File::from_raw_fd(raw) }.metadata()
+        // SAFETY: fstatat returned 0, so the struct is initialised.
+        let stat = unsafe { stat.assume_init() };
+        Ok((
+            stat.st_size.max(0) as u64,
+            stat.st_ino,
+            stat.st_mtime as i64 * 1_000_000_000 + stat.st_mtime_nsec as i64,
+        ))
     }
 
     pub fn remove(&self) -> io::Result<()> {
@@ -235,9 +247,9 @@ impl Entry {
     }
 }
 
-/// Convenience for a one-shot stat where nothing destructive follows.
-pub fn stat_at(root: &Path, relative: &Path) -> io::Result<std::fs::Metadata> {
-    resolve_at(root, relative)?.metadata()
+/// Convenience for a one-shot identity read where nothing destructive follows.
+pub fn stat_at(root: &Path, relative: &Path) -> io::Result<(u64, u64, i64)> {
+    resolve_at(root, relative)?.identity()
 }
 
 /// `renameatx_np` with a walked descriptor on **both** sides.

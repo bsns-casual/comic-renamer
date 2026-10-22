@@ -211,7 +211,7 @@ pub fn reverse(
     dest_root: &Path,
     recomputed: &[PathBuf],
 ) -> Result<UndoReport, UndoError> {
-    let (recorded_source, recorded_dest, rows, torn) = read_manifest(manifest)?;
+    let (recorded_source, recorded_dest, rows, unreadable) = read_manifest(manifest)?;
 
     // The manifest's own roots are a cross-check, not the anchor. Exact
     // identity buys nothing if whoever edits the manifest also supplies the
@@ -221,11 +221,10 @@ pub fn reverse(
     }
 
     let mut report = UndoReport::default();
-    if let Some(tail) = torn {
-        report
-            .refused
-            .push(format!("ignored an incomplete final record: {tail}"));
-    }
+    // Every row the parser could not read is a refusal, not a silence. A
+    // dropped row means a file stays in the library while the report says
+    // the undo was clean.
+    report.refused.extend(unreadable);
 
     for row in rows.into_iter().rev() {
         match reverse_one(&row, source_root, dest_root, recomputed) {
@@ -261,10 +260,22 @@ fn reverse_one(
     // Resolved once and held: the identity check and whatever acts on it go
     // through the same directory descriptor, so a component swapped between
     // the two cannot redirect the second.
-    let entry = resolve_at(dest_root, &row.dest_relative)
-        .map_err(|e| format!("cannot resolve {}: {e}", row.dest_relative.display()))?;
-    let meta = match entry.metadata() {
-        Ok(meta) => meta,
+    let entry = match resolve_at(dest_root, &row.dest_relative) {
+        Ok(entry) => entry,
+        // The parent is gone — pruned by an earlier successful row in this
+        // same run, usually. That is "nothing to do", not a refusal: treating
+        // it as one left `refused` non-empty forever, so the manifest was
+        // never renamed aside and `O_EXCL` killed the plan permanently.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => {
+            return Err(format!(
+                "cannot resolve {}: {e}",
+                row.dest_relative.display()
+            ))
+        }
+    };
+    let actual = match entry.identity() {
+        Ok(actual) => actual,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(e) => {
             // `Path::exists()` answers false on EACCES, so a permission
@@ -278,7 +289,7 @@ fn reverse_one(
     let expected = row
         .expected()
         .ok_or_else(|| "no exact identity was recorded for this row".to_string())?;
-    if identity_of(&meta) != expected {
+    if actual != expected {
         return Err(format!(
             "{} is not the file this run put there",
             row.dest_relative.display()
@@ -298,7 +309,7 @@ fn reverse_one(
                     row.dest_relative.display()
                 )),
                 Err(e) => Err(format!("cannot examine the original: {e}")),
-                Ok(meta) if row.source_identity != Some(identity_of(meta)) => Err(format!(
+                Ok(actual) if row.source_identity != Some(*actual) => Err(format!(
                     "the original {} is not what this run copied from",
                     source_name.display()
                 )),
@@ -310,15 +321,21 @@ fn reverse_one(
             }
         }
         Mode::Move => match &source {
-            // The duplicate a failed unlink leaves. Gated on the status, not
-            // on identity: inferring it from the filesystem produced a branch
-            // that could never run.
-            Ok(_) if row.status == Status::Placed => {
+            // The duplicate a failed unlink leaves. Gated on the status
+            // *and* on the source's identity: the status says a copy was
+            // made, but only the identity says the thing now sitting at the
+            // source is the original it was made from. Without that check,
+            // re-extracting the bundle — or dropping in a truncated file —
+            // makes `reverse` delete the verified library copy and report
+            // success. Invariant 6.
+            Ok(actual) if row.status == Status::Placed
+                && row.source_identity == Some(*actual) =>
+            {
                 entry.remove().map_err(|e| e.to_string())?;
                 prune_empty_dirs(dest_root, &row.dest_relative).map_err(|e| e.to_string())?;
                 Ok(true)
             }
-            Ok(meta) if row.source_identity == Some(identity_of(meta)) => Ok(false),
+            Ok(actual) if row.source_identity == Some(*actual) => Ok(false),
             Ok(_) => Err(format!("{} is occupied", source_name.display())),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 // The common case is a user who deleted the emptied bundle
@@ -381,7 +398,7 @@ fn single_component(path: &Path) -> Result<&Path, String> {
     }
 }
 
-type Parsed = (PathBuf, PathBuf, Vec<Row>, Option<String>);
+type Parsed = (PathBuf, PathBuf, Vec<Row>, Vec<String>);
 
 fn read_manifest(manifest: &Path) -> Result<Parsed, UndoError> {
     let text = std::fs::read_to_string(manifest)?;
@@ -389,8 +406,13 @@ fn read_manifest(manifest: &Path) -> Result<Parsed, UndoError> {
 
     let mut roots: Option<(PathBuf, PathBuf)> = None;
     let mut rows: Vec<Row> = Vec::new();
+    let mut unreadable: Vec<String> = Vec::new();
+    if let Some(tail) = torn {
+        unreadable.push(format!("ignored an incomplete final record: {tail}"));
+    }
 
-    for columns in records.iter().skip(1) {
+    for (index, columns) in records.iter().enumerate().skip(1) {
+        let line = index + 1;
         if columns.iter().all(|c| c.is_empty()) {
             continue;
         }
@@ -398,6 +420,7 @@ fn read_manifest(manifest: &Path) -> Result<Parsed, UndoError> {
         // per-row problems. Only a missing or duplicated roots record can
         // refuse the whole file, because without it nothing can be anchored.
         if columns.len() < 9 {
+            unreadable.push(format!("line {line}: expected nine columns"));
             continue;
         }
         let identity = match (
@@ -419,12 +442,22 @@ fn read_manifest(manifest: &Path) -> Result<Parsed, UndoError> {
             continue;
         }
         let Ok(seq) = columns[0].parse::<u64>() else {
+            unreadable.push(format!("line {line}: sequence {:?} is not a number", columns[0]));
             continue;
         };
         match columns[1].as_str() {
             "pending" => {
-                let Some(mode) = parse_mode(&columns[2]) else { continue };
-                let Some(mechanism) = parse_mechanism(&columns[3]) else { continue };
+                let Some(mode) = parse_mode(&columns[2]) else {
+                    unreadable.push(format!("line {line}: unknown mode {:?}", columns[2]));
+                    continue;
+                };
+                let Some(mechanism) = parse_mechanism(&columns[3]) else {
+                    unreadable.push(format!(
+                        "line {line}: unknown mechanism {:?}",
+                        columns[3]
+                    ));
+                    continue;
+                };
                 rows.push(Row {
                     seq,
                     status: Status::Pending,
@@ -438,23 +471,36 @@ fn read_manifest(manifest: &Path) -> Result<Parsed, UndoError> {
             }
             // Last status wins per seq; a status row with no pending is
             // ignored rather than fatal.
-            "failed" => set_status(&mut rows, seq, Status::Failed, None),
-            "placed" => set_status(&mut rows, seq, Status::Placed, identity),
-            "done" => set_status(&mut rows, seq, Status::Done, None),
-            _ => continue,
+            "failed" => orphan(&mut rows, seq, Status::Failed, None, line, &mut unreadable),
+            "placed" => orphan(&mut rows, seq, Status::Placed, identity, line, &mut unreadable),
+            "done" => orphan(&mut rows, seq, Status::Done, None, line, &mut unreadable),
+            other => unreadable.push(format!("line {line}: unknown status {other:?}")),
         }
     }
 
     let (source_root, dest_root) = roots.ok_or(UndoError::NoRoot)?;
-    Ok((source_root, dest_root, rows, torn))
+    Ok((source_root, dest_root, rows, unreadable))
 }
 
-fn set_status(rows: &mut [Row], seq: u64, status: Status, identity: Option<Identity>) {
-    if let Some(row) = rows.iter_mut().find(|r| r.seq == seq) {
-        row.status = status;
-        if identity.is_some() {
-            row.placed_identity = identity;
+/// Last status wins per `seq`. A status row whose `seq` has no `pending` is
+/// reported rather than ignored: silence let a manifest lose rows while the
+/// user was told the undo was clean.
+fn orphan(
+    rows: &mut [Row],
+    seq: u64,
+    status: Status,
+    identity: Option<Identity>,
+    line: usize,
+    unreadable: &mut Vec<String>,
+) {
+    match rows.iter_mut().find(|r| r.seq == seq) {
+        Some(row) => {
+            row.status = status;
+            if identity.is_some() {
+                row.placed_identity = identity;
+            }
         }
+        None => unreadable.push(format!("line {line}: status for unknown row {seq}")),
     }
 }
 

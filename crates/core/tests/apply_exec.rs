@@ -567,3 +567,181 @@ fn walkdir(root: &Path) -> Vec<String> {
     collect(root, &mut found);
     found
 }
+
+// ---------------------------------------------------------------------------
+// The final review's five findings, each reproduced
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_placed_move_checks_the_source_before_deleting_the_copy() {
+    // A1. The Copy arm checked the source's identity; the Move arm did not.
+    // Re-extract the bundle, or drop in a truncated file, and `reverse`
+    // deleted the verified library copy and reported success. Invariant 6.
+    let d = tempdir().unwrap();
+    let source_root = d.path().join("src");
+    let dest_root = d.path().join("dest");
+    std::fs::create_dir_all(&source_root).unwrap();
+    std::fs::create_dir_all(&dest_root).unwrap();
+    let good = b"the verified library copy, intact";
+    let destination = dest_root.join("Mazebook.pdf");
+    std::fs::write(&destination, good).unwrap();
+    let source = source_root.join("mazebook.pdf");
+    std::fs::write(&source, good).unwrap();
+
+    let manifest = d.path().join("plan.jsonl.undo.csv");
+    let mut writer = UndoWriter::create(&manifest, &source_root, &dest_root).unwrap();
+    let seq = writer
+        .record_pending(
+            Path::new("mazebook.pdf"),
+            Path::new("Mazebook.pdf"),
+            Mechanism::Stream,
+            Mode::Move,
+            &source,
+        )
+        .unwrap();
+    let meta = std::fs::symlink_metadata(&destination).unwrap();
+    writer
+        .record_placed(
+            seq,
+            (
+                meta.len(),
+                meta.ino(),
+                meta.mtime() * 1_000_000_000 + meta.mtime_nsec(),
+            ),
+        )
+        .unwrap();
+    drop(writer);
+
+    // The user puts something else back at the source name.
+    std::fs::write(&source, b"junk").unwrap();
+
+    let report = reverse(
+        &manifest,
+        &source_root,
+        &dest_root,
+        &[PathBuf::from("Mazebook.pdf")],
+    )
+    .unwrap();
+    assert_eq!(report.restored, 0, "{report:?}");
+    assert_eq!(report.refused.len(), 1, "{report:?}");
+    assert_eq!(
+        std::fs::read(&destination).unwrap(),
+        good,
+        "reverse deleted the only good copy"
+    );
+}
+
+#[test]
+fn reverse_does_not_hang_on_a_fifo_at_a_destination() {
+    // A2. Entry::metadata used openat, which blocks forever opening a FIFO —
+    // while holding the plan lock, so the one recovery path was unavailable.
+    // fstatat answers instantly and never opens the file.
+    let d = tempdir().unwrap();
+    let source_root = d.path().join("src");
+    let dest_root = d.path().join("dest");
+    std::fs::create_dir_all(&source_root).unwrap();
+    std::fs::create_dir_all(&dest_root).unwrap();
+    let source = source_root.join("mazebook.pdf");
+    std::fs::write(&source, b"x").unwrap();
+
+    let fifo = dest_root.join("Mazebook.pdf");
+    let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: a valid NUL-terminated path for the duration of the call.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o644) }, 0);
+
+    let manifest = d.path().join("plan.jsonl.undo.csv");
+    let mut writer = UndoWriter::create(&manifest, &source_root, &dest_root).unwrap();
+    writer
+        .record_pending(
+            Path::new("mazebook.pdf"),
+            Path::new("Mazebook.pdf"),
+            Mechanism::Stream,
+            Mode::Move,
+            &source,
+        )
+        .unwrap();
+    drop(writer);
+
+    // The assertion is that this returns at all.
+    let report = reverse(
+        &manifest,
+        &source_root,
+        &dest_root,
+        &[PathBuf::from("Mazebook.pdf")],
+    )
+    .unwrap();
+    assert_eq!(report.restored, 0, "{report:?}");
+    assert!(fifo.exists());
+}
+
+#[test]
+fn an_unreadable_destination_is_refused_not_mistaken_for_absent() {
+    // A2's sibling: openat failed on a file the user cannot read, so the row
+    // was refused for the wrong reason. fstatat answers through the parent.
+    let (_g, c) = gcd();
+    let f = Fixture::new(&["mazebook.pdf"], &c, Mode::Move);
+    apply(&f.plan, false, &mut |_| {}).unwrap();
+    let book = f.dest.join("Mazebook/Mazebook.pdf");
+    let mut locked = std::fs::metadata(&book).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut locked, 0o000);
+    std::fs::set_permissions(&book, locked).unwrap();
+
+    let report = undo(&f.plan).unwrap();
+    // The file itself is unreadable, but its identity is not, so the undo
+    // proceeds rather than refusing.
+    assert_eq!(report.restored, 1, "{report:?}");
+}
+
+#[test]
+fn an_unparseable_row_is_reported_not_dropped() {
+    // A3. A short row and a mistyped mechanism both `continue`d, so the
+    // report said the undo was clean while files stayed in the library —
+    // the class the design's own preamble says the last rewrite missed.
+    let (_g, c) = gcd();
+    let f = Fixture::new(&["mazebook.pdf", "birdking_vol1.pdf"], &c, Mode::Move);
+    apply(&f.plan, false, &mut |_| {}).unwrap();
+
+    let text = std::fs::read_to_string(f.manifest()).unwrap();
+    let mangled = text.replacen(",rename,", ",ranme,", 1);
+    assert_ne!(mangled, text, "the manifest shape changed");
+    std::fs::write(f.manifest(), mangled).unwrap();
+
+    let report = undo(&f.plan).unwrap();
+    // Asserted on the *reason*, not merely that something was refused: the
+    // dropped row's orphaned `done` also produces a refusal, so a bare
+    // is-not-empty check passes even when the parse failure is silent.
+    assert!(
+        report
+            .refused
+            .iter()
+            .any(|r| r.contains("unknown mechanism")),
+        "the unreadable row itself was dropped in silence: {report:?}"
+    );
+}
+
+#[test]
+fn a_partial_undo_can_be_resumed() {
+    // A5. prune_empty_dirs removed the parent after a successful row, and a
+    // later resolve of a refused row then failed at the parent — which is
+    // not a metadata NotFound, so "nothing to do" never applied, `refused`
+    // was never empty, and O_EXCL killed the plan forever.
+    let (_g, c) = gcd();
+    let f = Fixture::new(&["mazebook.pdf", "birdking_vol1.pdf"], &c, Mode::Move);
+    apply(&f.plan, false, &mut |_| {}).unwrap();
+
+    // Squat one original name so its row refuses.
+    std::fs::write(f.source.join("birdking_vol1.pdf"), b"squatter").unwrap();
+    let first = undo(&f.plan).unwrap();
+    assert_eq!(first.restored, 1, "{first:?}");
+    assert_eq!(first.refused.len(), 1, "{first:?}");
+
+    // Clear the squatter and resume.
+    std::fs::remove_file(f.source.join("birdking_vol1.pdf")).unwrap();
+    let second = undo(&f.plan).unwrap();
+    assert_eq!(second.restored, 1, "the partial undo could not be resumed: {second:?}");
+    assert!(second.refused.is_empty(), "{second:?}");
+    assert!(f.files_under(&f.dest).is_empty(), "files left in the library");
+
+    // And the plan is runnable again.
+    assert_eq!(apply(&f.plan, false, &mut |_| {}).unwrap().executed, 2);
+}

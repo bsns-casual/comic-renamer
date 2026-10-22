@@ -269,8 +269,18 @@ fn perform(
         Mechanism::Clone => {
             match clone_excl(&row.source, &header.dest_root, relative) {
                 Ok(()) => {
-                    placed(undo, seq, absolute)?;
+                    // Before, not after: a failure of the `placed` write
+                    // itself would otherwise record `failed` over a
+                    // destination that exists, and `reverse` skips a
+                    // `failed` row in silence.
+                    //
+                    // shortcut: reasoned, not tested. Reaching it needs the
+                    // manifest write to fail after the destination landed —
+                    // a reviewer produced the sibling state with
+                    // RLIMIT_FSIZE, but nothing in the suite distinguishes
+                    // this ordering from the wrong one.
                     *created = true;
+                    placed(undo, seq, absolute)?;
                 }
                 // An occupied destination stays a refusal; it is never a
                 // reason to try again by another route.
@@ -289,8 +299,8 @@ fn perform(
                         ),
                     });
                     stream_verified(&row.source, &header.dest_root, relative)?;
-                    placed(undo, seq, absolute)?;
                     *created = true;
+                    placed(undo, seq, absolute)?;
                 }
             }
             if header.mode == Mode::Move {
@@ -300,12 +310,12 @@ fn perform(
         Mechanism::Stream => {
             // temp -> fsync -> verify -> rename_excl, all inside.
             stream_verified(&row.source, &header.dest_root, relative)?;
+            *created = true;
             // A hard gate before the unlink. Ignore its failure and the row
             // is a bare `pending` with the source gone and the destination's
             // inode unrecorded — the user's only copy in the library under a
             // name `reverse` will not touch.
             placed(undo, seq, absolute)?;
-            *created = true;
             if header.mode == Mode::Move {
                 // THEN unlink. stream_verified never touches the source, so
                 // this is the only place a move loses its original, and it
@@ -372,7 +382,11 @@ pub fn undo(plan: &Path) -> Result<UndoReport, ApplyError> {
     // A fully reversed manifest is renamed aside: the audit trail survives
     // and the plan becomes runnable again. Left in place, a successful undo
     // meant O_EXCL refused that plan forever.
-    if report.refused.is_empty() && report.skipped == 0 && report.restored > 0 {
+    // Gated on refusals only. `skipped` counts rows that were already
+    // reversed — the normal case on a second pass and after a pruned parent
+    // — so requiring zero of them left the manifest in place and `O_EXCL`
+    // refused the plan forever.
+    if report.refused.is_empty() {
         let mut name = manifest.file_name().unwrap_or_default().to_os_string();
         name.push(".reversed");
         let _ = std::fs::rename(&manifest, manifest.with_file_name(name));
