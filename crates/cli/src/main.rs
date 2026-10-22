@@ -33,43 +33,63 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Read the source, resolve every filename, and write a reviewable plan.
-    /// Touches nothing.
+    /// Identify every file and write a plan. Touches nothing.
     Scan {
+        /// The folder of comics to rename. Not searched recursively.
         source: PathBuf,
+        /// Where the renamed library goes. Must already exist.
         #[arg(long)]
         dest: PathBuf,
-        /// Where to write the plan. Defaults to `comic-renamer-plan.jsonl`.
+        /// Where to write the plan [default: comic-renamer-plan.jsonl]
         #[arg(long, short = 'o')]
         out: Option<PathBuf>,
+        /// Which library app's layout to produce.
         #[arg(long, default_value = "komga")]
         preset: String,
+        /// Which language's editions to match. Never falls back to another.
         #[arg(long, default_value = "en")]
         lang: String,
+        /// `move` relocates and the originals stop existing; `copy` keeps
+        /// them, and clones rather than copying where it can.
         #[arg(long, value_enum, default_value_t = ModeArg::Move)]
         mode: ModeArg,
     },
 
-    /// Execute a plan. Discloses the mode and its cost, then asks for the
-    /// typed word. Takes no mode flag — the plan carries it (§6.13).
+    // The mode flag is on `scan`, not here: §6.10 selects a per-row mechanism
+    // during the scan, which is impossible if scan is never told the mode.
+    // That is what makes `apply` reproducible from the plan alone (§6.13).
+    /// Carry out a plan. States what it will do, then asks you to type the
+    /// mode to confirm.
     Apply {
+        /// The plan written by `scan`.
         plan: PathBuf,
-        /// A move off a cloud-sync folder is a server-side delete (D23).
+        // D23: on a cloud-sync source a move is a server-side delete, and
+        // cloning a placeholder silently hydrates it.
+        /// Permit a move out of a cloud-sync folder, where it deletes the
+        /// server's copy too.
         #[arg(long)]
         allow_cloud_move: bool,
-        /// Skip the typed confirmation. The disclosure still prints.
+        /// Confirm without being asked. What would have been disclosed is
+        /// still printed.
         #[arg(long, short = 'y')]
         yes: bool,
-        /// Refuse unless the Komga libraries here can survive a rename
-        /// (§6.8.2). The token comes from `COMIC_RENAMER_KOMGA_TOKEN`, never
-        /// a flag — flags land in shell history.
+        // §6.8.2: hashing switched on after a rename cannot help, because a
+        // deleted record can never acquire a hash (D35). The token comes from
+        // the environment, never a flag — flags land in shell history.
+        /// Refuse to run unless this Komga server is configured to survive a
+        /// rename. Reads `COMIC_RENAMER_KOMGA_TOKEN` for the API key.
         #[arg(long)]
         komga_url: Option<String>,
     },
 
-    /// Put a plan's files back. Reads the manifest beside the plan for what
-    /// happened, and the plan itself for what to trust (D38).
-    Undo { plan: PathBuf },
+    // D38: the manifest cannot anchor itself, so the plan's roots and the
+    // preset decide which destinations `reverse` will even recognise.
+    /// Put a plan's files back where they came from.
+    Undo {
+        /// The same plan you passed to `apply`. The record of what happened
+        /// is the `.undo.csv` beside it.
+        plan: PathBuf,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]

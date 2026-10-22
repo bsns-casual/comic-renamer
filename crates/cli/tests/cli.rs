@@ -203,6 +203,31 @@ fn apply_rejects_a_mode_flag() {
 }
 
 #[test]
+fn the_help_does_not_cite_the_spec_at_the_user() {
+    // Every flag here has a decision behind it and the temptation is to cite
+    // it. "(D23)" and "(§6.8.2)" mean nothing to someone holding a bundle of
+    // comics; the provenance belongs in the code, beside the flag.
+    for args in [
+        ["--help"].as_slice(),
+        &["scan", "--help"],
+        &["apply", "--help"],
+        &["undo", "--help"],
+    ] {
+        let out = run(args, "");
+        let text = stdout(&out) + &stderr(&out);
+        for leak in ["§", "D23", "D35", "D38", "6.10", "6.13"] {
+            assert!(
+                !text.contains(leak),
+                "`{}` leaks {leak:?}:\n{text}",
+                args.join(" ")
+            );
+        }
+        // And each positional is described, not left blank.
+        assert!(!text.contains("<PLAN>  \n"), "undocumented arg: {text}");
+    }
+}
+
+#[test]
 fn undo_rejects_a_mode_flag_too() {
     let out = run(&["undo", "plan.jsonl", "--move"], "");
     assert!(!out.status.success());
