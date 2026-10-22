@@ -26,48 +26,30 @@ fn join(series: &[String], subtitle: &[String]) -> String {
     all.join(" ")
 }
 
-/// Splits a title at its volume marker into (series, subtitle), normalising
-/// both: zero-width characters removed, `&` spelled "and", issue numbers and
-/// the volume marker itself dropped, remaining punctuation dropped, whitespace
-/// collapsed. Case and leading articles survive on purpose.
+/// Splits a title into (series, subtitle) at the first colon or volume
+/// marker, whichever comes first, normalising both: zero-width characters
+/// removed, `&` spelled "and", issue numbers and the volume marker itself
+/// dropped, remaining punctuation dropped, whitespace collapsed.
+///
+/// Case and leading articles survive on purpose (owner decision,
+/// 2026-10-22). Humble title-cases function words where the corpus does not,
+/// and folding case to hide that would also let `MASK Omnibus` pass against
+/// *The Mask Omnibus*.
 fn split_title(s: &str) -> (Vec<String>, Vec<String>) {
     let expanded = s
         .replace(['\u{200b}', '\u{200c}', '\u{200d}', '\u{feff}'], "")
         .replace('&', " and ");
 
-    let mut series: Vec<String> = Vec::new();
-    let mut subtitle: Vec<String> = Vec::new();
-    let mut past_volume = false;
-    let mut raw = expanded.split_whitespace().peekable();
-    while let Some(token) = raw.next() {
-        // `#7` has to go before punctuation is stripped, or it survives as a
-        // bare `7` indistinguishable from a number inside a title.
-        if token.starts_with('#') {
-            continue;
-        }
-        if !past_volume && is_volume_word(token) {
-            // Humble writes `Vol. 3:Planet Death` with no space, so the number
-            // and the subtitle's first word can share a token.
-            let (number, rest) = leading_number(&alphanumeric(raw.peek().unwrap_or(&"")));
-            if !number.is_empty() {
-                raw.next();
-                past_volume = true;
-                if !rest.is_empty() {
-                    subtitle.push(rest);
-                }
-            }
-            continue;
-        }
-        let clean = alphanumeric(token);
-        if clean.is_empty() {
-            continue;
-        }
-        if past_volume {
-            subtitle.push(clean);
-        } else {
-            series.push(clean);
-        }
-    }
+    // The colon split comes first so a number and the subtitle's first word
+    // cannot share a token -- Humble writes `Vol. 3:Planet Death`.
+    let (head, tail) = match expanded.split_once(':') {
+        Some((head, tail)) => (head, tail),
+        None => (expanded.as_str(), ""),
+    };
+    // Both boundaries apply: the series ends at whichever of the colon and
+    // the volume marker comes first, and everything past it is subtitle.
+    let (mut series, mut subtitle) = split_at_volume(head);
+    subtitle.extend(words(tail));
 
     // Humble's promo prefix. Only when "Free" is followed by "Issue", so a
     // title that genuinely opens with "Free" keeps its first word.
@@ -78,6 +60,47 @@ fn split_title(s: &str) -> (Vec<String>, Vec<String>) {
         series.drain(..2);
     }
     (series, subtitle)
+}
+
+/// Normalised words, split at the first volume marker into the part before it
+/// and the part after. The marker and its number are dropped.
+fn split_at_volume(s: &str) -> (Vec<String>, Vec<String>) {
+    let mut before: Vec<String> = Vec::new();
+    let mut after: Vec<String> = Vec::new();
+    let mut past = false;
+    let mut raw = s.split_whitespace().peekable();
+    while let Some(token) = raw.next() {
+        // Issue numbers go before punctuation is stripped, or `#7` survives
+        // as a bare `7` indistinguishable from a number inside a title. The
+        // `#` is not always first: Humble writes ranges as `(#1-6)`.
+        if token.contains('#') {
+            continue;
+        }
+        if !past && is_volume_word(token) {
+            if raw.peek().is_some_and(|t| is_number(&alphanumeric(t))) {
+                raw.next();
+                past = true;
+            }
+            continue;
+        }
+        let clean = alphanumeric(token);
+        if clean.is_empty() {
+            continue;
+        }
+        if past {
+            after.push(clean);
+        } else {
+            before.push(clean);
+        }
+    }
+    (before, after)
+}
+
+/// Every normalised word, boundary ignored. For a subtitle, which has none.
+fn words(s: &str) -> Vec<String> {
+    let (mut before, after) = split_at_volume(s);
+    before.extend(after);
+    before
 }
 
 fn alphanumeric(token: &str) -> String {
@@ -91,19 +114,11 @@ fn is_volume_word(token: &str) -> bool {
     )
 }
 
-/// Splits off a leading Arabic or Roman number. `Vol. IV` and `Vol 1` are both
-/// Humble forms, and `3Planet` is what `3:Planet` normalises to.
-fn leading_number(token: &str) -> (String, String) {
-    let digits = token.chars().take_while(|c| c.is_ascii_digit()).count();
-    if digits > 0 {
-        return (token[..digits].to_string(), token[digits..].to_string());
-    }
-    // Roman only when the whole token is Roman: splitting `IVory` at `IV`
-    // would invent a volume out of a word.
-    if !token.is_empty() && token.chars().all(|c| "IVXLCDM".contains(c)) {
-        return (token.to_string(), String::new());
-    }
-    (String::new(), token.to_string())
+/// Arabic or Roman. `Vol. IV` and `Vol 1` are both Humble forms.
+fn is_number(token: &str) -> bool {
+    !token.is_empty()
+        && (token.chars().all(|c| c.is_ascii_digit())
+            || token.chars().all(|c| "IVXLCDM".contains(c)))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -159,6 +174,47 @@ mod tests {
         assert!(grade_ok(
             "X-O Manowar",
             "X-O Manowar, Vol. 3:Planet Death (plus extra content)"
+        ));
+    }
+
+    /// Owner decision, 2026-10-22: a collection subtitle after a colon is not
+    /// something a series-and-volume resolver claims, so series-only grades
+    /// correct even with no volume marker to split on.
+    #[test]
+    fn accepts_series_only_against_a_colon_subtitle() {
+        assert!(grade_ok(
+            "Valiant Masters Bloodshot",
+            "Valiant Masters Bloodshot: Blood of the Machine"
+        ));
+        assert!(grade_ok(
+            "Six Days in Cincinnati",
+            "Six Days in Cincinnati: A Graphic Account of the Riots"
+        ));
+    }
+
+    /// Both boundaries have to hold at once. A colon split that replaced the
+    /// volume boundary rather than joining it put the trailing parenthetical
+    /// back into the series name.
+    #[test]
+    fn accepts_a_volume_boundary_with_no_colon_in_sight() {
+        assert!(grade_ok("Minimum Wage", "Minimum Wage Vol. 1 (#1-6)"));
+        assert!(grade_ok(
+            "The Mask Omnibus",
+            "The Mask Omnibus Volume 1 (Second Edition)"
+        ));
+        // The `#` is not the token's first character here.
+        assert!(grade_ok("Velvet", "Velvet Vol. 1 (#1-5)"));
+    }
+
+    /// Owner decision, 2026-10-22: case is NOT folded. Humble title-cases
+    /// function words where the corpus does not, and that stays a finding
+    /// rather than becoming invisible.
+    #[test]
+    fn case_is_never_folded() {
+        assert!(!grade_ok("Black Is the Color", "Black is the Color"));
+        assert!(!grade_ok(
+            "I Am Not Okay with This",
+            "I Am Not Okay With This"
         ));
     }
 
