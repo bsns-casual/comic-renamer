@@ -76,9 +76,10 @@ Dated `YYYY-MM-DD-<topic>.md`.
 
 ## State
 
-Design approved. **Phase 0 is complete. Phase 1 Tasks 1-12 are complete.**
-Tasks 13-15 are untouched. `scan` runs against the real bundle; `apply` and
-`undo` exist but are not wired to the CLI.
+Design approved. **Phase 0 is complete. Phase 1 Tasks 1-12 are complete, and
+Task 13's Komga pre-flight with them.** `scan` runs against the real bundle.
+`apply` and `undo` exist, are tested, and are **deliberately not wired to the
+CLI** — the tool can currently only scan.
 
 ```
 done   repo harness, CI, corpus manifest            (this file, .github/, corpus/)
@@ -91,11 +92,14 @@ done   T3   corpus, verified fetch       T9   no-clobber syscalls + collisions
 done   T4   Layer B overrides            T10  scan + a CLI that runs it
 done   T5   resolver ladder              T11  apply pre-flight (refusals only)
 done   T6   Komga preset                 T12  apply execution + undo
-done   T7   JSONL plan + checksum
+done   T7   JSONL plan + checksum       T13  Komga pre-flight (CLI half open)
 ```
 
-**150 tests pass** (`cargo test --workspace`), plus six `#[ignore]`d ones that
-need real hardware:
+**169 tests pass** (`cargo test --workspace`), plus six `#[ignore]`d ones that
+need real hardware. **CI runs all of them** — `.github/workflows/verify.yml`
+has a macOS job that mounts a RAM disk, because a same-volume move is a rename
+and the streamed path, the `placed` state and abort-on-failure are otherwise
+unreachable.
 
 - `COMIC_RENAMER_TEST_ZIP=<gcd-*.zip>` — four tests against the real corpus
   release: install-and-open, coverage rates, and the publisher hint's effect
@@ -116,29 +120,22 @@ The Phase 1 plan is written and survived three adversarial reviews:
 
 ### Pick up here
 
-**Task 13 — CLI, disclosure, Komga pre-flight.** `apply` and `undo` exist and
-are tested but are deliberately not wired to the CLI, so the tool can
-currently only `scan`. §6.10's mode disclosure and §6.8.2's Komga pre-flight
-are both Task 13's, and both gate exposing `apply` to a user.
+**Task 13's CLI half.** `komga_api` is done; what remains is wiring `apply`
+and `undo` as subcommands, §6.10's mode disclosure and its typed
+confirmation, and `crates/cli/tests/cli.rs`.
 
-Both mandated review gates are behind you. They were expensive and they were
-worth it: Task 9's review found 18 defects, Task 12's found 16, and between
-them seven were ways to destroy a file permanently that a green suite did not
-catch.
+Two things to settle when you write it:
 
-**Read `docs/specs/2026-10-21-undo-and-reverse-design.md` before touching
-`undo.rs`.** That file was written three times. The first two implementations
-drew 6 and then 11 confirmed data-loss findings; the third was written to a
-design that was reviewed before any code existed. The failure pattern both
-times was the same and will recur: *each fix addressed the trigger a reviewer
-handed over, not the class it belonged to.* The clearest example — Task 9
-replaced a lexical `strip_prefix` containment check in `fsops` with a
-descriptor walk, and three days later `undo.rs` was written with
-`starts_with`, the same bug in a different file with the correct machinery two
-modules away.
+- §6.10's disclosure block advertises `--hardlink`, which **D27 defers out of
+  Phase 1**. Printing it would offer a flag that does not exist. Drop the
+  line and record the departure.
+- Typed confirmation is required "on first run and whenever the plan is
+  cross-volume". Nothing currently persists a notion of first run; the
+  cheapest honest home is a marker beside the corpus in the cache directory.
 
-The design's invariants and its test-obligations table are the contract. D38
-records why `undo` takes the plan rather than the manifest.
+`apply` and `undo` are not exposed on purpose. Wiring them is the commit that
+first lets a user move a file, so it is worth doing deliberately rather than
+as a side effect of finishing Task 13.
 
 ### Known gaps, all spec-level
 
