@@ -97,7 +97,7 @@ done   T7   JSONL plan + checksum       T13  CLI: apply, undo, disclosure
 todo   T14  the gate — see below      T15  Homebrew — see below
 ```
 
-**191 tests pass** (`cargo test --workspace`), plus six `#[ignore]`d ones that
+**191 tests pass** (`cargo test --workspace`), plus seven `#[ignore]`d ones that
 need real hardware. **CI runs all of them** — `.github/workflows/verify.yml`
 has a macOS job that mounts a RAM disk, because a same-volume move is a rename
 and the streamed path, the `placed` state and abort-on-failure are otherwise

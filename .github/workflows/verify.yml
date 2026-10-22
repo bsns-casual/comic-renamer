@@ -65,6 +65,10 @@ jobs:
           # which is why the disk is 1.3 GiB and not the smallest that fits.
           COMIC_RENAMER_TEST_VOLUME=/Volumes/CRTEST \
             cargo test -p comic-renamer-core --test apply_exec -- --ignored
+          # And the CLI on top of it: core proves the streamed execution, this
+          # proves the user is told the run crosses volumes before consenting.
+          COMIC_RENAMER_TEST_VOLUME=/Volumes/CRTEST \
+            cargo test -p comic-renamer --test cli -- --ignored
 
   fixtures:
     name: held-out fixtures well-formed

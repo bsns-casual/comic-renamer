@@ -59,21 +59,54 @@ fn fixture(mode: Mode) -> Fixture {
     };
     let relative = preset_by_id("komga").unwrap().destination(&resolved, "pdf");
 
+    // Same volume, both trees being in one TempDir.
+    let mechanism = match mode {
+        Mode::Move => Mechanism::Rename,
+        Mode::Copy => Mechanism::Clone,
+    };
+    let plan = write_plan(&root, &source, &dest, mode, mechanism, &file);
+    let _ = meta;
+
+    Fixture {
+        placed: dest.join(&relative),
+        _dir: dir,
+        source,
+        dest,
+        plan,
+    }
+}
+
+/// One row, resolved to `Hellboy Vol. 01`, written beside `beside`.
+fn write_plan(
+    beside: &Path,
+    source_root: &Path,
+    dest_root: &Path,
+    mode: Mode,
+    mechanism: Mechanism,
+    file: &Path,
+) -> PathBuf {
+    let meta = std::fs::metadata(file).unwrap();
+    let resolved = Resolved {
+        series: "Hellboy".into(),
+        volume: Some(1),
+        subtitle: None,
+        run: 10,
+        status: Status::Ready(Basis::Unambiguous),
+        record: None,
+    };
+    let relative = preset_by_id("komga").unwrap().destination(&resolved, "pdf");
+
     let row = PlanRow {
         id: "r0".into(),
-        source: file,
-        destination_preview: relative.clone(),
+        source: file.to_path_buf(),
+        destination_preview: relative,
         extension: "pdf".into(),
         series: resolved.series.clone(),
         volume: resolved.volume,
         subtitle: None,
         run: resolved.run,
         status: resolved.status.clone(),
-        // Same volume, both trees being in one TempDir.
-        mechanism: match mode {
-            Mode::Move => Mechanism::Rename,
-            Mode::Copy => Mechanism::Clone,
-        },
+        mechanism,
         source_stat: SourceStat {
             size: meta.len(),
             mtime_ns: meta.mtime() * 1_000_000_000 + meta.mtime_nsec(),
@@ -86,24 +119,17 @@ fn fixture(mode: Mode) -> Fixture {
         version: 1,
         preset: "komga".into(),
         mode,
-        source_root: source.clone(),
-        dest_root: dest.clone(),
+        source_root: source_root.to_path_buf(),
+        dest_root: dest_root.to_path_buf(),
         lang: "en".into(),
         required_bytes: 0,
         download_bytes: 0,
         checksum: String::new(),
     };
 
-    let plan = root.join("plan.jsonl");
+    let plan = beside.join("plan.jsonl");
     comic_renamer_core::plan::write(&header, &[row], &plan).unwrap();
-
-    Fixture {
-        placed: dest.join(&relative),
-        _dir: dir,
-        source,
-        dest,
-        plan,
-    }
+    plan
 }
 
 fn run(args: &[&str], stdin: &str) -> Output {
@@ -318,4 +344,57 @@ fn undo_with_no_manifest_is_not_an_error() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stdout(&out).contains("0 restored"), "{}", stdout(&out));
     assert_eq!(before, listing(&[&f.source, &f.dest]));
+}
+
+// ---------------------------------------------------------------------------
+// Cross-volume, which needs a real second device
+// ---------------------------------------------------------------------------
+
+/// `COMIC_RENAMER_TEST_VOLUME=<mount on another device>`. A same-volume move
+/// is a `rename`, so the two ACROSS VOLUMES branches of the disclosure are
+/// unreachable without one.
+///
+/// Core's `apply_exec` already covers the streamed *execution* against the
+/// same RAM disk. What is only provable here is the join: that the mechanism
+/// the filesystem dictates reaches the disclosure, and that the user is told
+/// the run crosses volumes before being asked to consent to it.
+///
+/// The mechanism is computed by `select_mechanism`, not written into the
+/// fixture — hard-coding `Stream` would assume the very answer under test.
+/// Going through `scan` would be more faithful still, and would pull the
+/// 34 MiB corpus into CI for one assertion.
+#[test]
+#[ignore = "needs COMIC_RENAMER_TEST_VOLUME on another device"]
+fn a_cross_volume_plan_says_so_before_the_prompt() {
+    let volume = std::env::var("COMIC_RENAMER_TEST_VOLUME")
+        .expect("COMIC_RENAMER_TEST_VOLUME is not set");
+
+    let dir = TempDir::new().unwrap();
+    let source = dir.path().canonicalize().unwrap().join("bundle");
+    std::fs::create_dir_all(&source).unwrap();
+    let file = source.join("hellboy_vol1.pdf");
+    std::fs::File::create(&file).unwrap();
+
+    let dest = PathBuf::from(&volume).join("cli-cross-volume");
+    std::fs::create_dir_all(&dest).unwrap();
+
+    let mechanism =
+        comic_renamer_core::fsops::select_mechanism(&file, &dest, Mode::Move).unwrap();
+    assert_eq!(
+        mechanism,
+        Mechanism::Stream,
+        "{volume} is on this device, so there is nothing cross-volume to test"
+    );
+
+    let plan = write_plan(dir.path(), &source, &dest, Mode::Move, mechanism, &file);
+    let out = run(&["apply", plan.to_str().unwrap()], "no\n");
+    let said = stdout(&out);
+
+    assert!(!out.status.success());
+    assert!(said.contains("ACROSS VOLUMES"), "{said}");
+    // The number that gates the run, stated before consent is asked for.
+    assert!(said.contains("must be free at the destination"), "{said}");
+    assert!(said.find("ACROSS VOLUMES") < said.find("Type MOVE"), "{said}");
+
+    let _ = std::fs::remove_dir_all(&dest);
 }
