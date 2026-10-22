@@ -42,6 +42,30 @@ jobs:
           fi
           echo "no corpus binary tracked"
 
+  rust:
+    name: tests, including the ones that need a second volume
+    # macOS, not ubuntu: the whole execution layer is clonefile,
+    # renamex_np and SF_DATALESS.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test --workspace
+
+      # A same-volume move is a rename, so the streamed path, the `placed`
+      # state and abort-on-failure are unreachable without a real second
+      # device. Those tests are #[ignore]d for a local `cargo test`; if CI
+      # does not run them, nothing does.
+      - name: Cross-volume execution and undo
+        run: |
+          set -euo pipefail
+          DEV=$(hdiutil attach -nomount ram://2726297 | awk '{print $1}')
+          trap 'hdiutil detach "$DEV" -quiet || true' EXIT
+          diskutil eraseVolume "HFS+" CRTEST "$DEV"
+          # Under ~1.1 GiB every run is refused by the free-space reserve,
+          # which is why the disk is 1.3 GiB and not the smallest that fits.
+          COMIC_RENAMER_TEST_VOLUME=/Volumes/CRTEST \
+            cargo test -p comic-renamer-core --test apply_exec -- --ignored
+
   fixtures:
     name: held-out fixtures well-formed
     runs-on: ubuntu-latest
@@ -60,7 +84,11 @@ jobs:
           head -1 LICENSE | grep -q 'MIT License'
           echo "MIT confirmed"
 
-# Phase 1 adds the gate that matters most here: the held-out coverage
-# measurement, which needs the resolver to exist. Until then see CLAUDE.md,
-# "One gate is not yet real" -- the silent-false-positive rate is unmeasured
-# and must not be claimed by this workflow or anything else.
+# Still missing: the held-out coverage measurement (Task 14), which needs
+# xtask's grader. The silent-false-positive rate remains unmeasured by this
+# workflow and must not be claimed by it or anything else.
+#
+# Also not run here: the four corpus tests behind COMIC_RENAMER_TEST_ZIP.
+# They need the 33.7 MB release, which the corpus job above already
+# downloads on ubuntu while the code is macOS-only. Worth wiring when the
+# gate job lands and the download is being paid for anyway.

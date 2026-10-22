@@ -717,6 +717,15 @@ fn an_unparseable_row_is_reported_not_dropped() {
             .any(|r| r.contains("unknown mechanism")),
         "the unreadable row itself was dropped in silence: {report:?}"
     );
+    // And the obligation's actual claim: one bad row leaves every other row
+    // reversible. Without this the test passes even if a malformed row
+    // aborted all its siblings, so long as the message was right.
+    assert_eq!(report.restored, 1, "the sibling row was stranded: {report:?}");
+    assert_eq!(
+        f.files_under(&f.source).len(),
+        1,
+        "the sibling row did not come back"
+    );
 }
 
 #[test]
@@ -818,4 +827,70 @@ fn a_duplicate_sequence_is_reported_not_processed_twice() {
         report.refused.iter().any(|m| m.contains("duplicate row")),
         "{report:?}"
     );
+}
+
+#[test]
+fn a_pending_clone_row_is_refused_rather_than_matched_on_size() {
+    // Invariant 4, and the whole reason `placed` exists. A clone or stream
+    // interrupted before its `placed` landed has no exact identity for its
+    // destination — only the source's, which a clone does not preserve. The
+    // old size-only fallback fired here, and comics from one bundle are
+    // byte-identical, so it fired constantly.
+    let d = tempdir().unwrap();
+    let source_root = d.path().join("src");
+    let dest_root = d.path().join("dest");
+    std::fs::create_dir_all(&source_root).unwrap();
+    std::fs::create_dir_all(&dest_root).unwrap();
+    let source = source_root.join("mazebook.pdf");
+    std::fs::write(&source, b"identical bytes").unwrap();
+    // A different file that happens to be the same size — the common case.
+    let destination = dest_root.join("Mazebook.pdf");
+    std::fs::write(&destination, b"someone else's").unwrap();
+
+    let manifest = d.path().join("plan.jsonl.undo.csv");
+    let mut writer = UndoWriter::create(&manifest, &source_root, &dest_root).unwrap();
+    writer
+        .record_pending(
+            Path::new("mazebook.pdf"),
+            Path::new("Mazebook.pdf"),
+            Mechanism::Clone,
+            Mode::Copy,
+            &source,
+        )
+        .unwrap();
+    drop(writer); // no `placed`: the run was interrupted
+
+    let report = reverse(
+        &manifest,
+        &source_root,
+        &dest_root,
+        &[PathBuf::from("Mazebook.pdf")],
+    )
+    .unwrap();
+    assert_eq!(report.restored, 0, "{report:?}");
+    assert!(
+        report
+            .refused
+            .iter()
+            .any(|r| r.contains("no exact identity")),
+        "{report:?}"
+    );
+    assert!(destination.exists(), "a same-size stranger was deleted");
+}
+
+#[test]
+fn apply_and_undo_share_one_lock() {
+    // Obligation 7's other side. Task 11 required it and two separate lock
+    // files silently defeated it; nothing tested that the fix joined them.
+    let (_g, c) = gcd();
+    let f = Fixture::new(&["mazebook.pdf"], &c, Mode::Move);
+    apply(&f.plan, false, &mut |_| {}).unwrap();
+
+    let held = comic_renamer_core::apply::Lock::acquire(&f.plan).unwrap();
+    assert!(
+        matches!(undo(&f.plan), Err(comic_renamer_core::types::ApplyError::Locked)),
+        "undo ran while apply held the plan lock"
+    );
+    drop(held);
+    assert_eq!(undo(&f.plan).unwrap().restored, 1);
 }
