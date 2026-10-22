@@ -14,7 +14,8 @@ use comic_renamer_core::fsops::{find_collisions, is_dataless};
 use comic_renamer_core::preset::{preset_by_id, Preset};
 use comic_renamer_core::overrides::Overrides;
 use comic_renamer_core::types::{
-    human_bytes as size, Collision, Mechanism, Mode, OverrideError, PlanRow, Progress, ScanOpts, Status, UndoReport,
+    human_bytes as size, Collision, Mechanism, Mode, PlanRow, Progress, ScanOpts, Status,
+    UndoReport,
 };
 use comic_renamer_core::{apply, komga_api, plan, scan};
 use std::io::Write;
@@ -24,6 +25,13 @@ use std::process::ExitCode;
 /// Pinned at build time (§6.5): the repository holds the manifest, the tool
 /// fetches and hash-verifies the corpus on first use, then caches it.
 const MANIFEST: &str = include_str!("../../../corpus/manifest.json");
+
+/// Compiled in, like the manifest, and for the same reason: a path resolved
+/// against the working directory is not something an installed binary can
+/// rely on. Layer B is first-party data that CI validates (§6.2.1); a
+/// user-supplied overrides file is Phase 3, when §6.11's caps on contributed
+/// rule data exist to make it safe.
+const OVERRIDES: &str = include_str!("../../../data/overrides.toml");
 
 /// Enough to act on, not a wall of text. The rest are counted.
 const COLLISIONS_SHOWN: usize = 5;
@@ -154,16 +162,11 @@ fn run_scan(
     let database = ensure_corpus(&manifest, &cache).map_err(|e| e.to_string())?;
     let corpus = Corpus::open(&database, &manifest).map_err(|e| e.to_string())?;
 
-    // Layer B is a floor, not a requirement, so an absent file is not fatal —
-    // but a *malformed* one silently resolving to no overrides at all would
-    // hand back worse answers with no word about why. Only NotFound passes.
-    let overrides = match Overrides::load(Path::new("data/overrides.toml")) {
-        Ok(overrides) => overrides,
-        Err(OverrideError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-            Overrides::default()
-        }
-        Err(e) => return Err(format!("data/overrides.toml is unusable: {e}")),
-    };
+    // Not optional and not absent: it ships inside the binary. A failure here
+    // means a malformed `data/overrides.toml` was committed, which is a build
+    // to reject rather than a run to degrade.
+    let overrides =
+        Overrides::parse(OVERRIDES).map_err(|e| format!("built-in overrides are unusable: {e}"))?;
 
     let opts = ScanOpts {
         source_root: source,
@@ -676,6 +679,21 @@ mod tests {
             collisions: Vec::new(),
             edited: false,
         }
+    }
+
+    #[test]
+    fn the_overrides_ship_inside_the_binary() {
+        // `Overrides::load(Path::new("data/overrides.toml"))` resolved against
+        // the working directory. Same binary, same input, from the repo root
+        // versus from /tmp: `The Walking Dead/The Walking Dead - Compendium
+        // One.pdf` versus `failed`. An installed copy had no Layer B at all.
+        let overrides = Overrides::parse(OVERRIDES).expect("built-in overrides must parse");
+        assert!(
+            overrides
+                .lookup("TWD_CompendiumOne", "Image Comics Bundle 2")
+                .is_some(),
+            "the embedded overrides resolve nothing, so they are not reaching the resolver"
+        );
     }
 
     #[test]

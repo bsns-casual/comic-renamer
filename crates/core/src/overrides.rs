@@ -43,11 +43,22 @@ pub struct Overrides {
 
 impl Overrides {
     pub fn load(path: &Path) -> Result<Overrides, OverrideError> {
-        let text = std::fs::read_to_string(path)?;
+        Overrides::parse(&std::fs::read_to_string(path)?)
+    }
+
+    /// The same validation, over text rather than a path.
+    ///
+    /// Exists because the binary carries this data compiled in (`include_str!`),
+    /// not read from disk: `Overrides::load(Path::new("data/overrides.toml"))`
+    /// resolved against the *working directory*, so an installed
+    /// `comic-renamer` run from anywhere but the repository root silently had
+    /// no Layer B at all — and D27 says Phase 1 without Layer B violates
+    /// anti-goal §4 by construction.
+    pub fn parse(text: &str) -> Result<Overrides, OverrideError> {
         // The toml crate rejects a duplicate key inside one table itself, so
         // DuplicateKey here covers two spellings that squash to one key.
         let raw: BTreeMap<String, OverrideEntry> =
-            toml::from_str(&text).map_err(|e| OverrideError::Parse(e.to_string()))?;
+            toml::from_str(text).map_err(|e| OverrideError::Parse(e.to_string()))?;
 
         let mut entries: Vec<(String, String, OverrideEntry)> = Vec::with_capacity(raw.len());
         for (key, entry) in raw {

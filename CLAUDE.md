@@ -97,7 +97,7 @@ done   T7   JSONL plan + checksum       T13  CLI: apply, undo, disclosure
 todo   T14  the gate — see below      T15  Homebrew — see below
 ```
 
-**200 tests pass** (`cargo test --workspace`), plus seven `#[ignore]`d ones that
+**202 tests pass** (`cargo test --workspace`), plus seven `#[ignore]`d ones that
 need real hardware. **CI runs all of them** — `.github/workflows/verify.yml`
 has a macOS job that mounts a RAM disk, because a same-volume move is a rename
 and the streamed path, the `placed` state and abort-on-failure are otherwise
@@ -112,6 +112,16 @@ unreachable.
   `hdiutil attach -nomount ram://2726297` then
   `diskutil eraseVolume "HFS+" CRTEST <dev>`. **Under ~1.1 GiB every run is
   refused by the free-space reserve**, which is how the reserve is specified.
+
+**Nothing the binary needs is read from the working directory.** Both the
+corpus manifest and `data/overrides.toml` are `include_str!`-embedded. The
+overrides were not, and `Overrides::load(Path::new("data/overrides.toml"))`
+resolved against the cwd — so an installed `comic-renamer` run from anywhere
+but the repository root had no Layer B at all, which D27 says violates
+anti-goal §4 by construction. Same binary, same input, repo root versus
+`/tmp`: `The Walking Dead - Compendium One.pdf` versus `failed`. A
+user-supplied overrides file stays Phase 3, when §6.11's caps on contributed
+rule data exist to make one safe.
 
 Two environment notes: `cargo` lives in `~/.cargo/bin` and is not on a
 non-interactive shell's PATH, and **clippy is now installed** —
@@ -199,7 +209,9 @@ reason the ready rate moved. The silent-false-positive rate — the one that
 actually matters — has **not** been re-measured against the implemented
 resolver at all; 0.48% is the research number.
 
-**Task 15, Homebrew.** Do not write the formula blind. This repo has twice
+**Task 15, Homebrew.** `cargo install --path crates/cli --locked` works and
+is what the README documents, so the tool is installable today; the formula is
+the convenience, not the gate. Do not write it blind. This repo has twice
 been wrong about a packaging claim that failed on contact with a real build,
 and a formula that cannot be `brew install --build-from-source`-tested in the
 session that writes it is the third instance waiting to happen.

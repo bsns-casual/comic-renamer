@@ -6,16 +6,37 @@ Point it at a folder, pick your app, and it identifies each file and shows you
 every proposed rename. Nothing moves until you approve the plan. Files it cannot
 identify are flagged for review rather than guessed at.
 
-**Status: scan, apply and undo work. Komga is the only preset, and there is
-no installer yet** — build from source. See [`docs/specs/`](docs/specs/) for the
-design and [`docs/research/`](docs/research/) for the measurements behind it.
+**Status: scan, apply and undo work. Komga is the only preset, and there is no
+Homebrew formula yet** — install from source, which is two commands. See
+[`docs/specs/`](docs/specs/) for the design and
+[`docs/research/`](docs/research/) for the measurements behind it.
+
+## Install
+
+**macOS only.** Not a packaging decision — the execution layer is
+`clonefile(2)`, `renamex_np` and `SF_DATALESS`, so the code does not compile
+elsewhere and there is no fallback path. Built and tested on Apple Silicon.
+
+You need [Rust](https://rustup.rs) 1.85 or newer. Older toolchains are refused
+by `cargo` with a clear message rather than a confusing build error.
+
+```sh
+git clone https://github.com/bsns-casual/comic-renamer
+cd comic-renamer
+cargo install --path crates/cli --locked
+```
+
+That puts `comic-renamer` in `~/.cargo/bin`, which rustup already adds to your
+`PATH`. `cargo uninstall comic-renamer` removes it. The binary carries the
+corpus manifest and the curated overrides compiled in, so it works from any
+directory.
+
+To run without installing, `cargo build --release` and use
+`./target/release/comic-renamer`.
 
 ## Use it
 
 ```sh
-cargo build --release
-alias comic-renamer=./target/release/comic-renamer
-
 # Identify everything and write a plan. Touches nothing.
 comic-renamer scan ~/Bundles/humble-dark-horse --dest ~/Comics   # add --copy to keep the originals
 
@@ -31,7 +52,8 @@ comic-renamer undo comic-renamer-plan.jsonl
 
 The first `scan` downloads the corpus — a 34 MiB archive, hash-verified against
 [`corpus/manifest.json`](corpus/manifest.json) — and caches it in
-`~/Library/Caches/comic-renamer`, where it unpacks to 97 MiB.
+`~/Library/Caches/comic-renamer`, where it unpacks to 97 MiB. Later runs are
+offline.
 
 Between one and two rows in three need a human, so reading the plan is the
 normal path and not an escape hatch. Rows still marked `review` are left where
