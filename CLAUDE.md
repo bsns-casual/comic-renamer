@@ -123,6 +123,21 @@ anti-goal §4 by construction. Same binary, same input, repo root versus
 user-supplied overrides file stays Phase 3, when §6.11's caps on contributed
 rule data exist to make one safe.
 
+One packaging claim measured rather than assumed, because the README now
+makes it: **an older toolchain does not fail on `rust-version`.** On 1.84.1,
+`cargo check` stops at `block-buffer-0.12.1` needing the `edition2024` Cargo
+feature, long before it reads this workspace's `rust-version = "1.85"` — so
+the failure reads as a broken dependency, not an old compiler. A
+`rust-toolchain.toml` would fix it by forcing a specific download on everyone,
+including people already on a newer stable, so the README says it in a
+sentence instead.
+
+Also unproven, and left that way: whether the crate fails to build on Linux.
+`cargo check --target x86_64-unknown-linux-gnu` stops in `libsqlite3-sys` and
+`ring` build scripts for want of a cross C toolchain, never reaching
+`fsops.rs:538`'s `std::os::macos::fs::MetadataExt`. The macOS-only claim rests
+on that import and on `libc::fclonefileat`, both Apple-gated, not on a build.
+
 Two environment notes: `cargo` lives in `~/.cargo/bin` and is not on a
 non-interactive shell's PATH, and **clippy is now installed** —
 `cargo clippy --workspace --all-targets` is clean for `crates/cli`, and leaves

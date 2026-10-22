@@ -13,12 +13,16 @@ Homebrew formula yet** — install from source, which is two commands. See
 
 ## Install
 
-**macOS only.** Not a packaging decision — the execution layer is
-`clonefile(2)`, `renamex_np` and `SF_DATALESS`, so the code does not compile
-elsewhere and there is no fallback path. Built and tested on Apple Silicon.
+**macOS only.** Not a packaging decision — the execution layer calls
+`clonefile(2)`, `renamex_np` and `std::os::macos::fs`, with no `cfg` gating
+and no fallback path, so there is nothing to build elsewhere. Developed and
+tested on Apple Silicon.
 
-You need [Rust](https://rustup.rs) 1.85 or newer. Older toolchains are refused
-by `cargo` with a clear message rather than a confusing build error.
+**[Rust](https://rustup.rs) 1.85 or newer.** Check with `rustc --version`
+first, because an older toolchain does not fail usefully — it stops on a
+dependency needing `edition2024` rather than on this project's own
+`rust-version`, which reads like a broken dependency instead of an old
+compiler. (Measured on 1.84.1.)
 
 ```sh
 git clone https://github.com/bsns-casual/comic-renamer
