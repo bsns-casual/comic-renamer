@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use comic_renamer_core::corpus::{ensure_corpus, parse_manifest, Corpus};
 use comic_renamer_core::overrides::Overrides;
 use comic_renamer_core::resolve::{publisher_hint, resolve};
-use comic_renamer_core::types::{PublisherHint, Status};
+use comic_renamer_core::types::{PublisherHint, ReviewReason, Status};
 use xtask::{gates_pass, grade_ok, Rates};
 
 const MANIFEST: &str = include_str!("../../corpus/manifest.json");
@@ -70,6 +70,10 @@ fn measure() -> Result<Rates, String> {
     let mut hints: HashMap<&str, PublisherHint> = HashMap::new();
     let mut rows = 0usize;
     let mut ready = 0usize;
+    // A bare ready rate cannot be acted on: it does not say whether the
+    // missing rows failed to match or matched ambiguously, and those point at
+    // different fixes.
+    let mut why: HashMap<&'static str, usize> = HashMap::new();
     let mut wrong: Vec<(&str, String, &str)> = Vec::new();
     for line in GROUND_TRUTH.lines().skip(1) {
         let mut fields = line.split('\t');
@@ -83,6 +87,7 @@ fn measure() -> Result<Rates, String> {
             .entry(bundle)
             .or_insert_with(|| publisher_hint(bundle, &corpus));
         let resolved = resolve(stem, bundle, hint, &corpus, &overrides, LANG);
+        *why.entry(label(&resolved.status)).or_default() += 1;
         if matches!(resolved.status, Status::Ready(_)) {
             ready += 1;
             let answer = match &resolved.subtitle {
@@ -101,11 +106,29 @@ fn measure() -> Result<Rates, String> {
         println!("silent FP  {stem}\n    said {answer:?}\n    want {title:?}");
     }
 
+    let mut breakdown: Vec<(&str, usize)> = why.into_iter().collect();
+    breakdown.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    println!("\ngraded rows by status, {rows} total");
+    for (name, n) in breakdown {
+        println!("  {n:5}  {:5.1}%  {name}", percent(n, rows));
+    }
+
     Ok(Rates {
         located: percent(located, heldout),
         ready: percent(ready, rows),
         silent_false_positive: percent(wrong.len(), rows),
     })
+}
+
+fn label(status: &Status) -> &'static str {
+    match status {
+        Status::Ready(_) => "ready",
+        Status::Failed => "failed - no series matched",
+        Status::Review(ReviewReason::Ambiguous(_)) => "review - ambiguous",
+        Status::Review(ReviewReason::UnsplitSubtitle(_)) => "review - unsplit subtitle",
+        Status::Review(ReviewReason::NoLanguageMatch) => "review - no language match",
+        Status::Review(ReviewReason::VolumeInfeasible) => "review - volume infeasible",
+    }
 }
 
 fn percent(hit: usize, total: usize) -> f64 {
