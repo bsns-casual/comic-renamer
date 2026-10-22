@@ -113,6 +113,8 @@ unreachable.
   `diskutil eraseVolume "HFS+" CRTEST <dev>`. **Under ~1.1 GiB every run is
   refused by the free-space reserve**, which is how the reserve is specified.
 
+### Packaging, all of it measured
+
 **Nothing the binary needs is read from the working directory.** Both the
 corpus manifest and `data/overrides.toml` are `include_str!`-embedded. The
 overrides were not, and `Overrides::load(Path::new("data/overrides.toml"))`
@@ -152,6 +154,10 @@ non-interactive shell's PATH, and **clippy is now installed** —
 five warnings in `crates/core` plus three unused-variable warnings in `xtask`'s
 Task 14 stubs. `rust-version` was bumped 1.80 → 1.85: `ErrorKind::CrossesDevices`
 has needed 1.85 since Task 12, so the old claim could never have built.
+
+Install is `cargo install --path crates/cli --locked` — note `crates/cli`,
+not `.`, since the workspace root is not a package. Verified from three
+directories after installing, and `cargo uninstall comic-renamer` round-trips.
 
 The Phase 1 plan is written and survived three adversarial reviews:
 `docs/plans/2026-10-20-phase-1-implementation.md`, 15 tasks.
@@ -200,8 +206,9 @@ plan" from "it does not".
 were found. 14 mutations, 13 caught. The survivor — `Facts::gather` reporting
 zero cloud placeholders — is unprovable locally: `SF_DATALESS` is
 kernel-managed, `chflags` cannot set it, so no generated fixture is dataless.
-It carries a `shortcut:` comment saying so. Re-run with the script in the
-session scratchpad, or write your own; it is fifteen string substitutions.
+It carries a `shortcut:` comment saying so. Re-run with
+`python3 scripts/mutate-cli.py`, which is committed — it substitutes one
+string at a time, runs `cargo test -p comic-renamer`, and reverts.
 
 One conformance bug the departures list nearly hid: the disclosure advertised
 `--copy` while `scan` only took `--mode copy`, so §6.10's own example block
@@ -256,10 +263,12 @@ session that writes it is the third instance waiting to happen.
 - Three §6.11 items stay unenforced on purpose — total path budget,
   rule-count cap, file-size cap. All three govern *contributed* rule data,
   which is Phase 3; `data/overrides.toml` is first-party and CI validates it.
-- `ApplyResult.failed` and `Collision.existing` are unread today. Both are
-  Task 1 skeleton fields, and `Collision.existing` is what Task 13's
-  disclosure table needs to say what is already at a destination. Deferred,
-  not dead.
+- `ApplyResult.failed` and `Collision.existing` **are both read now** (T13).
+  This bullet used to say they were unread and deferred; the disclosure needed
+  `Collision.existing` to name what is already at a destination, and the
+  post-run line prints `failed`. One caveat survives: `apply` abandons the run
+  on the first row that fails, so `ApplyResult.failed` is still structurally
+  always 0 — it is read but it cannot yet be non-zero.
 
 Phase 0b — the 13-app research spike — runs *parallel* to Phase 1 and gates
 Phase 2 only. Nothing in Phase 1 waits on it.
