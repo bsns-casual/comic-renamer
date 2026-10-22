@@ -116,9 +116,8 @@ fn eat_one(s: &str) -> Option<(Token, usize)> {
 /// so a Japanese filename took the process down rather than becoming `review`.
 fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
     let end = prefix.len();
-    if !s.is_char_boundary(end) {
-        return None;
-    }
+    // `str::get` with a range is what does the work: it returns None off a
+    // char boundary, so no explicit boundary check is needed.
     let head = s.get(..end)?;
     head.eq_ignore_ascii_case(prefix).then(|| &s[end..])
 }

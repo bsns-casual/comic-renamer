@@ -18,7 +18,7 @@ const SF_DATALESS: u32 = 0x4000_0000;
 /// `renamex_np` flag: fail with `EEXIST` rather than replacing the target.
 const RENAME_EXCL: libc::c_uint = 0x0000_0004;
 
-fn cstring(path: &Path) -> io::Result<CString> {
+pub(crate) fn cstring(path: &Path) -> io::Result<CString> {
     CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))
 }
@@ -545,27 +545,6 @@ pub fn select_mechanism(src: &Path, dest_root: &Path, mode: Mode) -> io::Result<
         (Mode::Copy, true) => Mechanism::Clone,
         (Mode::Copy, false) => Mechanism::Stream,
     })
-}
-
-/// Groups destination paths that are one path on a case-folding, normalising
-/// filesystem (D2). NFC, case-fold and `'` versus `U+2019`.
-pub fn collisions(destinations: &[&str]) -> Vec<Collision> {
-    let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (index, destination) in destinations.iter().enumerate() {
-        groups
-            .entry(collision_key(destination))
-            .or_default()
-            .push(index.to_string());
-    }
-    groups
-        .into_iter()
-        .filter(|(_, rows)| rows.len() > 1)
-        .map(|(key, row_ids)| Collision {
-            key,
-            row_ids,
-            existing: None,
-        })
-        .collect()
 }
 
 /// **Recomputes** every destination through the preset — comparing

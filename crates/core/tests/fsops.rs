@@ -11,8 +11,7 @@
 mod common;
 
 use comic_renamer_core::fsops::{
-    clone_excl, collisions, find_collisions, is_dataless, rename_excl, select_mechanism,
-    stream_verified,
+    clone_excl, find_collisions, is_dataless, rename_excl, select_mechanism, stream_verified,
 };
 use comic_renamer_core::preset::komga::Komga;
 use comic_renamer_core::types::{Basis, Mechanism, Mode, PlanRow, SourceStat, Status};
@@ -298,20 +297,6 @@ fn a_same_volume_move_is_a_rename_even_for_a_series_folder_that_does_not_exist()
     );
 }
 
-#[test]
-fn detects_case_nfc_and_quote_collisions() {
-    // D2, §6.10
-    assert_eq!(collisions(&["Hellboy/x.pdf", "hellboy/x.pdf"]).len(), 1);
-    assert_eq!(
-        collisions(&["Pok\u{e9}mon/a.pdf", "Poke\u{301}mon/a.pdf"]).len(),
-        1
-    );
-    assert_eq!(
-        collisions(&["Bourdain's/a.pdf", "Bourdain\u{2019}s/a.pdf"]).len(),
-        1
-    );
-    assert!(collisions(&["Hellboy/x.pdf", "Hellboy/y.pdf"]).is_empty());
-}
 
 #[test]
 fn two_spellings_of_one_volume_are_one_filename_and_two_rows() {

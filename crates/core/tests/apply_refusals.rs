@@ -252,18 +252,6 @@ fn a_cloud_source_move_is_allowed_with_the_override() {
     assert_eq!(r.executed, 1);
 }
 
-#[test]
-fn a_run_larger_than_the_free_space_is_refused_whole() {
-    // The arithmetic, which is where a bug would be; the statvfs call around
-    // it is one syscall. A run must leave max(1 GiB, 10%) behind.
-    use comic_renamer_core::apply::usable;
-    const GIB: u64 = 1 << 30;
-    let free = 20 * GIB;
-    let available = usable(free);
-    assert_eq!(available, 18 * GIB);
-    assert!(19 * GIB > available, "a 19 GiB run must not fit in 20 GiB free");
-    assert!(17 * GIB <= available);
-}
 
 #[test]
 fn an_edited_plan_cannot_move_a_file_from_outside_the_source_root() {

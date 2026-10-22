@@ -6,6 +6,7 @@
 //! the undo manifest are Task 12.
 
 use crate::fsops::{
+    cstring,
     clone_excl, ensure_parent, find_collisions, rename_excl, select_mechanism, stream_verified,
 };
 use crate::undo::UndoWriter;
@@ -13,8 +14,6 @@ use crate::preset::{preset_by_id, Preset};
 use crate::types::{
     ApplyError, ApplyResult, Mechanism, Mode, PlanHeader, PlanRow, Progress, Status, UndoReport,
 };
-use std::ffi::CString;
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -582,15 +581,6 @@ fn available_bytes(path: &Path) -> std::io::Result<u64> {
     }
     let stat = unsafe { stat.assume_init() };
     Ok(stat.f_bavail as u64 * stat.f_frsize as u64)
-}
-
-fn cstring(path: &Path) -> std::io::Result<CString> {
-    CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "path contains a NUL byte",
-        )
-    })
 }
 
 fn is_cloud_synced(path: &Path) -> bool {

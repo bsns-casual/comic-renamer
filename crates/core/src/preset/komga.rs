@@ -2,18 +2,12 @@
 
 use super::Preset;
 use crate::normalize::nfc;
+use crate::overrides::DEVICE_NAMES;
 use crate::types::Resolved;
 use std::path::PathBuf;
 
 /// A path component's byte budget on every filesystem this targets.
 const MAX_COMPONENT_BYTES: usize = 255;
-
-/// §6.11's device names, which are reserved on Windows with or without an
-/// extension.
-const DEVICE_NAMES: [&str; 22] = [
-    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
-    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
-];
 
 /// Characters that cannot appear in a path, mapped to plain ASCII.
 ///
@@ -128,7 +122,7 @@ pub fn sanitize(component: &str) -> String {
 /// prefixes promo items with a "Free Issue" marker containing a zero-width
 /// character, and `Hellboy` beside `Hell<U+200B>boy` is two folders no one
 /// can tell apart in Finder or in a diff.
-fn is_invisible(c: char) -> bool {
+pub(crate) fn is_invisible(c: char) -> bool {
     matches!(c,
         '\u{ad}'
         | '\u{200b}'..='\u{200f}'

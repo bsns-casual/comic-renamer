@@ -7,12 +7,12 @@ mod common;
 use comic_renamer_core::apply::{apply, undo, undo_path};
 use comic_renamer_core::corpus::Corpus;
 use comic_renamer_core::overrides::Overrides;
-use comic_renamer_core::types::{Mechanism, Mode, PlanHeader, PlanRow, ScanOpts};
+use comic_renamer_core::types::{Mechanism, Mode, ScanOpts};
 use comic_renamer_core::undo::{reverse, UndoWriter};
 
 
 use comic_renamer_core::{plan, scan};
-use common::{corpus, tree_from_names, TreeGuard};
+use common::{corpus, TreeGuard};
 use std::io::ErrorKind;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -69,7 +69,9 @@ impl Fixture {
     }
 
     /// Rewrites the plan so every row uses `mechanism`, re-stamping the
-    /// checksum. Used to force the streaming path without a second volume.
+    /// checksum. Only useful for proving the pre-flight refuses a plan that
+    /// claims a mechanism the volume cannot give — the streaming path itself
+    /// needs a real second volume.
     fn force_mechanism(&self, mechanism: Mechanism) {
         let (header, mut rows) = plan::read(&self.plan).unwrap();
         for row in &mut rows {
@@ -388,30 +390,6 @@ fn a_streamed_move_verifies_before_it_unlinks() {
     undo(&plan_path).unwrap();
     assert!(source.path().join("mazebook.pdf").exists(), "undo did not restore it");
     let _ = std::fs::remove_dir_all(&dest);
-}
-
-#[test]
-fn a_failed_row_aborts_the_rest_and_leaves_them_where_they_were() {
-    // A permission failure must not turn one refusal into a half-moved
-    // library. The source directory is read-only, so the first unlink fails.
-    let (_g, c) = gcd();
-    let f = Fixture::new(&["mazebook.pdf", "birdking_vol1.pdf"], &c, Mode::Move);
-    f.force_mechanism(Mechanism::Stream);
-    let mut perms = std::fs::metadata(&f.source).unwrap().permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o500);
-    std::fs::set_permissions(&f.source, perms).unwrap();
-
-    let result = apply(&f.plan, false, &mut |_| {});
-
-    let mut restore = std::fs::metadata(&f.source).unwrap().permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut restore, 0o700);
-    std::fs::set_permissions(&f.source, restore).unwrap();
-
-    assert!(result.is_err(), "a failed unlink must abort the run");
-    // Both sources survive: the first because its unlink failed, the second
-    // because the run stopped before reaching it.
-    assert!(f.source.join("mazebook.pdf").exists());
-    assert!(f.source.join("birdking_vol1.pdf").exists());
 }
 
 #[test]

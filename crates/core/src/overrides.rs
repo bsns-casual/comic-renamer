@@ -15,7 +15,7 @@ use std::path::Path;
 const MAX_FIELD_BYTES: usize = 120;
 
 /// §6.11. Matched case-insensitively, with or without an extension.
-const DEVICE_NAMES: [&str; 22] = [
+pub(crate) const DEVICE_NAMES: [&str; 22] = [
     "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
     "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
 ];
@@ -136,14 +136,7 @@ fn validate(field: &str, value: &str) -> Result<(), OverrideError> {
 }
 
 fn is_invisible_or_control(c: char) -> bool {
-    matches!(c,
-        '\u{0}'..='\u{1f}'          // C0, which covers tab, CR and LF
-        | '\u{7f}'..='\u{9f}'       // DEL and C1
-        | '\u{ad}'                  // soft hyphen
-        | '\u{200b}'..='\u{200f}'   // zero-width and directional marks
-        | '\u{202a}'..='\u{202e}'   // bidi embedding and override
-        | '\u{2066}'..='\u{2069}'   // bidi isolates
-        | '\u{feff}')               // BOM / zero-width no-break space
+    c.is_control() || crate::preset::komga::is_invisible(c)
 }
 
 /// §6.11: a Cyrillic `е` among Latin letters creates a duplicate series that
