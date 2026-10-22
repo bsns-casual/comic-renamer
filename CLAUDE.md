@@ -123,6 +123,14 @@ anti-goal §4 by construction. Same binary, same input, repo root versus
 user-supplied overrides file stays Phase 3, when §6.11's caps on contributed
 rule data exist to make one safe.
 
+**The build needs a C toolchain, and the README did not say so.**
+`rusqlite`'s `bundled` feature compiles SQLite from the amalgamation and
+`ring` compiles C too, so both have build scripts that need `cc` — rustup
+alone is not enough, and `xcode-select --install` is now a documented
+prerequisite. It went unnoticed because the development machine has full
+Xcode. Direct evidence: the Linux cross-check failed in exactly those two
+build scripts.
+
 One packaging claim measured rather than assumed, because the README now
 makes it: **an older toolchain does not fail on `rust-version`.** On 1.84.1,
 `cargo check` stops at `block-buffer-0.12.1` needing the `edition2024` Cargo

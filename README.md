@@ -18,11 +18,25 @@ Homebrew formula yet** — install from source, which is three commands. See
 and no fallback path, so there is nothing to build elsewhere. Developed and
 tested on Apple Silicon.
 
-**[Rust](https://rustup.rs) 1.85 or newer.** Check with `rustc --version`
-first, because an older toolchain does not fail usefully — it stops on a
-dependency needing `edition2024` rather than on this project's own
-`rust-version`, which reads like a broken dependency instead of an old
-compiler. (Measured on 1.84.1.)
+Two prerequisites:
+
+```sh
+# Rust 1.85 or newer
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# A C compiler. The corpus is a SQLite database and the driver builds SQLite
+# from source, so rustup on its own is not enough.
+xcode-select --install
+```
+
+`command not found: cargo` means the first is missing, or your shell has not
+picked it up yet — open a new terminal, or `source ~/.cargo/env`. An error out
+of `cc` or `libsqlite3-sys` means the second. And run `rustc --version` before
+anything else: on an older toolchain the build stops on a dependency needing
+`edition2024` rather than on this project's own `rust-version`, so it reads
+like a broken dependency instead of an old compiler. (Measured on 1.84.1.)
+
+Then:
 
 ```sh
 git clone https://github.com/bsns-casual/comic-renamer
