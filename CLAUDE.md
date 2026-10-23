@@ -198,7 +198,7 @@ agreed. The other 14.7% are known-bad decompositions, such as
 subtitle "Before the Fall Vol. 9" and no volume. Review them in a `map` session
 before any of this is committed.
 
-**Tests:** `cargo test --workspace` runs 406 and ignores 7 (counted 2026-10-23,
+**Tests:** `cargo test --workspace` runs 407 and ignores 7 (counted 2026-10-23,
 after the rebuild's final review and its fix wave; 380 before them),
 with no compiler warnings. The seven `#[ignore]`d tests need real hardware or the
 real corpus release, and **CI runs all seven**. That claim was false until the
