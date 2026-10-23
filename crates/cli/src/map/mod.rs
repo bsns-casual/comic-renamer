@@ -892,18 +892,48 @@ mod tests {
         assert!(!tsv.contains('/') && !tsv.contains("Comics") && !tsv.contains("Users"), "{tsv}");
     }
 
+    /// Every `.rs` file under `dir`, recursively.
+    fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
     #[test]
-    fn the_map_module_has_no_way_to_run_a_process() {
-        // "Nothing executes" is structural; this pins it. Test modules are cut off first.
-        let needle = ["Command", "::new"].concat();
-        let pm = ["process", "::Command"].concat();
-        for (name, src) in [
-            ("mod.rs", include_str!("mod.rs")),
-            ("table.rs", include_str!("table.rs")),
-            ("detail.rs", include_str!("detail.rs")),
-        ] {
-            let code = src.split("#[cfg(test)]").next().unwrap();
-            assert!(!code.contains(&needle) && !code.contains(&pm), "{name} can start a process");
+    fn the_cli_crate_has_no_way_to_start_a_process() {
+        // "This tool spawns nothing" is structural, so pin it over the whole
+        // crate, test code included, with no cut-off a `cfg(test)` could move.
+        // Needles are assembled so this test does not trip on itself. The
+        // clap subcommand enum is named `Command`, so the bare token is not
+        // usable; the constructor, the spawn APIs and any item of the process
+        // module other than `ExitCode` are.
+        let join = |p: &[&str]| p.concat();
+        let banned = [
+            join(&["Command", "::new"]),
+            join(&["Std", "io"]),
+            join(&["process", "::{"]),
+            join(&["posix", "_spawn"]),
+            join(&["libc", "::system"]),
+            join(&["libc", "::fork"]),
+            join(&["libc", "::exec"]),
+        ];
+        let mut files = Vec::new();
+        rust_sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+        assert!(files.len() >= 4, "the walk found {files:?}");
+        let proc_path = join(&["process", "::"]);
+        for f in files {
+            let src = std::fs::read_to_string(&f).unwrap();
+            for b in &banned {
+                assert!(!src.contains(b.as_str()), "{} contains {b}", f.display());
+            }
+            for (i, _) in src.match_indices(proc_path.as_str()) {
+                assert!(src[i + proc_path.len()..].starts_with("ExitCode"), "{} uses a process item other than ExitCode", f.display());
+            }
         }
     }
 
