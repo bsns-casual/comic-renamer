@@ -122,7 +122,19 @@ pub fn commit_session(entries: &[table::Entry], local: &Path, bundle: &str, lang
         let row = row_for(&e.stem, fields, count, bundle, lang)
             .ok_or_else(|| format!("{:?} has no letters or digits to key a mapping on", e.stem))?;
         row.validate().map_err(|err| format!("{:?}: {err}", e.stem))?;
-        fresh.push(row);
+        // `hellboy-1.pdf` and `hellboy1.pdf` share a key. Differing rows would
+        // have one silently win and the other file stay unmapped, unexplained.
+        match fresh.iter().find(|(_, r): &&(&str, MappingRow)| r.key == row.key && r.bundle == row.bundle) {
+            Some((_, r)) if *r == row => continue,
+            Some((other, _)) => {
+                return Err(format!(
+                    "{other:?} and {:?} both map to the key {:?} but you gave them different titles. Rename one of the files so their names differ in more than punctuation, case or spacing, then run `map` again. Nothing was saved.",
+                    e.stem, row.key
+                ))
+            }
+            None => {}
+        }
+        fresh.push((e.stem.as_str(), row));
     }
     if fresh.is_empty() {
         return Ok(0);
@@ -133,7 +145,7 @@ pub fn commit_session(entries: &[table::Entry], local: &Path, bundle: &str, lang
         Err(e) => return Err(format!("{}: {e}", local.display())),
     };
     let n = fresh.len();
-    for row in fresh {
+    for (_, row) in fresh {
         match rows.iter_mut().find(|r| r.key == row.key && r.bundle == row.bundle) {
             Some(slot) => *slot = row,
             None => rows.push(row),
@@ -513,6 +525,25 @@ mod tests {
         std::fs::write(&local, "not a mapping file").unwrap();
         assert!(commit_session(&[approved("a", "A", Some(1), None)], &local, "B", "en").is_err());
         assert_eq!(std::fs::read_to_string(&local).unwrap(), "not a mapping file");
+    }
+
+    #[test]
+    fn two_files_that_want_one_key_refuse_the_write_and_name_both() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let local = dir.path().join("mappings.tsv");
+        // Both normalise to the key `hellboy1` but were typed differently.
+        let entries = vec![approved("hellboy-1", "Hellboy", Some(1), None), approved("hellboy1", "Hellboy Omnibus", Some(1), None)];
+        let err = commit_session(&entries, &local, "B", "en").unwrap_err();
+        assert!(err.contains("hellboy-1") && err.contains("hellboy1") && err.contains("Rename one"), "{err}");
+        assert!(!local.exists(), "nothing is written");
+    }
+
+    #[test]
+    fn two_files_with_one_key_and_identical_rows_lose_nothing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let local = dir.path().join("mappings.tsv");
+        let entries = vec![approved("hellboy-1", "Hellboy", Some(1), None), approved("hellboy1", "Hellboy", Some(1), None)];
+        assert_eq!(commit_session(&entries, &local, "B", "en").unwrap(), 1);
     }
 
     #[test]
