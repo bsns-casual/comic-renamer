@@ -397,3 +397,24 @@ fn a_squashed_subtitle_is_identifiable_on_the_suggestion() {
     assert_eq!(squashed.subtitle.as_deref(), Some("seedofdestruction"));
     assert_eq!(clean.subtitle, None);
 }
+
+#[test]
+fn an_override_fires_for_every_marketplace_deliberately() {
+    // Deliberate: do not gate this on Humble. An override is a recorded fact,
+    // not a guess; `--marketplace` picks a guess *strategy*, and a verified
+    // answer does not depend on one. The bundle check already scopes an entry
+    // to its folder, and Layer B is the precursor of the mapping table, which
+    // is marketplace-independent. Gating it recreates "a verified correction
+    // made unreachable by a condition it does not need".
+    let (_o, ov) = twd_overrides();
+    let ctx = Context {
+        source_folder: "HumbleImageComicsInThe10s",
+        overrides: Some(&ov),
+        ..Context::default()
+    };
+    for marketplace in ["Fanatical", "Global Comix", "Sweet Shop"] {
+        let found = suggest_with("TWD_CompendiumOne", marketplace, None, &ctx);
+        assert_eq!(found.len(), 1, "{marketplace}: {found:?}");
+        assert_eq!(found[0].source, SuggestionSource::Override, "{marketplace}");
+    }
+}
