@@ -400,7 +400,11 @@ pub fn stream_verified(src: &Path, dest_root: &Path, relative: &Path) -> io::Res
 
     let (temp, mut file) = Temp::create(&destination)?;
 
-    let mut input = std::fs::File::open(src)?;
+    // `open_nofollow`, not `File::open`, which follows a final symlink: the
+    // stat above and the open have to agree about which file this is, which is
+    // what that helper's doc comment claims and what `clone_excl` already did.
+    // Losing the race here reads the wrong bytes into the library.
+    let mut input = std::fs::File::from(open_nofollow(src)?);
     io::copy(&mut input, &mut file)?;
     file.sync_all()?;
 

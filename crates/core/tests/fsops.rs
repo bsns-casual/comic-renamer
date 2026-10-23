@@ -199,6 +199,11 @@ fn no_mechanism_follows_a_symlinked_source() {
     // The refusal lives in each primitive, not only in select_mechanism:
     // nothing in the types enforces a call order, and the clone-to-stream
     // fallback is a second door straight into the primitives.
+    //
+    // All three now open the source with O_NOFOLLOW as well, so the check and
+    // the open cannot disagree about which file they mean. That window is not
+    // reachable from a test — it needs the link to be swapped in between the
+    // two calls — so this covers the refusal and not the race.
     let d = tempdir().unwrap();
     let real = d.path().join("real.pdf");
     std::fs::write(&real, "SOURCE").unwrap();
