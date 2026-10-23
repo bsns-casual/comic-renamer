@@ -74,8 +74,7 @@ impl Entry {
     /// reason to inherit a width. Without it D37's padding silently floors at two.
     pub(super) fn approved_row(&self) -> Option<(&ParsedTitle, Option<u32>)> {
         let fields = self.final_fields.as_ref().filter(|_| self.approved)?;
-        let count = self.candidates.iter().find(|c| c.series == fields.series).and_then(|c| c.volume_count);
-        Some((fields, count))
+        Some((fields, run_length(&self.candidates, &fields.series)))
     }
 
     /// The guess as final fields, when it is safe to take without a human edit.
@@ -94,6 +93,18 @@ impl Entry {
         self.approved = true;
         true
     }
+}
+
+/// The series' run length, from the first candidate naming the same series.
+/// Compared by mapping key, not `==`: correcting only case or punctuation is
+/// the commonest edit, and it must not drop the count. The one rule for both
+/// the editor's preview and the written row, so the preview cannot lie.
+pub(super) fn run_length(candidates: &[Suggestion], series: &str) -> Option<u32> {
+    let wanted = comic_renamer_core::mapping::key(series)?;
+    candidates
+        .iter()
+        .find(|c| comic_renamer_core::mapping::key(&c.series).as_deref() == Some(wanted.as_str()))
+        .and_then(|c| c.volume_count)
 }
 
 pub struct Table {

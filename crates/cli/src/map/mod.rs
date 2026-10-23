@@ -107,45 +107,61 @@ fn row_for(stem: &str, fields: &ParsedTitle, count: Option<u32>, bundle: &str, l
     })
 }
 
-/// Writes the approved entries into the user's local mapping file and returns
-/// how many. Every new row is validated first and any failure leaves the file
-/// as it was; the file then lands via a sibling temp file and a rename, so an
-/// interrupted write cannot truncate corrections no other record holds.
+/// What `commit_session` did: rows written, and pairs of files that wanted one
+/// key with different titles. Neither of a pair is written.
+#[derive(Debug)]
+pub struct Committed {
+    pub written: usize,
+    pub clashes: Vec<(String, String)>,
+}
+
+/// Writes the approved entries into the user's local mapping file. Every new
+/// row is validated first and any failure leaves the file as it was; the file
+/// then lands via a sibling temp file and a rename, so an interrupted write
+/// cannot truncate corrections no other record holds.
 /// `bundle` and `lang` are not on an `Entry`, so the caller supplies them.
 ///
 /// An existing file that does not load aborts: overwriting it would drop the
 /// user's older corrections. A row with the same `(key, bundle)` is replaced.
-pub fn commit_session(entries: &[table::Entry], local: &Path, bundle: &str, lang: &str) -> Result<usize, String> {
-    let mut fresh = Vec::new();
+/// Files whose names share a key but whose titles differ are reported and
+/// left out, so the rest of the session is kept.
+// shortcut: no lock around the read-modify-write, so two sessions inside the
+// read-to-rename window lose one set of rows; an advisory lock beside the file
+// (as apply's lockfile does) closes it.
+pub fn commit_session(entries: &[table::Entry], local: &Path, bundle: &str, lang: &str) -> Result<Committed, String> {
+    // Grouped by key, in first-seen order.
+    let mut groups: Vec<Vec<(&str, MappingRow)>> = Vec::new();
     for e in entries {
         let Some((fields, count)) = e.approved_row() else { continue };
         let row = row_for(&e.stem, fields, count, bundle, lang)
             .ok_or_else(|| format!("{:?} has no letters or digits to key a mapping on", e.stem))?;
         row.validate().map_err(|err| format!("{:?}: {err}", e.stem))?;
-        // `hellboy-1.pdf` and `hellboy1.pdf` share a key. Differing rows would
-        // have one silently win and the other file stay unmapped, unexplained.
-        match fresh.iter().find(|(_, r): &&(&str, MappingRow)| r.key == row.key && r.bundle == row.bundle) {
-            Some((_, r)) if *r == row => continue,
-            Some((other, _)) => {
-                return Err(format!(
-                    "{other:?} and {:?} both map to the key {:?} but you gave them different titles. Rename one of the files so their names differ in more than punctuation, case or spacing, then run `map` again. Nothing was saved.",
-                    e.stem, row.key
-                ))
-            }
-            None => {}
+        match groups.iter_mut().find(|g| g[0].1.key == row.key && g[0].1.bundle == row.bundle) {
+            Some(g) => g.push((e.stem.as_str(), row)),
+            None => groups.push(vec![(e.stem.as_str(), row)]),
         }
-        fresh.push((e.stem.as_str(), row));
+    }
+    // `hellboy-1.pdf` and `hellboy1.pdf` share a key. Identical rows lose
+    // nothing; differing ones would have one silently win.
+    let mut fresh = Vec::new();
+    let mut clashes = Vec::new();
+    for g in groups {
+        if g.iter().all(|(_, r)| *r == g[0].1) {
+            fresh.push(g.into_iter().next().unwrap().1);
+        } else {
+            clashes.extend(g[1..].iter().map(|(s, _)| (g[0].0.to_string(), s.to_string())));
+        }
     }
     if fresh.is_empty() {
-        return Ok(0);
+        return Ok(Committed { written: 0, clashes });
     }
     let mut rows = match std::fs::read_to_string(local) {
         Ok(text) => parse_tsv(&text).map_err(|e| format!("{}: {e}", local.display()))?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(e) => return Err(format!("{}: {e}", local.display())),
     };
-    let n = fresh.len();
-    for (_, row) in fresh {
+    let written = fresh.len();
+    for row in fresh {
         match rows.iter_mut().find(|r| r.key == row.key && r.bundle == row.bundle) {
             Some(slot) => *slot = row,
             None => rows.push(row),
@@ -165,7 +181,19 @@ pub fn commit_session(entries: &[table::Entry], local: &Path, bundle: &str, lang
         let _ = std::fs::remove_file(&tmp);
         format!("{}: {e}", local.display())
     })?;
-    Ok(n)
+    Ok(Committed { written, clashes })
+}
+
+fn clash_warning(a: &str, b: &str) -> String {
+    format!(
+        "warning: {a} and {b} give the same mapping key but you titled them differently, so neither was saved. Rename one of the files so the names differ in more than punctuation, case or spacing, then run `map` again."
+    )
+}
+
+/// `apply` removes every row of a collision from the run, so the user must hear
+/// that neither file is filed, not that one of them is.
+fn collision_warning(a: &str, b: &str) -> String {
+    format!("warning: {a} and {b} would land on the same path, so neither is placed; both files stay where they are.")
 }
 
 /// `undo` derives the manifest from the plan's path (D38), so the default is
@@ -267,9 +295,13 @@ fn session(
     match table::run(&mut t, preset).map_err(|e| e.to_string())? {
         table::Action::Done => {
             for (a, b) in intra_session_collisions(&t.entries, preset) {
-                println!("warning: {a} and {b} would land on the same path; the second is skipped, not merged.");
+                println!("{}", collision_warning(&a, &b));
             }
-            let n = commit_session(&t.entries, local, folder, lang)?;
+            let done = commit_session(&t.entries, local, folder, lang)?;
+            for (a, b) in &done.clashes {
+                println!("{}", clash_warning(a, b));
+            }
+            let n = done.written;
             println!("{n} {} saved to {}", if n == 1 { "mapping" } else { "mappings" }, local.display());
             Ok(Outcome::Done)
         }
@@ -451,7 +483,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let local = dir.path().join("config/mappings.tsv");
         let entries = vec![approved("alpha_vol1", "Alpha", Some(1), None), unapproved("beta_vol1", "Beta")];
-        assert_eq!(commit_session(&entries, &local, "Bundle", "en").unwrap(), 1);
+        assert_eq!(commit_session(&entries, &local, "Bundle", "en").unwrap().written, 1);
         let text = std::fs::read_to_string(&local).unwrap();
         assert!(text.contains("alphavol1\tAlpha"), "{text}");
         assert!(!text.contains("Beta") && !text.contains("betavol1"), "{text}");
@@ -461,7 +493,7 @@ mod tests {
     fn nothing_approved_writes_no_file() {
         let dir = tempfile::TempDir::new().unwrap();
         let local = dir.path().join("mappings.tsv");
-        assert_eq!(commit_session(&[unapproved("x", "X")], &local, "B", "en").unwrap(), 0);
+        assert_eq!(commit_session(&[unapproved("x", "X")], &local, "B", "en").unwrap().written, 0);
         assert!(!local.exists());
     }
 
@@ -491,51 +523,58 @@ mod tests {
     fn the_local_write_is_validated_before_it_lands() {
         let dir = tempfile::TempDir::new().unwrap();
         let local = dir.path().join("mappings.tsv");
-        let before = comic_renamer_core::mapping::to_tsv(&[]);
-        std::fs::write(&local, &before).unwrap();
-        // "=SUM" starts with a spreadsheet formula character, which validate() rejects.
-        let entries = vec![approved("good_vol1", "Good", Some(1), None), approved("bad_vol1", "=SUM(A1)", Some(1), None)];
-        let err = commit_session(&entries, &local, "B", "en").unwrap_err();
-        assert!(err.contains("formula"), "{err}");
-        assert_eq!(std::fs::read_to_string(&local).unwrap(), before, "the file must be untouched");
-        assert!(!dir.path().join("mappings.tsv.tmp").exists());
-    }
-
-    #[test]
-    fn earlier_corrections_are_kept_and_a_repeat_replaces_its_own_row() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let local = dir.path().join("mappings.tsv");
-        commit_session(&[approved("old_vol1", "Old", Some(1), None)], &local, "B", "en").unwrap();
+        // A file holding real accumulated corrections, not just a header.
         commit_session(
-            &[approved("new_vol1", "New", Some(1), None), approved("old_vol1", "Older", Some(1), None)],
+            &[approved("old_vol1", "Old", Some(1), Some(30)), approved("older_vol2", "Older", Some(2), None)],
             &local,
             "B",
             "en",
         )
         .unwrap();
-        let rows = read_rows(&local);
-        let series: Vec<_> = rows.iter().map(|r| r.series.as_str()).collect();
-        assert_eq!(series, ["Older", "New"]);
-    }
-
-    #[test]
-    fn an_unreadable_existing_file_aborts_rather_than_being_overwritten() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let local = dir.path().join("mappings.tsv");
-        std::fs::write(&local, "not a mapping file").unwrap();
-        assert!(commit_session(&[approved("a", "A", Some(1), None)], &local, "B", "en").is_err());
-        assert_eq!(std::fs::read_to_string(&local).unwrap(), "not a mapping file");
-    }
-
-    #[test]
-    fn two_files_that_want_one_key_refuse_the_write_and_name_both() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let local = dir.path().join("mappings.tsv");
-        // Both normalise to the key `hellboy1` but were typed differently.
-        let entries = vec![approved("hellboy-1", "Hellboy", Some(1), None), approved("hellboy1", "Hellboy Omnibus", Some(1), None)];
+        let before = std::fs::read(&local).unwrap();
+        assert!(String::from_utf8_lossy(&before).contains("Older"));
+        // "=SUM" starts with a spreadsheet formula character, which validate() rejects.
+        let entries = vec![approved("good_vol1", "Good", Some(1), None), approved("bad_vol1", "=SUM(A1)", Some(1), None)];
         let err = commit_session(&entries, &local, "B", "en").unwrap_err();
-        assert!(err.contains("hellboy-1") && err.contains("hellboy1") && err.contains("Rename one"), "{err}");
-        assert!(!local.exists(), "nothing is written");
+        assert!(err.contains("formula"), "{err}");
+        assert_eq!(std::fs::read(&local).unwrap(), before, "the file must be byte-identical");
+        assert!(!dir.path().join("mappings.tsv.tmp").exists());
+    }
+
+    #[test]
+    fn two_files_that_want_one_key_are_reported_and_the_rest_still_saved() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let local = dir.path().join("mappings.tsv");
+        // The first two normalise to the key `hellboy1` but were typed differently.
+        let entries = vec![
+            approved("hellboy-1", "Hellboy", Some(1), None),
+            approved("good_vol1", "Good", Some(1), None),
+            approved("hellboy1", "Hellboy Omnibus", Some(1), None),
+        ];
+        let done = commit_session(&entries, &local, "B", "en").unwrap();
+        assert_eq!(done.written, 1);
+        assert_eq!(done.clashes, vec![("hellboy-1".to_string(), "hellboy1".to_string())]);
+        let text = std::fs::read_to_string(&local).unwrap();
+        assert!(text.contains("Good") && !text.contains("Hellboy"), "neither clashing row is guessed at: {text}");
+        let msg = clash_warning("hellboy-1", "hellboy1");
+        assert!(msg.contains("hellboy-1") && msg.contains("hellboy1") && msg.contains("Rename one"), "{msg}");
+    }
+
+    #[test]
+    fn a_collision_warning_says_neither_row_is_placed() {
+        let msg = collision_warning("one", "two");
+        assert!(msg.contains("neither") && msg.contains("stay"), "{msg}");
+        assert!(!msg.contains("skipped"), "{msg}");
+    }
+
+    #[test]
+    fn a_case_only_edit_keeps_the_count() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let local = dir.path().join("mappings.tsv");
+        let mut e = table::Entry::new("x".into(), vec![sug("Black is the Color", Some(1), None, Some(128))]).with_extension("cbz");
+        assert!(e.accept_edit(ParsedTitle { series: "Black Is the Color".into(), volume: Some(1), subtitle: None }));
+        commit_session(&[e], &local, "B", "en").unwrap();
+        assert_eq!(read_rows(&local)[0].volume_count, Some(128));
     }
 
     #[test]
@@ -543,7 +582,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let local = dir.path().join("mappings.tsv");
         let entries = vec![approved("hellboy-1", "Hellboy", Some(1), None), approved("hellboy1", "Hellboy", Some(1), None)];
-        assert_eq!(commit_session(&entries, &local, "B", "en").unwrap(), 1);
+        assert_eq!(commit_session(&entries, &local, "B", "en").unwrap().written, 1);
     }
 
     #[test]

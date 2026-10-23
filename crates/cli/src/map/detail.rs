@@ -172,11 +172,9 @@ impl Detail {
         self.parsed != self.prefill || self.confirmed.as_ref() == Some(&self.parsed)
     }
 
-    /// The picked candidate's count pads the volume, but only for that series:
-    /// retyping to another one must not inherit a width it has no reason to have.
+    /// The count that pads the volume, by the rule the written row uses.
     fn volume_count(&self) -> Option<u32> {
-        let c = &self.candidates[self.picked?];
-        (c.series == self.parsed.series).then_some(c.volume_count).flatten()
+        super::table::run_length(&self.candidates, &self.parsed.series)
     }
 
     /// The path the current fields produce, from the real preset.
@@ -583,6 +581,32 @@ mod tests {
     fn a_clean_row_is_accepted_as_it_stands() {
         let mut d = Detail::for_entry(&Entry::new("c".into(), vec![sug("Fine", Some(1), None, None)]));
         assert!(matches!(d.on_key(key(KeyCode::Enter)), Step::Accept));
+    }
+
+    #[test]
+    fn the_preview_and_the_written_row_use_the_same_count() {
+        let mut e = Entry::new(
+            "b".into(),
+            vec![sug("Same", Some(1), None, Some(5)), sug("Same", Some(1), None, Some(120))],
+        );
+        let mut d = Detail::for_entry(&e);
+        d.pick(1);
+        let line = d.destination_line(&Komga);
+        assert!(e.accept_edit(d.parsed.clone()));
+        let written = Komga.destination(
+            &comic_renamer_core::mapping::MappingRow {
+                key: String::new(),
+                series: "Same".into(),
+                volume: Some(1),
+                subtitle: None,
+                lang: String::new(),
+                volume_count: e.approved_row().unwrap().1,
+                bundle: String::new(),
+            }
+            .resolved(),
+            &e.extension,
+        );
+        assert_eq!(line, written.display().to_string());
     }
 
     #[test]
