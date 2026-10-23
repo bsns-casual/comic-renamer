@@ -19,7 +19,12 @@ const HELDOUT: &str = include_str!("../../fixtures/heldout-filenames.txt");
 /// 2,223 verified filename-to-title rows (D26). Gives suggestion accuracy.
 const GROUND_TRUTH: &str = include_str!("../../fixtures/humble-ground-truth.tsv");
 
+/// 12 rows the maintainer confirmed title by title (2026-10-23).
+const MARKETPLACE: &str = include_str!("../../fixtures/marketplace-ground-truth.tsv");
+
 const LANG: &str = "en";
+
+mod seed;
 
 fn main() {
     match std::env::args().nth(1).as_deref() {
@@ -29,8 +34,14 @@ fn main() {
                 std::process::exit(2);
             }
         }
+        Some("seed") => {
+            if let Err(e) = seed::seed() {
+                eprintln!("error: {e}");
+                std::process::exit(2);
+            }
+        }
         _ => {
-            eprintln!("usage: cargo xtask measure");
+            eprintln!("usage: cargo xtask <measure|seed>");
             std::process::exit(2);
         }
     }

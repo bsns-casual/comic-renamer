@@ -30,7 +30,7 @@ use std::process::ExitCode;
 /// The mappings that ship in the binary. Compiled in for the same reason as
 /// the manifest below: nothing the binary needs is read from the working
 /// directory.
-const SHIPPED_MAPPINGS: &str = include_str!("../../../data/mappings/shipped.tsv");
+use comic_renamer_core::mapping::shipped_mappings;
 
 /// Pinned at build time (§6.5): the repository holds the manifest, the tool
 /// fetches and hash-verifies the corpus on first use, then caches it.
@@ -229,7 +229,7 @@ fn run_scan(
     let guess_lang = lang.clone();
     // shortcut: shipped mappings only; the user's local file arrives with the
     // `map` command, which also owns where it lives.
-    let mappings = Mappings::load(SHIPPED_MAPPINGS, None).map_err(|e| e.to_string())?;
+    let mappings = Mappings::load(&shipped_mappings(), None).map_err(|e| e.to_string())?;
     // Rejected up front: a malformed embedded file is a bad commit, not a
     // condition to degrade around.
     let overrides = parse_overrides(OVERRIDES)?;

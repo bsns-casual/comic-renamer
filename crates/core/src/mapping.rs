@@ -306,3 +306,22 @@ pub fn find_key_collisions(rows: &[MappingRow]) -> Vec<(String, String)> {
     }
     bad.into_iter().collect()
 }
+
+const SHIPPED_FILES: [&str; 3] = [
+    include_str!("../../../data/mappings/fanatical.tsv"),
+    include_str!("../../../data/mappings/global-comix.tsv"),
+    include_str!("../../../data/mappings/sweet-shop.tsv"),
+];
+
+/// Every shipped mapping file as one table with a single header. Embedded, so
+/// an installed binary needs nothing from the working directory. Rows stay
+/// sharded by marketplace on disk, so `find_key_collisions` must be checked over
+/// this joined table, not per file.
+pub fn shipped_mappings() -> String {
+    let mut out = format!("{HEADER}\n");
+    for file in SHIPPED_FILES {
+        let body = file.strip_prefix('\u{feff}').unwrap_or(file);
+        out.extend(body.split_inclusive('\n').skip(1));
+    }
+    out
+}

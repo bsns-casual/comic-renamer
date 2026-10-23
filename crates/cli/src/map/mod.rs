@@ -1,6 +1,7 @@
 //! `map`: open a mapping session for the files the database does not know.
 
-use crate::{guesses_for, parse_overrides, OVERRIDES, SHIPPED_MAPPINGS};
+use crate::{guesses_for, parse_overrides, OVERRIDES};
+use comic_renamer_core::mapping::shipped_mappings;
 use comic_renamer_core::mapping::{key, parse_tsv, to_tsv, MappingRow, Mappings};
 use comic_renamer_core::normalize::collision_key;
 use comic_renamer_core::title::ParsedTitle;
@@ -347,7 +348,7 @@ fn plan_path(out: Option<PathBuf>) -> PathBuf {
 fn scan_once(opts: &ScanOpts, config: &Path) -> Result<scan::ScanOutcome, String> {
     let local = config.join("mappings.tsv");
     let local = local.exists().then_some(local);
-    let mappings = Mappings::load(SHIPPED_MAPPINGS, local.as_deref()).map_err(|e| e.to_string())?;
+    let mappings = Mappings::load(&shipped_mappings(), local.as_deref()).map_err(|e| e.to_string())?;
     scan::scan(opts, &mappings, &mut |_| {}).map_err(|e| e.to_string())
 }
 
