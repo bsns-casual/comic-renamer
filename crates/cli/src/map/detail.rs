@@ -15,7 +15,7 @@ use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::{DefaultTerminal, Frame};
 
-pub struct Detail {
+pub struct Detail<'a> {
     pub text: String,
     pub parsed: ParsedTitle,
     candidates: Vec<Suggestion>,
@@ -39,6 +39,16 @@ pub struct Detail {
     /// fields: re-parsing it could move content between them (a series with a
     /// colon would split), so typing in the box is ignored until a pick resets.
     structured: bool,
+    /// A keystroke the user made that changed the title's content. `^R` is not
+    /// one: it re-reads the same text, and the parser splitting a series with a
+    /// colon differently on the way back is the parser disagreeing with itself,
+    /// not the user engaging with the flagged problem. A pick clears it, which
+    /// `confirmed` then covers.
+    edited: bool,
+    /// Held, not passed in, because `acceptable` needs it: a flagged row is
+    /// accepted on a change to the *destination*, and only the preset knows
+    /// which changes survive into one.
+    preset: &'a dyn Preset,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -48,15 +58,15 @@ enum Field {
     Subtitle,
 }
 
-impl Detail {
-    pub fn from_text(text: &str) -> Detail {
-        Detail { text: text.to_string(), parsed: parse_title(text), candidates: vec![], picked: None, ext: String::new(), field: None, flagged: false, prefill: parse_title(""), confirmed: None, structured: false }
+impl<'a> Detail<'a> {
+    pub fn from_text(text: &str, preset: &'a dyn Preset) -> Detail<'a> {
+        Detail { text: text.to_string(), parsed: parse_title(text), candidates: vec![], picked: None, ext: String::new(), field: None, flagged: false, prefill: parse_title(""), confirmed: None, structured: false, edited: false, preset }
     }
 
     /// Starts from what the user already typed, else the top candidate, else
     /// an empty box. Fields come straight from the structure, never through
     /// the parser: that is for text the user typed.
-    fn for_entry(entry: &Entry) -> Detail {
+    fn for_entry(entry: &Entry, preset: &'a dyn Preset) -> Detail<'a> {
         let parsed = match (&entry.final_fields, entry.guess()) {
             (Some(f), _) => f.clone(),
             (None, Some(g)) => as_parsed(g),
@@ -72,7 +82,10 @@ impl Detail {
             candidates,
             ext: entry.extension.clone(),
             flagged: entry.needs_review(),
-            ..Detail::from_text("")
+            // Fields the user typed on an earlier visit are their change,
+            // already made: the row re-accepts without a second one.
+            edited: entry.final_fields.is_some(),
+            ..Detail::from_text("", preset)
         }
     }
 
@@ -115,6 +128,7 @@ impl Detail {
         }
         self.text = show(&p.series, p.volume, p.subtitle.as_deref());
         self.structured = true;
+        self.edited = true;
     }
 
     pub fn on_input(&mut self, c: char) {
@@ -126,6 +140,7 @@ impl Detail {
         }
         self.text.push(c);
         self.reparse();
+        self.edited = true;
     }
 
     fn on_backspace(&mut self) {
@@ -137,6 +152,7 @@ impl Detail {
         }
         self.text.pop();
         self.reparse();
+        self.edited = true;
     }
 
     /// Moves the menu and loads that candidate into the text box, where it can
@@ -150,15 +166,23 @@ impl Detail {
         self.picked = Some(at);
         self.field = None;
         self.structured = false;
+        // The content is the candidate's now, not the user's.
+        self.edited = false;
         let c = &self.candidates[at];
         self.parsed = as_parsed(c);
         self.confirmed = (!c.is_unsplit()).then(|| self.parsed.clone());
         self.text = show(&self.parsed.series, self.parsed.volume, self.parsed.subtitle.as_deref());
     }
 
-    /// Whether the fields may be accepted. A flagged row needs fields that
-    /// differ from the pre-fill and are not another garbled candidate, or a
-    /// clean candidate the user moved to.
+    /// Whether the fields may be accepted. A flagged row needs a change the
+    /// user made that reaches the destination, or a clean candidate they moved
+    /// to — and never another garbled candidate.
+    ///
+    /// Compared as the path the preset renders, not as raw fields. The preset
+    /// trims edge spaces and dots and collapses runs, so `e` Tab Tab Tab Space
+    /// Enter leaves a committed filename byte-identical to the squashed guess:
+    /// a change that normalises away is not engagement with the problem the
+    /// flag exists to force.
     fn acceptable(&self) -> bool {
         if self.parsed.series.trim().is_empty() {
             return false;
@@ -166,32 +190,37 @@ impl Detail {
         if !self.flagged {
             return true;
         }
-        if self.candidates.iter().any(|c| c.is_unsplit() && as_parsed(c) == self.parsed) {
+        let now = self.path_for(&self.parsed);
+        if self.candidates.iter().any(|c| c.is_unsplit() && self.path_for(&as_parsed(c)) == now) {
             return false;
         }
-        self.parsed != self.prefill || self.confirmed.as_ref() == Some(&self.parsed)
+        if self.confirmed.as_ref().is_some_and(|c| self.path_for(c) == now) {
+            return true;
+        }
+        self.edited && now != self.path_for(&self.prefill)
     }
 
-    /// The count that pads the volume, by the rule the written row uses.
-    fn volume_count(&self) -> Option<u32> {
-        super::table::run_length(&self.candidates, &self.parsed.series)
+    /// The path `fields` would produce, from the real preset. The padding
+    /// width comes from the candidates by the rule the written row uses.
+    fn path_for(&self, fields: &ParsedTitle) -> String {
+        let row = MappingRow {
+            key: String::new(),
+            series: fields.series.clone(),
+            volume: fields.volume,
+            subtitle: fields.subtitle.clone(),
+            lang: String::new(),
+            volume_count: super::table::run_length(&self.candidates, &fields.series),
+            bundle: String::new(),
+        };
+        self.preset.destination(&row.resolved(), &self.ext).display().to_string()
     }
 
     /// The path the current fields produce, from the real preset.
-    pub fn destination_line(&self, preset: &dyn Preset) -> String {
+    pub fn destination_line(&self) -> String {
         if self.parsed.series.trim().is_empty() {
             return "(type a series name)".to_string();
         }
-        let row = MappingRow {
-            key: String::new(),
-            series: self.parsed.series.clone(),
-            volume: self.parsed.volume,
-            subtitle: self.parsed.subtitle.clone(),
-            lang: String::new(),
-            volume_count: self.volume_count(),
-            bundle: String::new(),
-        };
-        preset.destination(&row.resolved(), &self.ext).display().to_string()
+        self.path_for(&self.parsed)
     }
 
     fn on_key(&mut self, k: KeyEvent) -> Step {
@@ -229,7 +258,7 @@ impl Detail {
         }
     }
 
-    fn render(&self, frame: &mut Frame, stem: &str, preset: &dyn Preset) {
+    fn render(&self, frame: &mut Frame, stem: &str) {
         let [head, hint, input, parsed, dest, menu, foot] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Length(2),
@@ -267,7 +296,7 @@ impl Detail {
         );
         // Wrapped: a long path must not clip the extension off the end.
         frame.render_widget(
-            ratatui::widgets::Paragraph::new(format!("\n files to   {}", self.destination_line(preset)))
+            ratatui::widgets::Paragraph::new(format!("\n files to   {}", self.destination_line()))
                 .wrap(ratatui::widgets::Wrap { trim: false }),
             dest,
         );
@@ -306,9 +335,9 @@ enum Step {
 /// Edits one entry. `Continue` returns to the table (accepted or not);
 /// `Cancel` means the user quit the whole session.
 pub fn run(terminal: &mut DefaultTerminal, entry: &mut Entry, preset: &dyn Preset) -> std::io::Result<Action> {
-    let mut detail = Detail::for_entry(entry);
+    let mut detail = Detail::for_entry(entry, preset);
     loop {
-        terminal.draw(|f| detail.render(f, &entry.stem, preset))?;
+        terminal.draw(|f| detail.render(f, &entry.stem))?;
         let Event::Key(key) = crossterm::event::read()? else { continue };
         if key.kind != KeyEventKind::Press {
             continue;
@@ -344,8 +373,8 @@ mod tests {
         }
     }
 
-    fn titled(text: &str, ext: &str) -> Detail {
-        Detail { ext: ext.into(), ..Detail::from_text(text) }
+    fn titled(text: &str, ext: &str) -> Detail<'static> {
+        Detail { ext: ext.into(), ..Detail::from_text(text, &Komga) }
     }
 
     fn key(c: KeyCode) -> KeyEvent {
@@ -358,7 +387,7 @@ mod tests {
 
     fn screen_at(d: &Detail, stem: &str, width: u16) -> String {
         let mut term = Terminal::new(TestBackend::new(width, 20)).unwrap();
-        term.draw(|f| d.render(f, stem, &Komga)).unwrap();
+        term.draw(|f| d.render(f, stem)).unwrap();
         let buf = term.backend().buffer();
         (0..buf.area.height)
             .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect::<String>())
@@ -368,7 +397,7 @@ mod tests {
 
     #[test]
     fn typing_a_sentence_shows_the_parsed_fields() {
-        let d = Detail::from_text("The Complete ElfQuest Volume 1: The Original Quest TPB");
+        let d = Detail::from_text("The Complete ElfQuest Volume 1: The Original Quest TPB", &Komga);
         assert_eq!(d.parsed.series, "The Complete ElfQuest");
         assert_eq!(d.parsed.volume, Some(1));
         assert_eq!(d.parsed.subtitle.as_deref(), Some("The Original Quest TPB"));
@@ -376,7 +405,7 @@ mod tests {
 
     #[test]
     fn every_keystroke_reparses() {
-        let mut d = Detail::from_text("DIE");
+        let mut d = Detail::from_text("DIE", &Komga);
         for c in " Volume 3".chars() {
             d.on_input(c);
         }
@@ -389,14 +418,14 @@ mod tests {
 
     #[test]
     fn the_parser_keeps_the_users_string_verbatim() {
-        assert_eq!(Detail::from_text("DIE: Loaded #1").parsed.series, "DIE");
-        assert_eq!(Detail::from_text("Hack/Slash: Back to School").parsed.series, "Hack/Slash");
+        assert_eq!(Detail::from_text("DIE: Loaded #1", &Komga).parsed.series, "DIE");
+        assert_eq!(Detail::from_text("Hack/Slash: Back to School", &Komga).parsed.series, "Hack/Slash");
     }
 
     #[test]
     fn the_destination_line_is_rendered_by_the_real_preset() {
-        let d = Detail::from_text("Hack/Slash: Back to School");
-        let line = d.destination_line(&Komga);
+        let d = Detail::from_text("Hack/Slash: Back to School", &Komga);
+        let line = d.destination_line();
         assert!(line.contains("Hack - Slash"), "the slash is sanitised by the preset, not stored mangled: {line}");
         assert_eq!(line.matches('/').count(), 1, "only the series/book separator: {line}");
     }
@@ -405,33 +434,33 @@ mod tests {
     fn the_destination_line_matches_the_spec_example() {
         let d = titled("The Complete ElfQuest Volume 1: The Original Quest TPB", "cbz");
         assert_eq!(
-            d.destination_line(&Komga),
+            d.destination_line(),
             "The Complete ElfQuest/The Complete ElfQuest Vol. 01 - The Original Quest TPB.cbz"
         );
     }
 
     #[test]
     fn padding_comes_from_volume_count_not_from_the_volume() {
-        let d = Detail::for_entry(&Entry::new("s".into(), vec![sug("Manga", Some(2), None, Some(100))]).with_extension("cbz"));
-        let line = d.destination_line(&Komga);
+        let d = Detail::for_entry(&Entry::new("s".into(), vec![sug("Manga", Some(2), None, Some(100))]).with_extension("cbz"), &Komga);
+        let line = d.destination_line();
         assert!(line.contains("Vol. 002"), "{line}");
         let d = titled("Manga Volume 2", "cbz");
-        let line = d.destination_line(&Komga);
+        let line = d.destination_line();
         assert!(line.contains("Vol. 02."), "no count means the two-digit floor: {line}");
     }
 
     #[test]
     fn retyping_the_series_drops_the_picked_candidates_count() {
-        let mut d = Detail::for_entry(&Entry::new("s".into(), vec![sug("Manga", Some(2), None, Some(100))]).with_extension("cbz"));
+        let mut d = Detail::for_entry(&Entry::new("s".into(), vec![sug("Manga", Some(2), None, Some(100))]).with_extension("cbz"), &Komga);
         d.text = "Other Volume 2".into();
         d.on_input('0');
-        let line = d.destination_line(&Komga);
+        let line = d.destination_line();
         assert!(line.contains("Vol. 20."), "{line}");
     }
 
     #[test]
     fn a_blank_title_has_no_destination() {
-        let line = Detail::from_text("").destination_line(&Komga);
+        let line = Detail::from_text("", &Komga).destination_line();
         assert!(!line.contains('/') && !line.contains(".cbz"), "{line}");
     }
 
@@ -441,7 +470,7 @@ mod tests {
             "witch".into(),
             vec![sug("Witch", Some(1), None, None), sug("Witcher", Some(1), None, None)],
         );
-        let mut d = Detail::for_entry(&e);
+        let mut d = Detail::for_entry(&e, &Komga);
         assert_eq!(d.parsed.series, "Witch");
         d.pick(1);
         assert_eq!(d.parsed.series, "Witcher");
@@ -454,7 +483,7 @@ mod tests {
 
     #[test]
     fn the_screen_shows_the_fields_and_the_destination() {
-        let mut d = Detail::from_text("The Complete ElfQuest Volume 1: The Original Quest TPB");
+        let mut d = Detail::from_text("The Complete ElfQuest Volume 1: The Original Quest TPB", &Komga);
         d.ext = "cbz".into();
         let s = screen(&d, "thecompleteelfquest_vol1");
         for want in [
@@ -470,7 +499,7 @@ mod tests {
 
     #[test]
     fn enter_accepts_only_a_title_with_a_series() {
-        let mut d = Detail::from_text("");
+        let mut d = Detail::from_text("", &Komga);
         assert!(matches!(d.on_key(key(KeyCode::Enter)), Step::Editing), "a blank title is not accepted");
         d.on_input('X');
         assert!(matches!(d.on_key(key(KeyCode::Enter)), Step::Accept));
@@ -483,7 +512,7 @@ mod tests {
     fn an_edited_squashed_row_is_approved_through_the_one_writer() {
         let mut e = Entry::new("x".into(), vec![sug("Hellboy Omnibus", Some(1), Some("seedofdestruction"), None)]);
         assert!(!e.approved);
-        let d = Detail::from_text("Hellboy Omnibus Volume 1: Seed of Destruction");
+        let d = Detail::from_text("Hellboy Omnibus Volume 1: Seed of Destruction", &Komga);
         assert!(e.accept_edit(d.parsed.clone()));
         assert!(e.approved);
         assert_eq!(e.final_fields.unwrap().subtitle.as_deref(), Some("Seed of Destruction"));
@@ -492,7 +521,7 @@ mod tests {
     #[test]
     fn a_blank_series_is_never_accepted() {
         let mut e = Entry::new("x".into(), vec![]);
-        assert!(!e.accept_edit(Detail::from_text("   ").parsed));
+        assert!(!e.accept_edit(Detail::from_text("   ", &Komga).parsed));
         assert!(!e.approved && e.final_fields.is_none());
     }
 
@@ -512,7 +541,7 @@ mod tests {
     #[test]
     fn a_pdf_entry_shows_a_pdf_destination() {
         let e = Entry::new("elfquest_vol1".into(), vec![sug("ElfQuest", Some(1), None, None)]).with_extension("pdf");
-        let d = Detail::for_entry(&e);
+        let d = Detail::for_entry(&e, &Komga);
         let s = screen(&d, &e.stem);
         assert!(s.contains("ElfQuest Vol. 01.pdf"), "{s}");
         assert!(!s.contains(".cbz"), "the tool will not create a .cbz: {s}");
@@ -529,12 +558,12 @@ mod tests {
         assert_eq!(d.parsed.series, "Series");
         assert_eq!(d.parsed.subtitle.as_deref(), Some("Sub"));
         assert_eq!(d.text, "Series Volume 7: Sub");
-        assert!(d.destination_line(&Komga).contains("Series Vol. 07 - Sub.pdf"));
+        assert!(d.destination_line().contains("Series Vol. 07 - Sub.pdf"));
     }
 
     #[test]
     fn a_field_can_be_cleared_and_the_subtitle_removed() {
-        let mut d = Detail::from_text("Series Volume 1: Sub");
+        let mut d = Detail::from_text("Series Volume 1: Sub", &Komga);
         for _ in 0..3 {
             d.on_key(key(KeyCode::Tab));
         }
@@ -547,7 +576,7 @@ mod tests {
 
     #[test]
     fn tab_cycles_back_to_the_text_box_and_the_footer_is_honest() {
-        let mut d = Detail::from_text("A Volume 2");
+        let mut d = Detail::from_text("A Volume 2", &Komga);
         for _ in 0..4 {
             d.on_key(key(KeyCode::Tab));
         }
@@ -562,7 +591,7 @@ mod tests {
 
     #[test]
     fn a_flagged_row_cannot_be_accepted_unchanged() {
-        let mut d = Detail::for_entry(&squashed_entry());
+        let mut d = Detail::for_entry(&squashed_entry(), &Komga);
         assert!(matches!(d.on_key(key(KeyCode::Enter)), Step::Editing), "the unsplit guess is pre-filled, not verified");
         d.on_input('!');
         assert!(matches!(d.on_key(key(KeyCode::Enter)), Step::Accept), "a change is the user saying so");
@@ -571,7 +600,7 @@ mod tests {
     #[test]
     fn an_explicit_pick_lets_an_ambiguous_row_through() {
         let e = Entry::new("w".into(), vec![sug("Witch", Some(1), None, None), sug("Witcher", Some(1), None, None)]);
-        let mut d = Detail::for_entry(&e);
+        let mut d = Detail::for_entry(&e, &Komga);
         assert!(matches!(d.on_key(key(KeyCode::Enter)), Step::Editing));
         d.on_key(key(KeyCode::Down));
         assert!(matches!(d.on_key(key(KeyCode::Enter)), Step::Accept));
@@ -579,7 +608,7 @@ mod tests {
 
     #[test]
     fn a_clean_row_is_accepted_as_it_stands() {
-        let mut d = Detail::for_entry(&Entry::new("c".into(), vec![sug("Fine", Some(1), None, None)]));
+        let mut d = Detail::for_entry(&Entry::new("c".into(), vec![sug("Fine", Some(1), None, None)]), &Komga);
         assert!(matches!(d.on_key(key(KeyCode::Enter)), Step::Accept));
     }
 
@@ -589,9 +618,9 @@ mod tests {
             "b".into(),
             vec![sug("Same", Some(1), None, Some(5)), sug("Same", Some(1), None, Some(120))],
         );
-        let mut d = Detail::for_entry(&e);
+        let mut d = Detail::for_entry(&e, &Komga);
         d.pick(1);
-        let line = d.destination_line(&Komga);
+        let line = d.destination_line();
         assert!(e.accept_edit(d.parsed.clone()));
         let written = Komga.destination(
             &comic_renamer_core::mapping::MappingRow {
@@ -615,13 +644,13 @@ mod tests {
             "b".into(),
             vec![sug("Other", Some(1), None, None), sug("Batman: Year One", Some(2), None, Some(100))],
         );
-        let mut d = Detail::for_entry(&e);
+        let mut d = Detail::for_entry(&e, &Komga);
         d.pick(1);
         assert_eq!(d.parsed.series, "Batman: Year One");
         assert_eq!(d.parsed.subtitle, None);
-        let line = d.destination_line(&Komga);
+        let line = d.destination_line();
         assert!(line.contains("Vol. 002"), "volume_count survives the pick: {line}");
-        let first = Detail::for_entry(&Entry::new("b".into(), vec![sug("Batman: Year One", Some(1), None, None)]));
+        let first = Detail::for_entry(&Entry::new("b".into(), vec![sug("Batman: Year One", Some(1), None, None)]), &Komga);
         assert_eq!(first.parsed.series, "Batman: Year One", "the initial fill is not re-parsed either");
     }
 
@@ -632,13 +661,13 @@ mod tests {
             vec![sug("The Complete ElfQuest", Some(1), Some("The Original Quest TPB"), None)],
         )
         .with_extension("pdf");
-        let s = screen_at(&Detail::for_entry(&e), &e.stem, 80);
+        let s = screen_at(&Detail::for_entry(&e, &Komga), &e.stem, 80);
         assert!(s.contains("TPB.pdf"), "{s}");
     }
 
     #[test]
     fn returning_to_the_sentence_box_cannot_re_split_a_series_with_a_colon() {
-        let mut d = Detail::from_text("Nemesis Volume 1");
+        let mut d = Detail::from_text("Nemesis Volume 1", &Komga);
         d.on_key(key(KeyCode::Tab)); // series
         type_str(&mut d, ": Rogues' Gallery");
         for _ in 0..3 {
@@ -652,7 +681,7 @@ mod tests {
 
     #[test]
     fn a_pick_that_changes_nothing_keeps_what_was_typed() {
-        let mut d = Detail::for_entry(&Entry::new("s".into(), vec![sug("Only", Some(1), None, None)]));
+        let mut d = Detail::for_entry(&Entry::new("s".into(), vec![sug("Only", Some(1), None, None)]), &Komga);
         type_str(&mut d, " typed");
         d.on_key(key(KeyCode::Up));
         d.on_key(key(KeyCode::Down));
@@ -662,7 +691,7 @@ mod tests {
     #[test]
     fn up_at_the_top_of_several_candidates_keeps_what_was_typed() {
         let e = Entry::new("w".into(), vec![sug("Witch", Some(1), None, None), sug("Witcher", Some(1), None, None)]);
-        let mut d = Detail::for_entry(&e);
+        let mut d = Detail::for_entry(&e, &Komga);
         type_str(&mut d, "!");
         d.on_key(key(KeyCode::Up));
         assert_eq!(d.text, "Witch Volume 1!");
@@ -670,7 +699,7 @@ mod tests {
 
     #[test]
     fn up_then_enter_on_a_single_candidate_flagged_row_does_not_accept() {
-        let mut d = Detail::for_entry(&squashed_entry());
+        let mut d = Detail::for_entry(&squashed_entry(), &Komga);
         d.on_key(key(KeyCode::Up));
         d.on_key(key(KeyCode::Down));
         assert!(matches!(d.on_key(key(KeyCode::Enter)), Step::Editing));
@@ -685,7 +714,7 @@ mod tests {
                 sug("Hellboy Omnibus", Some(2), Some("wakethedevil"), None),
             ],
         );
-        let mut d = Detail::for_entry(&e);
+        let mut d = Detail::for_entry(&e, &Komga);
         d.on_key(key(KeyCode::Down));
         assert!(matches!(d.on_key(key(KeyCode::Enter)), Step::Editing), "a different garbled subtitle is still garbled");
     }
@@ -693,7 +722,7 @@ mod tests {
     #[test]
     fn confirming_the_top_clean_candidate_takes_a_real_move_there_and_back() {
         let e = Entry::new("w".into(), vec![sug("Witch", Some(1), None, None), sug("Witcher", Some(1), None, None)]);
-        let mut d = Detail::for_entry(&e);
+        let mut d = Detail::for_entry(&e, &Komga);
         d.on_key(key(KeyCode::Down));
         d.on_key(key(KeyCode::Up));
         assert_eq!(d.parsed.series, "Witch");
@@ -708,13 +737,69 @@ mod tests {
             volume: Some(1),
             subtitle: Some("Seed of Destruction".into()),
         });
-        let mut d = Detail::for_entry(&e);
+        let mut d = Detail::for_entry(&e, &Komga);
         assert!(matches!(d.on_key(key(KeyCode::Enter)), Step::Accept), "its content already differs from the guess");
+    }
+
+    /// `e`, Tab, Tab, Tab, Space, Enter. The preset's `trim_hostile_edges`
+    /// strips the space, so the committed filename would be byte-identical to
+    /// the squashed guess — six keystrokes producing exactly the outcome the
+    /// flag exists to prevent, with no trace.
+    #[test]
+    fn a_trailing_space_is_not_a_correction() {
+        let mut d = Detail::for_entry(&squashed_entry(), &Komga);
+        let before = d.destination_line();
+        for _ in 0..3 {
+            d.on_key(key(KeyCode::Tab)); // series, volume, subtitle
+        }
+        d.on_key(key(KeyCode::Char(' ')));
+        assert_eq!(d.parsed.subtitle.as_deref(), Some("seedofdestruction "), "the space is in the field");
+        assert_eq!(d.destination_line(), before, "and gone again by the time it is a path");
+        assert!(matches!(d.on_key(key(KeyCode::Enter)), Step::Editing));
+    }
+
+    /// Whitespace is not the only thing that normalises away: the preset drops
+    /// `?` and `*` outright.
+    #[test]
+    fn an_edit_the_preset_deletes_is_not_a_correction() {
+        for c in ['?', '*'] {
+            let mut d = Detail::for_entry(&squashed_entry(), &Komga);
+            d.on_key(key(KeyCode::Char(c)));
+            assert!(matches!(d.on_key(key(KeyCode::Enter)), Step::Editing), "{c:?} reaches no path");
+        }
+    }
+
+    /// `e`, `^R`, Enter. `^R` re-reads the same text, and the parser re-splits
+    /// a series holding a colon — so the fields differ from the pre-fill while
+    /// the user has corrected nothing, and the squashed subtitle is committed
+    /// with a corrupted series on top.
+    #[test]
+    fn re_reading_the_sentence_is_not_a_correction() {
+        let e = Entry::new(
+            "sw".into(),
+            vec![sug("Star Wars: Dark Times", Some(1), Some("darkwind"), None)],
+        );
+        let mut d = Detail::for_entry(&e, &Komga);
+        d.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!(d.parsed.series, "Star Wars", "the re-parse really does move content");
+        assert!(matches!(d.on_key(key(KeyCode::Enter)), Step::Editing), "a parser disagreeing with itself is not the user");
+    }
+
+    /// `e`, `x`, Backspace, Enter: a keystroke the user undid is not a change.
+    #[test]
+    fn typing_and_deleting_again_is_not_a_correction() {
+        let mut d = Detail::for_entry(&squashed_entry(), &Komga);
+        d.on_key(key(KeyCode::Char('x')));
+        d.on_key(key(KeyCode::Backspace));
+        assert!(matches!(d.on_key(key(KeyCode::Enter)), Step::Editing));
+        // ...and one the user kept still is.
+        d.on_key(key(KeyCode::Char('x')));
+        assert!(matches!(d.on_key(key(KeyCode::Enter)), Step::Accept));
     }
 
     #[test]
     fn free_text_comes_back_on_a_row_with_no_candidates() {
-        let mut d = Detail::for_entry(&Entry::new("n".into(), vec![]));
+        let mut d = Detail::for_entry(&Entry::new("n".into(), vec![]), &Komga);
         d.on_key(key(KeyCode::Tab));
         type_str(&mut d, "Nemesis: Gallery");
         for _ in 0..3 {
