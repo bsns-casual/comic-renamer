@@ -54,8 +54,6 @@ pub enum SuggestionSource {
     Corpus,
     /// The filename itself, title-cased and parsed.
     Filename,
-    /// No guess. A caller that has nothing to show says so with this.
-    None,
 }
 
 /// Not `Serialize`: a plan row carries these fields flattened, so a plan can

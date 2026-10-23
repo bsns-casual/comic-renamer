@@ -98,18 +98,6 @@ fn alphanumeric(token: &str) -> String {
     token.chars().filter(|c| c.is_alphanumeric()).collect()
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Rates {
-    pub located: f64,
-    pub ready: f64,
-    pub silent_false_positive: f64,
-}
-
-/// located >= 92.3%, ready >= 66%, silent FP <= 0.48% (D26, D31).
-pub fn gates_pass(rates: Rates) -> bool {
-    rates.located >= 92.3 && rates.ready >= 66.0 && rates.silent_false_positive <= 0.48
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,21 +191,5 @@ mod tests {
             "a prefix of the real series is a wrong answer, not a subtitle"
         );
         assert!(!grade_ok("X-O", "X-O Manowar, Vol. 3: Planet Death"));
-    }
-
-    #[test]
-    fn gates_hold_each_threshold_independently() {
-        let pass = Rates {
-            located: 92.3,
-            ready: 66.0,
-            silent_false_positive: 0.48,
-        };
-        assert!(gates_pass(pass), "the thresholds themselves must pass");
-        assert!(!gates_pass(Rates { located: 92.2, ..pass }));
-        assert!(!gates_pass(Rates { ready: 65.9, ..pass }));
-        assert!(!gates_pass(Rates {
-            silent_false_positive: 0.49,
-            ..pass
-        }));
     }
 }
