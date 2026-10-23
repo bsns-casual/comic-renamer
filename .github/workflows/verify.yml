@@ -105,7 +105,10 @@ jobs:
           WANT=$(python3 -c 'import json;print(json.load(open("corpus/manifest.json"))["sha256"])')
           curl -sfL "$URL" -o "$RUNNER_TEMP/corpus.zip"
           GOT=$(shasum -a 256 "$RUNNER_TEMP/corpus.zip" | cut -d' ' -f1)
+          WANT_SIZE=$(python3 -c 'import json;print(json.load(open("corpus/manifest.json"))["sizeBytes"])')
+          GOT_SIZE=$(stat -f %z "$RUNNER_TEMP/corpus.zip")
           test "$WANT" = "$GOT"
+          test "$WANT_SIZE" = "$GOT_SIZE"
       - name: Corpus tests
         run: |
           COMIC_RENAMER_TEST_ZIP="$RUNNER_TEMP/corpus.zip" \
@@ -134,3 +137,9 @@ jobs:
 # validation are ordinary `cargo test` assertions in the `rust` job. There is
 # no coverage or false-positive threshold: nothing is stored without approval
 # (D50), so `cargo xtask measure` reports and exits 0.
+#
+# The row cap is per pull request (§6.11) and diffs against the PR's base, so
+# it does not run on a push to main. That is deliberate: the cap bounds
+# contributed data, which arrives as a PR (`gh pr create`, corpus-refresh),
+# and CLAUDE.md sanctions the maintainer pushing directly. A direct push can
+# add any number of rows unchecked. The file-size cap does run on every push.
