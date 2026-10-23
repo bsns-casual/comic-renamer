@@ -147,7 +147,12 @@ fn session(
 ) -> Result<Outcome, String> {
     let entries = guesses_for(unmapped, marketplace, folder, lang, overrides)
         .into_iter()
-        .map(|(stem, found)| table::Entry::new(stem, found))
+        .zip(unmapped)
+        .map(|((stem, found), path)| {
+            // Lowercased as `scan` does, so the editor shows the extension `apply` will use.
+            let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+            table::Entry::new(stem, found).with_extension(&ext)
+        })
         .collect();
     let mut t = table::Table::new(folder.to_string(), entries);
     match table::run(&mut t, preset).map_err(|e| e.to_string())? {

@@ -22,15 +22,22 @@ pub struct Detail {
     /// The candidate whose text the user is editing from. Its `volume_count`
     /// sets the padding, but only while the series still matches it.
     picked: Option<usize>,
+    /// The file's real extension, so the destination is the path `apply` will make.
+    pub ext: String,
+    /// `None` is the sentence box; otherwise one field is being edited directly.
+    field: Option<Field>,
 }
 
-// shortcut: the destination is shown with `.cbz` whatever the file's real
-// extension is; `Entry` holds only the stem. Carry the extension on `Entry`.
-const DISPLAY_EXT: &str = "cbz";
+#[derive(Clone, Copy, PartialEq)]
+enum Field {
+    Series,
+    Volume,
+    Subtitle,
+}
 
 impl Detail {
     pub fn from_text(text: &str) -> Detail {
-        Detail { text: text.to_string(), parsed: parse_title(text), candidates: vec![], picked: None }
+        Detail { text: text.to_string(), parsed: parse_title(text), candidates: vec![], picked: None, ext: String::new(), field: None }
     }
 
     /// Starts from what the user already typed, else the top candidate, else
@@ -43,19 +50,61 @@ impl Detail {
         };
         let candidates = entry.candidates().to_vec();
         let picked = (!candidates.is_empty()).then_some(0);
-        Detail { picked, candidates, ..Detail::from_text(&text) }
+        Detail { picked, candidates, ext: entry.extension.clone(), ..Detail::from_text(&text) }
     }
 
     fn reparse(&mut self) {
         self.parsed = parse_title(&self.text);
     }
 
+    /// Tab: sentence box, then series, volume, subtitle, then back.
+    fn next_field(&mut self) {
+        self.field = match self.field {
+            None => Some(Field::Series),
+            Some(Field::Series) => Some(Field::Volume),
+            Some(Field::Volume) => Some(Field::Subtitle),
+            Some(Field::Subtitle) => None,
+        };
+    }
+
+    /// Edits one field and rewrites the sentence from the fields. The others
+    /// are never re-parsed, so a field edit cannot move text between them.
+    fn edit_field(&mut self, f: Field, c: Option<char>) {
+        let p = &mut self.parsed;
+        match f {
+            Field::Series => {
+                match c { Some(c) => p.series.push(c), None => { p.series.pop(); } }
+            }
+            Field::Volume => {
+                let mut v = p.volume.map(|v| v.to_string()).unwrap_or_default();
+                match c {
+                    Some(c) if c.is_ascii_digit() => v.push(c),
+                    Some(_) => return,
+                    None => { v.pop(); }
+                }
+                p.volume = v.parse().ok();
+            }
+            Field::Subtitle => {
+                let mut t = p.subtitle.take().unwrap_or_default();
+                match c { Some(c) => t.push(c), None => { t.pop(); } }
+                p.subtitle = (!t.is_empty()).then_some(t);
+            }
+        }
+        self.text = show(&p.series, p.volume, p.subtitle.as_deref());
+    }
+
     pub fn on_input(&mut self, c: char) {
+        if let Some(f) = self.field {
+            return self.edit_field(f, Some(c));
+        }
         self.text.push(c);
         self.reparse();
     }
 
     fn on_backspace(&mut self) {
+        if let Some(f) = self.field {
+            return self.edit_field(f, None);
+        }
         self.text.pop();
         self.reparse();
     }
@@ -66,6 +115,7 @@ impl Detail {
         let Some(last) = self.candidates.len().checked_sub(1) else { return };
         let at = (self.picked.unwrap_or(0) as isize + delta).clamp(0, last as isize) as usize;
         self.picked = Some(at);
+        self.field = None;
         let c = &self.candidates[at];
         self.text = show(&c.series, c.volume, c.subtitle.as_deref());
         self.reparse();
@@ -101,6 +151,10 @@ impl Detail {
             KeyCode::Char('c') if ctrl => Step::Quit,
             KeyCode::Esc => Step::Back,
             KeyCode::Enter if !self.parsed.series.trim().is_empty() => Step::Accept,
+            KeyCode::Tab => {
+                self.next_field();
+                Step::Editing
+            }
             KeyCode::Up => {
                 self.pick(-1);
                 Step::Editing
@@ -133,21 +187,25 @@ impl Detail {
         ])
         .areas(frame.area());
         frame.render_widget(format!(" {stem}"), head);
-        frame.render_widget("\n type a title, then check the path below", hint);
+        frame.render_widget("\n type a title, or press tab to edit a field; check the path below", hint);
         let boxed = ratatui::widgets::Block::bordered();
         frame.render_widget(ratatui::widgets::Paragraph::new(format!("{}▏", self.text)).block(boxed), input);
         let p = &self.parsed;
+        let mark = |f| if self.field == Some(f) { '>' } else { ' ' };
         frame.render_widget(
             format!(
-                " parsed as\n   series   {}\n   volume   {}\n   subtitle {}",
+                " parsed as\n  {}series   {}\n  {}volume   {}\n  {}subtitle {}",
+                mark(Field::Series),
                 p.series,
+                mark(Field::Volume),
                 p.volume.map_or("(none)".to_string(), |v| v.to_string()),
+                mark(Field::Subtitle),
                 p.subtitle.as_deref().unwrap_or("(none)"),
             ),
             parsed,
         );
         frame.render_widget(
-            format!("\n files to   {}", self.destination_line(preset, DISPLAY_EXT)),
+            format!("\n files to   {}", self.destination_line(preset, &self.ext)),
             dest,
         );
         if self.candidates.len() > 1 {
@@ -160,7 +218,7 @@ impl Detail {
             frame.render_widget(lines.join("\n"), menu);
         }
         frame.render_widget(
-            ratatui::widgets::Paragraph::new(" ⏎ accept   ↑↓ candidates   esc back to the table   ^C quit")
+            ratatui::widgets::Paragraph::new(" ⏎ accept   tab next field   ↑↓ candidates   esc back to the table   ^C quit")
                 .style(Style::new().add_modifier(Modifier::DIM)),
             foot,
         );
@@ -317,7 +375,8 @@ mod tests {
 
     #[test]
     fn the_screen_shows_the_fields_and_the_destination() {
-        let d = Detail::from_text("The Complete ElfQuest Volume 1: The Original Quest TPB");
+        let mut d = Detail::from_text("The Complete ElfQuest Volume 1: The Original Quest TPB");
+        d.ext = "cbz".into();
         let s = screen(&d, "thecompleteelfquest_vol1");
         for want in [
             "thecompleteelfquest_vol1",
@@ -363,5 +422,58 @@ mod tests {
         let e = Entry::new("x".into(), vec![sug("A", None, None, None), sug("B", None, None, None)]);
         assert_eq!(e.guess().unwrap().series, "A");
         assert!(Entry::new("x".into(), vec![]).guess().is_none());
+    }
+
+    fn type_str(d: &mut Detail, s: &str) {
+        for c in s.chars() {
+            d.on_key(key(KeyCode::Char(c)));
+        }
+    }
+
+    #[test]
+    fn a_pdf_entry_shows_a_pdf_destination() {
+        let e = Entry::new("elfquest_vol1".into(), vec![sug("ElfQuest", Some(1), None, None)]).with_extension("pdf");
+        let d = Detail::for_entry(&e);
+        let s = screen(&d, &e.stem);
+        assert!(s.contains("ElfQuest Vol. 01.pdf"), "{s}");
+        assert!(!s.contains(".cbz"), "the tool will not create a .cbz: {s}");
+    }
+
+    #[test]
+    fn tab_edits_one_field_and_leaves_the_others_intact() {
+        let mut d = Detail::from_text("Series Volume 1: Sub");
+        d.on_key(key(KeyCode::Tab)); // series
+        d.on_key(key(KeyCode::Tab)); // volume
+        d.on_key(key(KeyCode::Backspace));
+        type_str(&mut d, "7x"); // non-digits are ignored in the volume field
+        assert_eq!(d.parsed.volume, Some(7));
+        assert_eq!(d.parsed.series, "Series");
+        assert_eq!(d.parsed.subtitle.as_deref(), Some("Sub"));
+        assert_eq!(d.text, "Series Volume 7: Sub");
+        assert!(d.destination_line(&Komga, "pdf").contains("Series Vol. 07 - Sub.pdf"));
+    }
+
+    #[test]
+    fn a_field_can_be_cleared_and_the_subtitle_removed() {
+        let mut d = Detail::from_text("Series Volume 1: Sub");
+        for _ in 0..3 {
+            d.on_key(key(KeyCode::Tab));
+        }
+        for _ in 0..3 {
+            d.on_key(key(KeyCode::Backspace));
+        }
+        assert_eq!(d.parsed.subtitle, None);
+        assert_eq!(d.text, "Series Volume 1");
+    }
+
+    #[test]
+    fn tab_cycles_back_to_the_text_box_and_the_footer_is_honest() {
+        let mut d = Detail::from_text("A Volume 2");
+        for _ in 0..4 {
+            d.on_key(key(KeyCode::Tab));
+        }
+        type_str(&mut d, "!");
+        assert_eq!(d.text, "A Volume 2!");
+        assert!(screen(&d, "x").contains("tab"), "the footer advertises a key that works");
     }
 }

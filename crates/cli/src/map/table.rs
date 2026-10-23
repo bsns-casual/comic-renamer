@@ -21,11 +21,17 @@ pub struct Entry {
     /// What the user typed or accepted. `None` until one of those happens.
     pub final_fields: Option<ParsedTitle>,
     pub approved: bool,
+    /// The file's own extension, so the editor shows the path `apply` will make.
+    pub extension: String,
 }
 
 impl Entry {
     pub fn new(stem: String, candidates: Vec<Suggestion>) -> Self {
-        Entry { stem, candidates, final_fields: None, approved: false }
+        Entry { stem, candidates, final_fields: None, approved: false, extension: String::new() }
+    }
+
+    pub fn with_extension(self, extension: &str) -> Self {
+        Entry { extension: extension.to_string(), ..self }
     }
 
     pub fn guess(&self) -> Option<&Suggestion> {
