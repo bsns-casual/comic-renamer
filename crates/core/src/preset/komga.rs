@@ -1,7 +1,7 @@
 //! Flat `<Series>/<Book>.<ext>` — Komga reads only the leaf folder (§6.8.1).
 
 use super::Preset;
-use crate::normalize::nfc;
+use crate::normalize::{is_invisible, nfc};
 use crate::overrides::DEVICE_NAMES;
 use crate::types::Resolved;
 use std::path::PathBuf;
@@ -9,7 +9,14 @@ use std::path::PathBuf;
 /// A path component's byte budget on every filesystem this targets.
 const MAX_COMPONENT_BYTES: usize = 255;
 
-/// Characters that cannot appear in a path, mapped to plain ASCII.
+/// Characters that cannot appear in a path, or can only appear in one as a
+/// look-alike, mapped to plain ASCII.
+///
+/// The space variants are the second kind: a no-break space is legal in a
+/// filename and reads as a space, so `Hell<U+00A0>boy` beside `Hell boy` is
+/// one series to anyone looking and two on disk. Rejecting them would lose a
+/// title that legitimately uses one, which is why they are here and not in
+/// `normalize::is_invisible`.
 ///
 /// Never a look-alike. An earlier version mapped `:` to U+A789 MODIFIER
 /// LETTER COLON so that `Hellboy: Seed` and `Hellboy - Seed` could not
@@ -18,7 +25,7 @@ const MAX_COMPONENT_BYTES: usize = 255;
 /// `find_collisions` groups rows by the series folder's collision key as well
 /// as the whole path, so two titles landing on one folder are reported and
 /// the rows refused, never merged.
-const SUBSTITUTIONS: [(char, &str); 9] = [
+const SUBSTITUTIONS: [(char, &str); 25] = [
     (':', " - "),
     ('/', " - "),
     ('\\', "-"),
@@ -28,6 +35,22 @@ const SUBSTITUTIONS: [(char, &str); 9] = [
     ('>', ")"),
     ('?', ""),
     ('*', ""),
+    ('\u{a0}', " "),
+    ('\u{2000}', " "),
+    ('\u{2001}', " "),
+    ('\u{2002}', " "),
+    ('\u{2003}', " "),
+    ('\u{2004}', " "),
+    ('\u{2005}', " "),
+    ('\u{2006}', " "),
+    ('\u{2007}', " "),
+    ('\u{2008}', " "),
+    ('\u{2009}', " "),
+    ('\u{200a}', " "),
+    ('\u{202f}', " "),
+    ('\u{205f}', " "),
+    ('\u{3000}', " "),
+    ('\u{1680}', " "),
 ];
 
 pub struct Komga;
@@ -115,20 +138,6 @@ pub fn sanitize(component: &str) -> String {
     } else {
         capped
     }
-}
-
-/// §6.11 forbids these in contributed rule data. Corpus titles are sanitised
-/// rather than rejected, but they must not survive into a path either: Humble
-/// prefixes promo items with a "Free Issue" marker containing a zero-width
-/// character, and `Hellboy` beside `Hell<U+200B>boy` is two folders no one
-/// can tell apart in Finder or in a diff.
-pub(crate) fn is_invisible(c: char) -> bool {
-    matches!(c,
-        '\u{ad}'
-        | '\u{200b}'..='\u{200f}'
-        | '\u{202a}'..='\u{202e}'
-        | '\u{2066}'..='\u{2069}'
-        | '\u{feff}')
 }
 
 fn collapse_spaces(s: &str) -> String {

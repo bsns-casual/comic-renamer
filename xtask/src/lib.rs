@@ -68,7 +68,10 @@ fn join(series: &[String], subtitle: &[String]) -> String {
 /// the two cannot drift. Only a "Free Issue" followed by more text is a prefix,
 /// so a title that genuinely opens with "Free" keeps its first word.
 pub fn strip_promo(s: &str) -> String {
-    let clean = s.replace(['\u{200b}', '\u{200c}', '\u{200d}', '\u{feff}'], "");
+    let clean: String = s
+        .chars()
+        .filter(|c| !comic_renamer_core::normalize::is_invisible(*c))
+        .collect();
     let mut words = clean.split_whitespace();
     if let (Some(a), Some(b)) = (words.next(), words.next()) {
         if a.eq_ignore_ascii_case("free") && b.eq_ignore_ascii_case("issue") {
@@ -162,6 +165,21 @@ mod tests {
         assert_eq!(strip_promo("Free Issue"), "Free Issue", "nothing left to file under");
         assert_eq!(strip_promo("Free Fall"), "Free Fall");
         assert_eq!(strip_promo("Saga"), "Saga");
+    }
+
+    /// The three definitions of "invisible" were written at three widths:
+    /// `strip_promo` cleaned less than `validate` rejected, so a promo title
+    /// carrying a bidi control was partially cleaned and then refused. One
+    /// predicate now, so neither can drift from the other.
+    #[test]
+    fn strip_promo_cleans_everything_the_validator_rejects() {
+        for c in (0u32..0x11000).chain(0xE0000..0xE0080).filter_map(char::from_u32) {
+            if !comic_renamer_core::normalize::is_invisible(c) {
+                continue;
+            }
+            assert_eq!(strip_promo(&format!("Sa{c}ga")), "Saga", "U+{:04X} survived", c as u32);
+        }
+        assert_eq!(strip_promo("\u{202e}Free Issue Saga"), "Saga", "a bidi control ahead of the prefix");
     }
 
     #[test]

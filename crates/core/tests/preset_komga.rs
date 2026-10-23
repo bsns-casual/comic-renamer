@@ -153,12 +153,30 @@ fn zero_width_characters_do_not_survive_into_a_path() {
     // CLAUDE.md records Humble prefixing promo items with a "Free Issue"
     // marker containing one, so this arrives with real input.
     let plain = Komga.destination(&res("Hellboy", None, 1, None), "pdf");
-    for invisible in ['\u{200b}', '\u{feff}', '\u{ad}', '\u{202e}'] {
+    for invisible in ['\u{200b}', '\u{feff}', '\u{ad}', '\u{202e}', '\u{2060}', '\u{2028}', '\u{fe0f}', '\u{34f}', '\u{3164}', '\u{e0041}'] {
         let spiked = format!("Hell{invisible}boy");
         assert_eq!(
             Komga.destination(&res(&spiked, None, 1, None), "pdf"),
             plain,
             "{invisible:?} survived into the path"
+        );
+    }
+}
+
+/// A no-break space reads as a space, so `Hell<U+00A0>boy` and `Hell boy` are
+/// one folder to anyone looking and two on disk. Mapped to a plain space
+/// rather than rejected: unlike a zero-width character it is visible, and a
+/// title that uses one is still a title.
+#[test]
+fn space_look_alikes_become_a_plain_space() {
+    let plain = Komga.destination(&res("Hell boy", None, 1, None), "pdf");
+    for space in ['\u{a0}', '\u{2000}', '\u{2004}', '\u{200a}'] {
+        let spiked = format!("Hell{space}boy");
+        assert_eq!(
+            Komga.destination(&res(&spiked, None, 1, None), "pdf"),
+            plain,
+            "U+{:04X} makes a second folder",
+            space as u32
         );
     }
 }

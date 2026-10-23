@@ -100,6 +100,60 @@ fn rejects_invisible_characters_in_every_text_field() {
     }
 }
 
+/// The set the old predicate covered was the one Humble's promo prefix uses.
+/// Every character here was *accepted*, and the preset passed each into the
+/// path unchanged: `Hell<U+2060>boy` makes a second folder that reads as
+/// `Hellboy`, which is the exact duplicate §7.3's reject column exists to stop.
+#[test]
+fn rejects_the_invisible_characters_the_old_set_let_through() {
+    let invisible = [
+        '\u{034F}', // combining grapheme joiner
+        '\u{061C}', // Arabic letter mark
+        '\u{115F}', // Hangul choseong filler
+        '\u{1160}', // Hangul jungseong filler
+        '\u{2028}', // line separator — not a control character
+        '\u{2029}', // paragraph separator
+        '\u{2060}', // word joiner
+        '\u{2064}', // invisible plus
+        '\u{206F}', // nominal digit shapes
+        '\u{3164}', // Hangul filler
+        '\u{FE00}', // variation selector 1
+        '\u{FE0F}', // variation selector 16
+        '\u{FFA0}', // halfwidth Hangul filler
+        '\u{E0001}', // language tag
+        '\u{E0041}', // tag letter A
+    ];
+    for c in invisible {
+        assert!(row(&format!("Hell{c}boy")).validate().is_err(), "U+{:04X} in series", c as u32);
+        let mut r = row("Fine");
+        r.subtitle = Some(format!("a{c}b"));
+        assert!(r.validate().is_err(), "U+{:04X} in subtitle", c as u32);
+        let mut r = row("Fine");
+        r.bundle = format!("a{c}b");
+        assert!(r.validate().is_err(), "U+{:04X} in bundle", c as u32);
+    }
+}
+
+/// One predicate, three callers. The validator rejected U+00AD and the bidi
+/// controls where `strip_promo` cleaned neither, so a promo title carrying one
+/// was partially cleaned and then refused.
+#[test]
+fn the_validator_and_the_preset_agree_on_what_is_invisible() {
+    for c in (0u32..0x11000).chain(0xE0000..0xE0080).filter_map(char::from_u32) {
+        if !comic_renamer_core::normalize::is_invisible(c) {
+            continue;
+        }
+        let spiked = format!("Hell{c}boy");
+        assert!(row(&spiked).validate().is_err(), "U+{:04X} passes the validator", c as u32);
+        assert_eq!(
+            comic_renamer_core::preset::komga::sanitize(&spiked),
+            "Hellboy",
+            "U+{:04X} survives sanitising",
+            c as u32
+        );
+    }
+}
+
 #[test]
 fn rejects_a_whitespace_only_series() {
     for s in ["   ", " ", "\u{200B}", "\u{00A0}", "\u{3000}"] {

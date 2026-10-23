@@ -4,7 +4,7 @@
 //! (`Hack/Slash: Back to School` is a real name) and the preset sanitises them
 //! into path components; this module never treats a field as a path.
 
-use crate::preset::komga::is_invisible;
+use crate::normalize::is_invisible;
 use crate::preset::Preset;
 use crate::types::{MappingError, Resolved, Status};
 use std::collections::{BTreeSet, HashMap};
@@ -164,8 +164,10 @@ fn validate_field(field: &'static str, s: &str) -> Result<(), MappingError> {
     if s.chars().any(char::is_control) {
         return Err(invalid(field, "contains a control character"));
     }
-    // Invisible to a reviewer, so rejected rather than sanitised. Same set the
-    // preset strips (U+00AD, U+200B-200F, U+202A-202E, U+2066-2069, U+FEFF).
+    // Invisible to a reviewer, so rejected rather than sanitised. The same
+    // predicate the preset strips with and the grader cleans with: three
+    // copies at three widths meant the narrowest let through what the widest
+    // refused.
     if s.chars().any(is_invisible) {
         return Err(invalid(field, "contains an invisible character"));
     }

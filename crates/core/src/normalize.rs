@@ -58,6 +58,36 @@ pub fn nfc(s: &str) -> String {
     s.nfc().collect()
 }
 
+/// Invisible to a human reviewer, so rejected in contributed rule data (§7.3)
+/// and stripped on the way to a path. One definition, used by the validator,
+/// the preset and the grader: written three times at three widths, the
+/// narrowest let a character through that the widest refused, so a promo title
+/// carrying a bidi control was partly cleaned and then rejected.
+///
+/// Lives here rather than beside a preset because none of this is one preset's
+/// business: `Hell<U+2060>boy` reads as `Hellboy` whatever the path layout.
+/// A space look-alike is *not* here — it is visible as a space, and the preset
+/// maps it to one.
+pub fn is_invisible(c: char) -> bool {
+    matches!(c,
+        '\u{ad}'            // soft hyphen
+        | '\u{34f}'         // combining grapheme joiner
+        | '\u{61c}'         // Arabic letter mark
+        | '\u{115f}'..='\u{1160}' // Hangul fillers
+        | '\u{17b4}'..='\u{17b5}' // Khmer inherent vowels
+        | '\u{180b}'..='\u{180f}' // Mongolian variation selectors, vowel separator
+        | '\u{200b}'..='\u{200f}' // zero-width space through RLM
+        | '\u{2028}'..='\u{202e}' // line/paragraph separators, bidi embedding
+        | '\u{2060}'..='\u{2064}' // word joiner, invisible operators
+        | '\u{2066}'..='\u{206f}' // bidi isolates, deprecated format characters
+        | '\u{3164}'            // Hangul filler
+        | '\u{fe00}'..='\u{fe0f}' // variation selectors
+        | '\u{feff}'            // byte-order mark
+        | '\u{ffa0}'            // halfwidth Hangul filler
+        | '\u{fff9}'..='\u{fffb}' // interlinear annotation
+        | '\u{e0000}'..='\u{e007f}') // tag characters
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

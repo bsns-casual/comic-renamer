@@ -147,7 +147,7 @@ fn validate(field: &str, value: &str) -> Result<(), OverrideError> {
 }
 
 fn is_invisible_or_control(c: char) -> bool {
-    c.is_control() || crate::preset::komga::is_invisible(c)
+    c.is_control() || crate::normalize::is_invisible(c)
 }
 
 /// §6.11: a Cyrillic `е` among Latin letters creates a duplicate series that
