@@ -1,39 +1,34 @@
-//! `cargo xtask measure` — the §7 gate. Reports the located rate, the ready
-//! rate and the silent false positive rate against the committed corpora, and
-//! exits non-zero when any threshold is breached.
+//! `cargo xtask measure` -- reports the corpus strategy's located rate and the
+//! top suggestion's accuracy against the committed corpora. It reports and
+//! exits 0: nothing is stored without approval (D50), so there is no
+//! "silent" rate left to gate. Task 13 adds the hard checks.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use comic_renamer_core::corpus::{ensure_corpus, parse_manifest, Corpus};
 use comic_renamer_core::overrides::Overrides;
-use comic_renamer_core::resolve::{publisher_hint, resolve};
-use comic_renamer_core::types::{PublisherHint, ReviewReason, Status};
-use xtask::{gates_pass, grade_ok, Rates};
+use comic_renamer_core::resolve::{corpus_ladder, publisher_hint, suggest_with, Context};
+use comic_renamer_core::types::PublisherHint;
+use xtask::grade_ok;
 
 const MANIFEST: &str = include_str!("../../corpus/manifest.json");
 const OVERRIDES: &str = include_str!("../../data/overrides.toml");
 /// 2,717 filenames held out of the corpus work. Gives the located rate.
 const HELDOUT: &str = include_str!("../../fixtures/heldout-filenames.txt");
-/// 2,223 verified filename-to-title rows. Gives ready and silent FP (D26).
+/// 2,223 verified filename-to-title rows (D26). Gives suggestion accuracy.
 const GROUND_TRUTH: &str = include_str!("../../fixtures/humble-ground-truth.tsv");
 
 const LANG: &str = "en";
 
 fn main() {
     match std::env::args().nth(1).as_deref() {
-        Some("measure") => match measure() {
-            Ok(rates) => {
-                report(rates);
-                if !gates_pass(rates) {
-                    std::process::exit(1);
-                }
-            }
-            Err(e) => {
+        Some("measure") => {
+            if let Err(e) = measure() {
                 eprintln!("error: {e}");
                 std::process::exit(2);
             }
-        },
+        }
         _ => {
             eprintln!("usage: cargo xtask measure");
             std::process::exit(2);
@@ -41,15 +36,15 @@ fn main() {
     }
 }
 
-fn measure() -> Result<Rates, String> {
+fn measure() -> Result<(), String> {
     let manifest = parse_manifest(MANIFEST).map_err(|e| e.to_string())?;
     let database = ensure_corpus(&manifest, &cache_dir()?).map_err(|e| e.to_string())?;
     let corpus = Corpus::open(&database, &manifest).map_err(|e| e.to_string())?;
     let overrides = Overrides::parse(OVERRIDES).map_err(|e| e.to_string())?;
 
-    // Located: a row counts when the ladder named a series at all, ready or
-    // review. Only `Failed` means nothing was found.
-    let unhinted = PublisherHint(None);
+    // Located: a row counts when the corpus named a series at all, whether or
+    // not it then refused or offered several. Only `None` means nothing matched.
+    let unhinted = Context { overrides: Some(&overrides), ..Context::default() };
     let mut heldout = 0usize;
     let mut located = 0usize;
     for name in HELDOUT.lines().map(str::trim).filter(|l| !l.is_empty()) {
@@ -59,21 +54,20 @@ fn measure() -> Result<Rates, String> {
             .to_string_lossy()
             .into_owned();
         heldout += 1;
-        if resolve(&stem, "", &unhinted, &corpus, &overrides, LANG).status != Status::Failed {
+        if corpus_ladder(&stem, &corpus, &unhinted).is_some() {
             located += 1;
         }
     }
 
-    // Ready and silent FP, both over every graded row. A silent false positive
-    // is the one that matters: `ready` means the tool would move the file
-    // without asking, and the answer is wrong.
-    let mut hints: HashMap<&str, PublisherHint> = HashMap::new();
+    // Accuracy: does the top suggestion match the verified title? Rows are
+    // bucketed by how many suggestions the picker would show, because one
+    // right answer in a list of three is a different product from one right
+    // answer offered alone.
+    let mut hints: BTreeMap<&str, PublisherHint> = BTreeMap::new();
     let mut rows = 0usize;
-    let mut ready = 0usize;
-    // A bare ready rate cannot be acted on: it does not say whether the
-    // missing rows failed to match or matched ambiguously, and those point at
-    // different fixes.
-    let mut why: HashMap<&'static str, usize> = HashMap::new();
+    let mut top_right = 0usize;
+    let mut series_right = 0usize;
+    let mut buckets: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
     let mut wrong: Vec<(&str, String, &str)> = Vec::new();
     for line in GROUND_TRUTH.lines().skip(1) {
         let mut fields = line.split('\t');
@@ -85,51 +79,64 @@ fn measure() -> Result<Rates, String> {
         rows += 1;
         let hint = hints
             .entry(bundle)
-            .or_insert_with(|| publisher_hint(bundle, &corpus));
-        let resolved = resolve(stem, bundle, hint, &corpus, &overrides, LANG);
-        *why.entry(label(&resolved.status)).or_default() += 1;
-        if matches!(resolved.status, Status::Ready(_)) {
-            ready += 1;
-            let answer = match &resolved.subtitle {
-                Some(sub) => format!("{}: {sub}", resolved.series),
-                None => resolved.series.clone(),
+            .or_insert_with(|| publisher_hint(bundle, &corpus))
+            .clone();
+        let ctx = Context {
+            source_folder: bundle,
+            hint,
+            overrides: Some(&overrides),
+            lang: LANG,
+        };
+        let found = suggest_with(stem, "Humble", Some(&corpus), &ctx);
+        let bucket = match found.len() {
+            0 => "no suggestion",
+            1 => "one suggestion",
+            _ => "several suggestions",
+        };
+        let entry = buckets.entry(bucket).or_default();
+        entry.0 += 1;
+        if let Some(top) = found.first() {
+            let answer = match &top.subtitle {
+                Some(sub) => format!("{}: {sub}", top.series),
+                None => top.series.clone(),
             };
-            if !grade_ok(&answer, title) {
+            if grade_ok(&top.series, title) {
+                series_right += 1;
+            }
+            if grade_ok(&answer, title) {
+                top_right += 1;
+                entry.1 += 1;
+            } else {
                 wrong.push((stem, answer, title));
             }
         }
     }
 
-    // Every silent false positive, named. A bare percentage cannot be audited,
-    // and the published 0.48% was reached by hand-sampling failures.
+    // Every wrong top suggestion, named. A bare percentage cannot be audited.
     for (stem, answer, title) in &wrong {
-        println!("silent FP  {stem}\n    said {answer:?}\n    want {title:?}");
+        println!("wrong top  {stem}\n    said {answer:?}\n    want {title:?}");
+    }
+    println!("\ngraded rows by suggestion count, {rows} total");
+    for (name, (n, right)) in &buckets {
+        println!(
+            "  {n:5}  {:5.1}%  {name}  (top is right: {right})",
+            percent(*n, rows)
+        );
     }
 
-    let mut breakdown: Vec<(&str, usize)> = why.into_iter().collect();
-    breakdown.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
-    println!("\ngraded rows by status, {rows} total");
-    for (name, n) in breakdown {
-        println!("  {n:5}  {:5.1}%  {name}", percent(n, rows));
-    }
-
-    Ok(Rates {
-        located: percent(located, heldout),
-        ready: percent(ready, rows),
-        silent_false_positive: percent(wrong.len(), rows),
-    })
-}
-
-fn label(status: &Status) -> &'static str {
-    match status {
-        Status::Ready(_) | Status::Mapped => "ready",
-        Status::Unmapped => "unmapped",
-        Status::Failed => "failed - no series matched",
-        Status::Review(ReviewReason::Ambiguous(_)) => "review - ambiguous",
-        Status::Review(ReviewReason::UnsplitSubtitle(_)) => "review - unsplit subtitle",
-        Status::Review(ReviewReason::NoLanguageMatch) => "review - no language match",
-        Status::Review(ReviewReason::VolumeInfeasible) => "review - volume infeasible",
-    }
+    println!(
+        "\nlocated              {:>5.1}%   (held-out, {heldout} names)",
+        percent(located, heldout)
+    );
+    println!(
+        "series accuracy      {:>5.1}%   (top suggestion's series alone: a squashed subtitle is not a wrong series)",
+        percent(series_right, rows)
+    );
+    println!(
+        "suggestion accuracy  {:>5.1}%   (top suggestion vs verified title, {rows} rows)",
+        percent(top_right, rows)
+    );
+    Ok(())
 }
 
 fn percent(hit: usize, total: usize) -> f64 {
@@ -137,25 +144,6 @@ fn percent(hit: usize, total: usize) -> f64 {
         return 0.0;
     }
     hit as f64 * 100.0 / total as f64
-}
-
-fn report(rates: Rates) {
-    let gate = |ok: bool| if ok { "pass" } else { "FAIL" };
-    println!(
-        "\nlocated  {:>5.1}%   gate >= 92.3%   {}",
-        rates.located,
-        gate(rates.located >= 92.3)
-    );
-    println!(
-        "ready    {:>5.1}%   gate >= 66.0%   {}",
-        rates.ready,
-        gate(rates.ready >= 66.0)
-    );
-    println!(
-        "silent FP {:>5.2}%  gate <= 0.48%   {}",
-        rates.silent_false_positive,
-        gate(rates.silent_false_positive <= 0.48)
-    );
 }
 
 /// Mirrors the CLI's own cache location so the two share one download.

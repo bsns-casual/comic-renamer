@@ -20,32 +20,9 @@ pub enum Mechanism {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Basis {
-    Override,
-    Unambiguous,
-    /// Narrowed by the publisher inferred from the source folder (§6.3 step 2).
-    Publisher,
-    VolumeFeasibility,
-    ShortestRun,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ReviewReason {
-    Ambiguous(Vec<SeriesRecord>),
-    UnsplitSubtitle(String),
-    NoLanguageMatch,
-    VolumeInfeasible,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
-    Ready(Basis),
-    Review(ReviewReason),
-    Failed,
-    /// Found in the mapping. A later task removes the three variants above.
+    /// Found in the mapping.
     Mapped,
     Unmapped,
 }
@@ -57,6 +34,28 @@ pub struct SeriesRecord {
     pub language: String,
     pub year_began: u16,
     pub run: u32,
+}
+
+/// A proposed answer for a file nobody has mapped yet. Never stored without a
+/// keystroke (D49): a picker shows these, a human confirms or types over them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Suggestion {
+    pub series: String,
+    pub volume: Option<u32>,
+    pub subtitle: Option<String>,
+    /// The corpus's `issue_count` for this record; the preset's `run`.
+    pub volume_count: Option<u32>,
+    pub source: SuggestionSource,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SuggestionSource {
+    /// The GCD corpus (or a Layer B correction to it).
+    Corpus,
+    /// The filename itself, title-cased and parsed.
+    Filename,
+    /// No guess. A caller that has nothing to show says so with this.
+    None,
 }
 
 /// Not `Serialize`: a plan row carries these fields flattened, so a plan can

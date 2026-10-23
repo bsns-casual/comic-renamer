@@ -5,8 +5,8 @@ mod common;
 
 use comic_renamer_core::corpus::{ensure_corpus, load_manifest, Corpus, Manifest};
 use comic_renamer_core::overrides::Overrides;
-use comic_renamer_core::resolve::{publisher_hint, resolve};
-use comic_renamer_core::types::{Basis, CorpusError, PublisherHint, Status};
+use comic_renamer_core::resolve::{corpus_ladder, publisher_hint, Context};
+use comic_renamer_core::types::{CorpusError, PublisherHint, Suggestion};
 use common::{manifest_for, write_db};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -47,6 +47,27 @@ fn manifest_with_wrong_hash() -> (TempDir, Manifest) {
     manifest.sha256 = "0".repeat(64);
     manifest.size_bytes = body.len() as u64;
     (dir, manifest)
+}
+
+/// The ladder as the old `resolve` was called.
+fn resolve(
+    stem: &str,
+    source_folder: &str,
+    hint: &PublisherHint,
+    corpus: &Corpus,
+    overrides: &Overrides,
+    lang: &str,
+) -> Option<Vec<Suggestion>> {
+    let ctx = Context { source_folder, hint: hint.clone(), overrides: Some(overrides), lang };
+    corpus_ladder(stem, corpus, &ctx)
+}
+
+/// What the old `Ready` meant: the ladder settled on exactly one answer.
+fn settled(found: &Option<Vec<Suggestion>>) -> Option<&Suggestion> {
+    match found.as_deref() {
+        Some([only]) => Some(only),
+        _ => None,
+    }
 }
 
 fn tiny_corpus(dir: &TempDir, rows: &[common::Row<'_>]) -> Corpus {
@@ -159,12 +180,15 @@ fn the_real_release_installs_and_opens() {
         &overrides,
         "en",
     );
-    assert_eq!(resolved.status, Status::Ready(Basis::ShortestRun));
-    let record = resolved.record.unwrap();
-    assert_eq!(
-        (record.name.as_str(), record.publisher.as_str(), record.year_began),
-        ("Velvet", "Image", 2014)
-    );
+    let chosen = settled(&resolved).expect("shortest run settles on one record");
+    // Image 2014 is the shortest English run; the suggestion carries its run.
+    let image_2014 = corpus
+        .lookup("velvet")
+        .iter()
+        .find(|r| r.language == "en" && r.publisher == "Image" && r.year_began == 2014)
+        .expect("Image 2014 is in the real corpus");
+    assert_eq!(chosen.series, "Velvet");
+    assert_eq!(chosen.volume_count, Some(image_2014.run));
 
     // The boundary-guard case the kill test found: a naive longest-prefix
     // match resolves this to the series *Witch*.
@@ -176,7 +200,7 @@ fn the_real_release_installs_and_opens() {
         &overrides,
         "en",
     );
-    assert_eq!(witcher.series, "The Witcher Omnibus");
+    assert_eq!(settled(&witcher).unwrap().series, "The Witcher Omnibus");
 }
 
 #[test]
@@ -385,23 +409,24 @@ fn the_publisher_hint_does_not_make_titles_worse() {
         }
         let with = resolve(stem, bundle, &hint, &corpus, &overrides, "en");
         let without = resolve(stem, bundle, &PublisherHint(None), &corpus, &overrides, "en");
-        if with.series == without.series {
+        let with_name = settled(&with).map(|s| s.series.clone());
+        let without_name = settled(&without).map(|s| s.series.clone());
+        if with_name == without_name {
             continue;
         }
         changed += 1;
         let truth_key = key(title);
-        let hit = |s: &str| !s.is_empty() && truth_key.starts_with(&key(s));
-        // A row that goes to review is a safe outcome, not a wrong one. Only
-        // a *different, confidently asserted* title counts as worse — that is
-        // the silent-wrongness path §4 forbids.
-        let asserted = !with.series.is_empty();
-        match (hit(&with.series), hit(&without.series)) {
+        let hit = |s: &Option<String>| s.as_ref().is_some_and(|s| truth_key.starts_with(&key(s)));
+        // Several candidates is a safe outcome, not a wrong one. Only a
+        // *different, single* title counts as worse -- that is the path where
+        // a picker's default would be wrong.
+        let asserted = with_name.is_some();
+        match (hit(&with_name), hit(&without_name)) {
             (true, false) => better += 1,
             (false, true) if asserted => {
                 worse += 1;
                 println!(
-                    "  WORSE  stem={stem}\n         truth={title}\n         with-hint={} ({:?})",
-                    with.series, with.status
+                    "  WORSE  stem={stem}\n         truth={title}\n         with-hint={with_name:?}"
                 );
             }
             (false, true) => demoted += 1,
@@ -442,35 +467,33 @@ fn report_coverage_over_the_heldout_set() {
         // No folder hint: §6.3's "the no-publisher case is the common case".
         let r = resolve(stem, "", &PublisherHint(None), &corpus, &overrides, "en");
         total += 1;
-        let bucket = match &r.status {
-            Status::Ready(_) => {
+        let bucket = match r.as_deref() {
+            Some([_]) => {
                 ready += 1;
                 located += 1;
-                "ready"
+                "one suggestion"
             }
-            Status::Review(reason) => {
+            Some([]) => {
                 located += 1;
-                match reason {
-                    comic_renamer_core::types::ReviewReason::Ambiguous(_) => "review:ambiguous",
-                    comic_renamer_core::types::ReviewReason::UnsplitSubtitle(_) => "review:subtitle",
-                    comic_renamer_core::types::ReviewReason::NoLanguageMatch => "review:language",
-                    comic_renamer_core::types::ReviewReason::VolumeInfeasible => "review:volume",
-                }
+                "refused (language or volume)"
             }
-            Status::Mapped | Status::Unmapped => unreachable!("resolve() never returns a mapping status"),
-            Status::Failed => {
+            Some(_) => {
+                located += 1;
+                "several suggestions"
+            }
+            None => {
                 if std::env::var("SHOW_FAILURES").is_ok() {
                     println!("  FAIL {stem}");
                 }
-                "failed"
+                "nothing matched"
             }
         };
         *buckets.entry(bucket).or_default() += 1;
     }
     let pct = |n: usize| 100.0 * n as f64 / total as f64;
     println!("heldout: {total} names");
-    println!("  located {:.1}%   gate >= 92.3%", pct(located));
-    println!("  ready   {:.1}%   gate >= 66.0%", pct(ready));
+    println!("  located {:.1}%", pct(located));
+    println!("  one suggestion {:.1}%", pct(ready));
     for (bucket, count) in &buckets {
         println!("  {bucket:<18} {:>5.1}%  ({count})", pct(*count));
     }

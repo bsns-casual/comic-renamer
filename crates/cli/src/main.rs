@@ -10,10 +10,14 @@
 
 use clap::{Parser, Subcommand};
 use comic_renamer_core::fsops::{find_collisions, is_dataless};
+use comic_renamer_core::corpus::{ensure_corpus, parse_manifest, Corpus};
 use comic_renamer_core::mapping::Mappings;
+use comic_renamer_core::overrides::Overrides;
 use comic_renamer_core::preset::{preset_by_id, Preset};
+use comic_renamer_core::resolve::{publisher_hint, suggest_with, Context};
 use comic_renamer_core::types::{
-    human_bytes as size, Collision, Mechanism, Mode, PlanRow, Progress, ScanOpts, Status,
+    human_bytes as size, Collision, Mechanism, Mode, PlanRow, Progress, PublisherHint, ScanOpts,
+    Status,
     UndoReport,
 };
 use comic_renamer_core::{apply, komga_api, plan, scan};
@@ -26,9 +30,6 @@ use std::process::ExitCode;
 /// directory.
 const SHIPPED_MAPPINGS: &str = include_str!("../../../data/mappings/shipped.tsv");
 
-// The corpus and overrides no longer feed `scan`; Task 6 returns them as the
-// suggestion layer behind an optional corpus, so they stay compiled in.
-#[allow(dead_code)]
 /// Pinned at build time (§6.5): the repository holds the manifest, the tool
 /// fetches and hash-verifies the corpus on first use, then caches it.
 const MANIFEST: &str = include_str!("../../../corpus/manifest.json");
@@ -38,7 +39,6 @@ const MANIFEST: &str = include_str!("../../../corpus/manifest.json");
 /// rely on. Layer B is first-party data that CI validates (§6.2.1); a
 /// user-supplied overrides file is Phase 3, when §6.11's caps on contributed
 /// rule data exist to make it safe.
-#[allow(dead_code)]
 const OVERRIDES: &str = include_str!("../../../data/overrides.toml");
 
 /// Enough to act on, not a wall of text. The rest are counted.
@@ -69,6 +69,12 @@ enum Command {
         /// Which language's editions to match. Never falls back to another.
         #[arg(long, default_value = "en")]
         lang: String,
+        /// Which marketplace the files came from. Decides how an unmapped
+        /// file is guessed at; only Humble consults the corpus.
+        // shortcut: a flag with a Humble default (D12: bundles are the
+        // evaluation input); the mapping file will record it per file (§5.3.1).
+        #[arg(long, default_value = "Humble")]
+        marketplace: String,
         /// Relocate the files; the originals stop existing. The default.
         #[arg(long = "move")]
         move_: bool,
@@ -123,6 +129,7 @@ fn main() -> ExitCode {
             out,
             preset,
             lang,
+            marketplace,
             // Move is the default, so `--move` states it rather than
             // changing it. clap enforces that the two cannot both be set.
             move_: _,
@@ -133,6 +140,7 @@ fn main() -> ExitCode {
             out,
             preset,
             lang,
+            marketplace,
             if copy { Mode::Copy } else { Mode::Move },
         ),
         Command::Apply {
@@ -162,8 +170,14 @@ fn run_scan(
     out: Option<PathBuf>,
     preset: String,
     lang: String,
+    marketplace: String,
     mode: Mode,
 ) -> Result<(), String> {
+    let folder = source
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let guess_lang = lang.clone();
     // shortcut: shipped mappings only; the user's local file arrives with the
     // `map` command, which also owns where it lives.
     let mappings = Mappings::load(SHIPPED_MAPPINGS, None).map_err(|e| e.to_string())?;
@@ -190,10 +204,47 @@ fn run_scan(
     plan::write(&header, &rows, &destination).map_err(|e| e.to_string())?;
 
     summarise(&rows, &unmapped, header.required_bytes, header.download_bytes);
+    suggest_for(&unmapped, &marketplace, &folder, &guess_lang);
     println!("\nplan written to {}", destination.display());
     println!("Nothing has been moved. Review it, then:");
     println!("  comic-renamer apply {}", destination.display());
     Ok(())
+}
+
+/// Guesses for the unmapped files, printed and never saved (D49). The corpus is
+/// fetched here and only here: a session with nothing unmapped never needs it,
+/// and a fetch that fails costs the guesses, not the scan.
+fn suggest_for(unmapped: &[PathBuf], marketplace: &str, folder: &str, lang: &str) {
+    if unmapped.is_empty() {
+        return;
+    }
+    let corpus = if marketplace.to_ascii_lowercase().starts_with("humble") {
+        open_corpus().map_err(|e| eprintln!("no corpus, guessing from filenames only: {e}")).ok()
+    } else {
+        None
+    };
+    let overrides = Overrides::parse(OVERRIDES).ok();
+    let ctx = Context {
+        source_folder: folder,
+        hint: corpus.as_ref().map_or(PublisherHint(None), |c| publisher_hint(folder, c)),
+        overrides: overrides.as_ref(),
+        lang,
+    };
+    println!("
+guesses for the unmapped files (nothing is saved):");
+    for path in unmapped.iter().take(COLLISIONS_SHOWN) {
+        let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+        let found = suggest_with(&stem, marketplace, corpus.as_ref(), &ctx);
+        let shown: Vec<String> = found.iter().map(|s| s.series.clone()).collect();
+        let shown = if shown.is_empty() { "no guess".to_string() } else { shown.join(" | ") };
+        println!("    {stem}  ->  {shown}");
+    }
+}
+
+fn open_corpus() -> Result<Corpus, String> {
+    let manifest = parse_manifest(MANIFEST).map_err(|e| e.to_string())?;
+    let db = ensure_corpus(&manifest, &cache_dir()?).map_err(|e| e.to_string())?;
+    Corpus::open(&db, &manifest).map_err(|e| e.to_string())
 }
 
 fn summarise(rows: &[PlanRow], unmapped: &[PathBuf], required: u64, download: u64) {
@@ -651,7 +702,6 @@ fn plural(n: usize, noun: &str) -> String {
 }
 
 /// `$XDG_CACHE_HOME/comic-renamer`, or `~/Library/Caches/comic-renamer`.
-#[allow(dead_code)] // Task 6: the optional corpus is fetched into it
 fn cache_dir() -> Result<PathBuf, String> {
     if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
         return Ok(PathBuf::from(xdg).join("comic-renamer"));
@@ -665,8 +715,6 @@ fn cache_dir() -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use comic_renamer_core::overrides::Overrides;
-
     const GIB: u64 = 1 << 30;
 
     fn facts(mode: Mode, cross_volume: bool) -> Facts {

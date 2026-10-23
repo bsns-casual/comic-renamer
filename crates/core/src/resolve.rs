@@ -1,47 +1,184 @@
-//! The ladder (§6.3). Filenames only — never opens a file (invariant 5).
+//! The suggestion layer (D53). Filenames only -- never opens a file (invariant 5).
+//!
+//! Nothing here is an authority. `suggest` proposes an answer for a file no
+//! mapping covers, and a human confirms it; nothing it returns is stored
+//! without a keystroke (D49). The strategy depends on the marketplace, because
+//! the corpus is the wrong engine for most of them.
 
 use crate::corpus::Corpus;
 use crate::normalize::squash;
 use crate::overrides::Overrides;
 use crate::residue::{eat, strip_cruft, Token};
-use crate::types::{Basis, PublisherHint, Resolved, ReviewReason, SeriesRecord, Status};
+use crate::title::parse_title;
+use crate::types::{PublisherHint, SeriesRecord, Suggestion, SuggestionSource};
+
+/// What the corpus strategy needs beyond the stem. `suggest` uses the default
+/// (English, no folder hint, no Layer B); `suggest_with` takes the real thing.
+pub struct Context<'a> {
+    /// Layer B keys on it: a bare filename key recurs across publishers.
+    pub source_folder: &'a str,
+    pub hint: PublisherHint,
+    pub overrides: Option<&'a Overrides>,
+    pub lang: &'a str,
+}
+
+impl Default for Context<'_> {
+    fn default() -> Self {
+        Context { source_folder: "", hint: PublisherHint(None), overrides: None, lang: "en" }
+    }
+}
+
+/// Proposes answers for `stem`. Never errors: with no corpus, or no match, the
+/// filename strategy still produces a guess, and "no guess" is an empty list.
+pub fn suggest(stem: &str, marketplace: &str, corpus: Option<&Corpus>) -> Vec<Suggestion> {
+    suggest_with(stem, marketplace, corpus, &Context::default())
+}
+
+pub fn suggest_with(
+    stem: &str,
+    marketplace: &str,
+    corpus: Option<&Corpus>,
+    ctx: &Context,
+) -> Vec<Suggestion> {
+    let is_humble = marketplace.to_ascii_lowercase().starts_with("humble");
+    if is_humble {
+        if let Some(found) = corpus.and_then(|c| corpus_ladder(stem, c, ctx)) {
+            // `Some(empty)` is a refusal (wrong language, infeasible volume):
+            // the corpus knew the series and said no. A filename guess would
+            // be the silent fallback D33 forbids.
+            return found;
+        }
+    }
+    filename_suggestion(stem, marketplace, is_humble).into_iter().collect()
+}
+
+/// Title-case a kebab or snake stem and parse it. The marketplace only decides
+/// what noise to drop first (§5.3.1): nothing is stripped from the mapping key,
+/// but a *guess* is better without a release counter or an ISBN in it.
+fn filename_suggestion(stem: &str, marketplace: &str, humble: bool) -> Option<Suggestion> {
+    let mk = marketplace.to_ascii_lowercase();
+    let mut base = stem.to_string();
+    if humble {
+        base = strip_cruft(&base);
+    } else if mk.starts_with("global") {
+        // `hammer-head-1_release-0001_978-...`: the title is the first segment,
+        // and its trailing number is the issue.
+        base = base.split('_').next().unwrap_or("").to_string();
+        base = trailing_number_to_issue(&base);
+    } else if mk.starts_with("sweet") {
+        base = sweet_shop_title(&base);
+    }
+
+    let words: Vec<&str> = base
+        .split(|c: char| c == '-' || c == '_' || c.is_whitespace())
+        .filter(|w| !w.is_empty())
+        .collect();
+    if words.is_empty() {
+        return None;
+    }
+    // A stem that already carries capitals is the title (Fanatical); only an
+    // all-lowercase kebab name needs casing.
+    let text = if base.chars().any(|c| c.is_uppercase()) {
+        words.join(" ")
+    } else {
+        title_case(&words)
+    };
+    let parsed = parse_title(&text);
+    if parsed.series.is_empty() {
+        return None;
+    }
+    Some(Suggestion {
+        series: parsed.series,
+        volume: parsed.volume,
+        subtitle: parsed.subtitle,
+        volume_count: None,
+        source: SuggestionSource::Filename,
+    })
+}
+
+/// `-issue-3`, `-anthology`, `-graphicnovel`: the type suffix is not a title.
+/// The issue number is kept as `#3`, which the title parser drops.
+fn sweet_shop_title(s: &str) -> String {
+    for suffix in ["-anthology", "-graphicnovel"] {
+        if let Some(t) = s.strip_suffix(suffix) {
+            return t.to_string();
+        }
+    }
+    if let Some((t, n)) = s.rsplit_once("-issue-") {
+        if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) {
+            return format!("{t}-#{n}");
+        }
+    }
+    s.to_string()
+}
+
+fn trailing_number_to_issue(s: &str) -> String {
+    match s.rsplit_once('-') {
+        Some((t, n)) if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => {
+            format!("{t}-#{n}")
+        }
+        _ => s.to_string(),
+    }
+}
+
+/// Capitalises each word, leaving small words lowercase after the first.
+// shortcut: a fixed English list; it cannot know `DIE` is an acronym or where
+// a colon goes, which is why nothing it returns is stored without a keystroke.
+fn title_case(words: &[&str]) -> String {
+    const SMALL: [&str; 11] = ["a", "an", "and", "of", "the", "in", "on", "to", "for", "or", "at"];
+    words
+        .iter()
+        .enumerate()
+        .map(|(i, w)| {
+            if i > 0 && SMALL.contains(w) {
+                return w.to_string();
+            }
+            let mut cs = w.chars();
+            match cs.next() {
+                Some(f) => f.to_uppercase().chain(cs).collect(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<String>>()
+        .join(" ")
+}
+
+fn corpus_suggestion(
+    series: &str,
+    volume: Option<u32>,
+    subtitle: &Option<String>,
+    run: Option<u32>,
+) -> Suggestion {
+    Suggestion {
+        series: series.to_string(),
+        volume,
+        subtitle: subtitle.clone(),
+        volume_count: run,
+        source: SuggestionSource::Corpus,
+    }
+}
 
 /// Longest-prefix with the boundary guard, then language (hard filter, no
-/// fallback — D33), publisher hint, volume feasibility, shortest run last.
+/// fallback -- D33), publisher hint, volume feasibility, shortest run last.
 /// Shortest-run fires only when a volume token is present.
 ///
-/// `source_folder` is here because Layer B keys on it: a bare filename key
-/// recurs across publishers, so an override is unreachable without it.
-pub fn resolve(
-    stem: &str,
-    source_folder: &str,
-    hint: &PublisherHint,
-    corpus: &Corpus,
-    overrides: &Overrides,
-    lang: &str,
-) -> Resolved {
+/// `None` means the corpus found nothing at all. `Some(empty)` means it found
+/// the series and refused (language, volume). `Some(several)` is ambiguity:
+/// every candidate, never a silent pick (§6.3 step 5).
+pub fn corpus_ladder(stem: &str, corpus: &Corpus, ctx: &Context) -> Option<Vec<Suggestion>> {
     let cleaned = strip_cruft(stem);
 
     // Layer B first: it is the only place a wrong corpus match is correctable
     // (§6.2.1), so it has to outrank the corpus, not supplement it.
-    if let Some(entry) = overrides
-        .lookup(stem, source_folder)
-        .or_else(|| overrides.lookup(&cleaned, source_folder))
-    {
-        return Resolved {
-            series: entry.series.clone(),
-            volume: entry.volume,
-            subtitle: entry.subtitle.clone(),
-            run: 0,
-            status: Status::Ready(Basis::Override),
-            record: None,
-        };
+    if let Some(entry) = ctx.overrides.and_then(|o| {
+        o.lookup(stem, ctx.source_folder)
+            .or_else(|| o.lookup(&cleaned, ctx.source_folder))
+    }) {
+        return Some(vec![corpus_suggestion(&entry.series, entry.volume, &entry.subtitle, None)]);
     }
 
     let key = squash(&cleaned);
-    let Some((matched, candidates)) = longest_clean_prefix(&cleaned, &key, corpus) else {
-        return failed();
-    };
+    let (matched, candidates) = longest_clean_prefix(&cleaned, &key, corpus)?;
 
     let residue = eat(&key[matched..]);
     let volume = residue.tokens.iter().find_map(|t| match t {
@@ -49,29 +186,27 @@ pub fn resolve(
         _ => None,
     });
     let subtitle = (!residue.leftover.is_empty()).then(|| residue.leftover.clone());
+    let all = |records: &[SeriesRecord]| -> Vec<Suggestion> {
+        records
+            .iter()
+            .map(|r| corpus_suggestion(&r.name, volume, &subtitle, Some(r.run)))
+            .collect()
+    };
 
     // 1. Language: a hard filter that never falls back (D33). A silent
     //    fallback caused 6 of the 7 errors across 2,223 graded rows.
     let in_language: Vec<SeriesRecord> = candidates
         .iter()
-        .filter(|r| r.language == lang)
+        .filter(|r| r.language == ctx.lang)
         .cloned()
         .collect();
     if in_language.is_empty() {
-        return Resolved {
-            series: String::new(),
-            volume,
-            subtitle,
-            run: 0,
-            status: Status::Review(ReviewReason::NoLanguageMatch),
-            record: None,
-        };
+        return Some(Vec::new());
     }
 
     // 2. Publisher inferred from the folder: a preference, not a filter.
     let mut narrowed = in_language.clone();
-    let mut basis = Basis::Unambiguous;
-    if let PublisherHint(Some(publisher)) = hint {
+    if let PublisherHint(Some(publisher)) = &ctx.hint {
         let preferred: Vec<SeriesRecord> = narrowed
             .iter()
             .filter(|r| r.publisher == *publisher)
@@ -79,7 +214,6 @@ pub fn resolve(
             .collect();
         if !preferred.is_empty() && preferred.len() < narrowed.len() {
             narrowed = preferred;
-            basis = Basis::Publisher;
         }
     }
 
@@ -96,97 +230,40 @@ pub fn resolve(
             // This matters because `issue_count` counts one publisher's run,
             // not a collected-edition line. *Lady Mechanika* Vol. 6 is real,
             // but the English line spans Aspen, Benitez and Image and no
-            // single record reaches 6 — so narrowing to Image first made a
+            // single record reaches 6 -- so narrowing to Image first made a
             // legitimate book infeasible.
             let line: Vec<SeriesRecord> =
                 in_language.iter().filter(|r| r.run >= v).cloned().collect();
             if line.is_empty() {
                 // Review Focus 2: no record of this series, under any
                 // publisher, holds that many volumes.
-                return Resolved {
-                    series: String::new(),
-                    volume,
-                    subtitle,
-                    run: 0,
-                    status: Status::Review(ReviewReason::VolumeInfeasible),
-                    record: None,
-                };
+                return Some(Vec::new());
             }
             narrowed = line;
-            basis = Basis::VolumeFeasibility;
         } else {
-            if feasible.len() < narrowed.len() {
-                basis = Basis::VolumeFeasibility;
-            }
             narrowed = feasible;
         }
     }
 
     // 4. Shortest feasible run, and only with a volume in hand: without one,
     //    two records are still two records (§6.3).
-    let chosen = if narrowed.len() == 1 {
-        narrowed.remove(0)
-    } else if volume.is_some() {
+    if narrowed.len() == 1 {
+        return Some(all(&narrowed));
+    }
+    if volume.is_some() {
         // A tie on run means shortest-run has decided nothing. Breaking it on
         // year_began silently reinstates "prefer the earliest edition", which
         // D28 withdraws *by name* for resolving Velvet_vol1 to Malibu 1993
         // inside an Image bundle. §6.3 step 5: never silently pick.
         let shortest = narrowed.iter().map(|r| r.run).min().expect("non-empty");
-        let mut tied: Vec<SeriesRecord> = narrowed
-            .iter()
-            .filter(|r| r.run == shortest)
-            .cloned()
-            .collect();
-        if tied.len() > 1 {
-            return Resolved {
-                series: String::new(),
-                volume,
-                subtitle,
-                run: 0,
-                status: Status::Review(ReviewReason::Ambiguous(narrowed)),
-                record: None,
-            };
+        let tied: Vec<SeriesRecord> =
+            narrowed.iter().filter(|r| r.run == shortest).cloned().collect();
+        if tied.len() == 1 {
+            return Some(all(&tied));
         }
-        basis = Basis::ShortestRun;
-        tied.remove(0)
-    } else {
-        // 5. Still ambiguous → review, every candidate listed. Never pick.
-        return Resolved {
-            series: String::new(),
-            volume,
-            subtitle,
-            run: 0,
-            status: Status::Review(ReviewReason::Ambiguous(narrowed)),
-            record: None,
-        };
-    };
-
-    // D15: a subtitle arrives squashed and Phase 1 has no source for the
-    // split, so it is carried whole and the row is reviewed.
-    let status = match &subtitle {
-        Some(s) => Status::Review(ReviewReason::UnsplitSubtitle(s.clone())),
-        None => Status::Ready(basis),
-    };
-    Resolved {
-        series: chosen.name.clone(),
-        volume,
-        subtitle,
-        run: chosen.run,
-        status,
-        record: Some(chosen),
     }
-}
-
-/// A failed row carries no guessed title — that is the whole point of it.
-fn failed() -> Resolved {
-    Resolved {
-        series: String::new(),
-        volume: None,
-        subtitle: None,
-        run: 0,
-        status: Status::Failed,
-        record: None,
-    }
+    // 5. Still ambiguous: every candidate listed, which is a picker's list.
+    Some(all(&narrowed))
 }
 
 /// Longest prefix of `key` that hits the index **and** ends on a clean

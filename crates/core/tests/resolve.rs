@@ -5,10 +5,35 @@
 mod common;
 
 use comic_renamer_core::overrides::Overrides;
-use comic_renamer_core::resolve::{publisher_hint, resolve};
-use comic_renamer_core::types::{Basis, PublisherHint, ReviewReason, Status};
+use comic_renamer_core::resolve::{corpus_ladder, publisher_hint, Context};
+use comic_renamer_core::types::{PublisherHint, Suggestion, SuggestionSource};
 use common::corpus;
 use tempfile::TempDir;
+
+/// The ladder as the old `resolve` was called. `None` is "the corpus found
+/// nothing"; `Some(empty)` is "found it and refused"; several is ambiguity.
+fn resolve(
+    stem: &str,
+    source_folder: &str,
+    hint: &PublisherHint,
+    corpus: &comic_renamer_core::corpus::Corpus,
+    overrides: &Overrides,
+    lang: &str,
+) -> Option<Vec<Suggestion>> {
+    let ctx = Context {
+        source_folder,
+        hint: hint.clone(),
+        overrides: Some(overrides),
+        lang,
+    };
+    corpus_ladder(stem, corpus, &ctx)
+}
+
+fn only(found: Option<Vec<Suggestion>>) -> Suggestion {
+    let found = found.expect("the corpus matched");
+    assert_eq!(found.len(), 1, "expected exactly one suggestion, got {found:?}");
+    found.into_iter().next().unwrap()
+}
 
 fn no_hint() -> PublisherHint {
     PublisherHint(None)
@@ -78,7 +103,7 @@ const NO_FOLDER: &str = "";
 fn boundary_guard_rejects_a_midword_prefix() {
     let (_d, c) = witch_and_witcher();
     assert_eq!(
-        resolve("witcheromnibus", NO_FOLDER, &no_hint(), &c, &no_ov(), "en").series,
+        only(resolve("witcheromnibus", NO_FOLDER, &no_hint(), &c, &no_ov(), "en")).series,
         "The Witcher Omnibus"
     );
 }
@@ -89,38 +114,41 @@ fn a_midword_prefix_with_no_longer_match_fails_rather_than_guessing() {
     // must not resolve to it. This is the case that produced the guard.
     let (_d, c) = corpus(&[("Witch", "witch", "Marvel", "en", 2004, 3)]);
     assert_eq!(
-        resolve("witcheromnibus", NO_FOLDER, &no_hint(), &c, &no_ov(), "en").status,
-        Status::Failed
+        resolve("witcheromnibus", NO_FOLDER, &no_hint(), &c, &no_ov(), "en"),
+        None
     );
 }
 
 #[test]
 fn bare_title_with_three_records_is_ambiguous() {
     let (_d, c) = three_velvets();
-    assert!(matches!(
-        resolve("velvet", NO_FOLDER, &no_hint(), &c, &no_ov(), "en").status,
-        Status::Review(ReviewReason::Ambiguous(_))
-    ));
+    let found = resolve("velvet", NO_FOLDER, &no_hint(), &c, &no_ov(), "en").unwrap();
+    assert_eq!(found.len(), 3, "every candidate is listed, none picked");
+    // The runs differ, so the picker can tell the three Velvets apart.
+    let mut runs: Vec<_> = found.iter().map(|s| s.volume_count).collect();
+    runs.sort();
+    assert_eq!(runs, [Some(3), Some(4), Some(15)]);
 }
 
 #[test]
 fn same_records_with_a_volume_resolve_by_shortest_run() {
     let (_d, c) = three_velvets();
-    let r = resolve("velvet_vol1", NO_FOLDER, &no_hint(), &c, &no_ov(), "en");
-    assert_eq!(r.status, Status::Ready(Basis::ShortestRun));
-    // The shortest feasible run is Image 2014, not the oldest edition —
-    // "prefer the earliest" was withdrawn for picking Malibu 1993.
-    assert_eq!(r.record.as_ref().unwrap().year_began, 2014);
+    let r = only(resolve("velvet_vol1", NO_FOLDER, &no_hint(), &c, &no_ov(), "en"));
+    // The shortest feasible run is Image 2014 (3 volumes), not the oldest
+    // edition -- "prefer the earliest" was withdrawn for picking Malibu 1993.
+    assert_eq!(r.volume_count, Some(3));
+    assert_eq!(r.source, SuggestionSource::Corpus);
 }
 
 #[test]
 fn volume_infeasible_goes_to_review() {
     // Review Focus 2
     let (_d, c) = short_runs();
-    assert!(matches!(
-        resolve("someseries_vol13", NO_FOLDER, &no_hint(), &c, &no_ov(), "en").status,
-        Status::Review(ReviewReason::VolumeInfeasible)
-    ));
+    assert_eq!(
+        resolve("someseries_vol13", NO_FOLDER, &no_hint(), &c, &no_ov(), "en"),
+        Some(Vec::new()),
+        "the series was found and refused: no suggestion, and not a miss"
+    );
 }
 
 #[test]
@@ -128,8 +156,7 @@ fn language_never_falls_back() {
     // D33
     let (_d, c) = japanese_only();
     let r = resolve("noragami_vol3", NO_FOLDER, &no_hint(), &c, &no_ov(), "en");
-    assert!(matches!(r.status, Status::Review(ReviewReason::NoLanguageMatch)));
-    assert!(r.record.is_none());
+    assert_eq!(r, Some(Vec::new()), "a Japanese record is never offered for English");
 }
 
 #[test]
@@ -137,16 +164,17 @@ fn publisher_hint_breaks_a_tie() {
     let (_d, c) = two_masks();
     let h = publisher_hint("HumbleDarkHorseAnniversaryBundle", &c);
     assert_eq!(h.0.as_deref(), Some("Dark Horse"));
-    let r = resolve(
+    let r = only(resolve(
         "maskomnibusvolume1secondedition",
         "HumbleDarkHorseAnniversaryBundle",
         &h,
         &c,
         &no_ov(),
         "en",
-    );
+    ));
     assert_eq!(r.series, "The Mask Omnibus");
-    assert_eq!(r.record.as_ref().unwrap().publisher, "Dark Horse");
+    // Dark Horse's record has a run of 2; Titan's has 3.
+    assert_eq!(r.volume_count, Some(2));
 }
 
 #[test]
@@ -160,18 +188,16 @@ fn no_publisher_signal_is_the_common_case_not_an_error() {
 fn an_override_wins_and_is_reachable() {
     let (_d, c) = gcd_subset();
     let (_o, ov) = twd_overrides();
-    let r = resolve(
+    let r = only(resolve(
         "TWD_CompendiumOne",
         "HumbleImageComicsInThe10s",
         &no_hint(),
         &c,
         &ov,
         "en",
-    );
-    assert_eq!(
-        (r.series.as_str(), r.status),
-        ("The Walking Dead", Status::Ready(Basis::Override))
-    );
+    ));
+    assert_eq!(r.series, "The Walking Dead");
+    assert_eq!(r.volume_count, None, "an override names no record");
 }
 
 #[test]
@@ -179,31 +205,30 @@ fn an_override_from_the_wrong_bundle_does_not_fire() {
     let (_d, c) = gcd_subset();
     let (_o, ov) = twd_overrides();
     let r = resolve("TWD_CompendiumOne", "HumbleBoomBundle", &no_hint(), &c, &ov, "en");
-    assert_ne!(r.status, Status::Ready(Basis::Override));
+    assert_eq!(r, None, "the override did not fire and the corpus has no such series");
 }
 
 #[test]
 fn a_subtitle_is_carried_and_marked_review() {
     // D15
     let (_d, c) = gcd_subset();
-    let r = resolve(
+    let r = only(resolve(
         "hellboyomnibusvolume1_seedofdestruction",
         NO_FOLDER,
         &no_hint(),
         &c,
         &no_ov(),
         "en",
-    );
+    ));
     assert_eq!(r.subtitle.as_deref(), Some("seedofdestruction"));
-    assert!(matches!(r.status, Status::Review(ReviewReason::UnsplitSubtitle(_))));
 }
 
 #[test]
 fn an_unknown_series_fails_rather_than_matching_something() {
     let (_d, c) = gcd_subset();
     assert_eq!(
-        resolve("totallyunknownthing", NO_FOLDER, &no_hint(), &c, &no_ov(), "en").status,
-        Status::Failed
+        resolve("totallyunknownthing", NO_FOLDER, &no_hint(), &c, &no_ov(), "en"),
+        None
     );
 }
 
@@ -220,12 +245,8 @@ fn a_multibyte_filename_does_not_panic() {
         "hellboyomnibus\u{5b8c}\u{5168}\u{7248}",
         "secondeditio\u{5168}",
     ] {
-        let r = resolve(stem, NO_FOLDER, &no_hint(), &c, &no_ov(), "en");
-        // Any status is acceptable; a panic is not.
-        assert!(matches!(
-            r.status,
-            Status::Ready(_) | Status::Review(_) | Status::Failed
-        ));
+        // Any outcome is acceptable; a panic is not.
+        let _ = resolve(stem, NO_FOLDER, &no_hint(), &c, &no_ov(), "en");
     }
 }
 
@@ -238,14 +259,8 @@ fn a_tie_on_run_length_is_ambiguous_not_the_earliest_edition() {
         ("Velvet", "velvet", "Malibu", "en", 1993, 3),
         ("Velvet", "velvet", "Image", "en", 2014, 3),
     ]);
-    let r = resolve("velvet_vol1", NO_FOLDER, &no_hint(), &c, &no_ov(), "en");
-    assert!(
-        matches!(r.status, Status::Review(ReviewReason::Ambiguous(_))),
-        "got {:?} on record {:?}",
-        r.status,
-        r.record
-    );
-    assert!(r.record.is_none());
+    let found = resolve("velvet_vol1", NO_FOLDER, &no_hint(), &c, &no_ov(), "en").unwrap();
+    assert_eq!(found.len(), 2, "both editions are offered, neither picked: {found:?}");
 }
 
 #[test]
@@ -253,9 +268,8 @@ fn shortest_run_still_fires_when_there_is_a_single_shortest() {
     // The other half: the tie guard must not disable the heuristic that
     // carries 39 of the 71 points of `ready`.
     let (_d, c) = three_velvets();
-    let r = resolve("velvet_vol1", NO_FOLDER, &no_hint(), &c, &no_ov(), "en");
-    assert_eq!(r.status, Status::Ready(Basis::ShortestRun));
-    assert_eq!(r.record.unwrap().year_began, 2014);
+    let r = only(resolve("velvet_vol1", NO_FOLDER, &no_hint(), &c, &no_ov(), "en"));
+    assert_eq!(r.volume_count, Some(3));
 }
 
 #[test]
@@ -330,10 +344,9 @@ fn feasibility_outranks_the_publisher_preference() {
         ("Lady Mechanika", "ladymechanika", "Image", "en", 2021, 1),
     ]);
     let hint = PublisherHint(Some("Image".into()));
-    let r = resolve("ladymechanika_vol6", "", &hint, &c, &no_ov(), "en");
-    assert_eq!(r.status, Status::Ready(Basis::VolumeFeasibility));
+    let r = only(resolve("ladymechanika_vol6", "", &hint, &c, &no_ov(), "en"));
     assert_eq!(r.series, "Lady Mechanika");
-    assert_eq!(r.record.unwrap().run, 7);
+    assert_eq!(r.volume_count, Some(7));
 }
 
 #[test]
@@ -342,8 +355,8 @@ fn a_volume_no_record_can_hold_is_still_infeasible() {
     // not the same as dropping the constraint.
     let (_d, c) = short_runs();
     let hint = PublisherHint(Some("Image".into()));
-    assert!(matches!(
-        resolve("someseries_vol13", "", &hint, &c, &no_ov(), "en").status,
-        Status::Review(ReviewReason::VolumeInfeasible)
-    ));
+    assert_eq!(
+        resolve("someseries_vol13", "", &hint, &c, &no_ov(), "en"),
+        Some(Vec::new())
+    );
 }
