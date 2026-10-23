@@ -14,6 +14,7 @@ import pathlib, subprocess, sys
 
 CLI = "crates/cli/src/main.rs"
 CORE_TYPES = "crates/core/src/types.rs"
+DETAIL = "crates/cli/src/map/detail.rs"
 
 # (name, file, old, new)
 MUTS = [
@@ -51,6 +52,17 @@ MUTS = [
   '    for (scale, unit) in UNITS.iter().take(1).copied() {\n        if true {'),
  ("plural() never pluralises", CLI,
   '    if n == 1 {\n        format!("1 {noun}")', '    if true {\n        format!("{n} {noun}")'),
+ ("sentence box re-splits field edits", DETAIL,
+  '        if self.structured {\n            return;\n        }\n        self.text.push(c);',
+  '        self.text.push(c);'),
+ ("a no-op pick reloads and wipes typed text", DETAIL,
+  '        if self.picked == Some(at) {\n            return; // nothing moved: keep what the user typed\n        }', ''),
+ ("flagged row accepts its own pre-fill", DETAIL,
+  '        self.parsed != self.prefill || self.confirmed', '        true || self.confirmed'),
+ ("another garbled candidate counts as verified", DETAIL,
+  'c.is_unsplit() && as_parsed(c) == self.parsed', 'false && as_parsed(c) == self.parsed'),
+ ("^R does not restore free text", DETAIL,
+  '                self.structured = false;\n                Step::Editing', '                Step::Editing'),
 ]
 
 skipped = survived = 0

@@ -28,7 +28,8 @@ pub struct Detail {
     field: Option<Field>,
     /// The entry's guess is not safe to accept unread (squashed or ambiguous).
     flagged: bool,
-    /// What the box was filled with. A flagged row is accepted only when the
+    /// The entry's guess, not what the box was filled with: a row the user
+    /// already edited differs from it, so it re-accepts. A flagged row is accepted only when the
     /// fields differ from this, so no key handler can vouch for the pre-fill.
     prefill: ParsedTitle,
     /// The fields of the last clean candidate the user moved to. Lets a user
@@ -65,7 +66,7 @@ impl Detail {
         let picked = (!candidates.is_empty()).then_some(0);
         Detail {
             text: show(&parsed.series, parsed.volume, parsed.subtitle.as_deref()),
-            prefill: parsed.clone(),
+            prefill: entry.guess().map_or_else(|| parse_title(""), as_parsed),
             parsed,
             picked,
             candidates,
@@ -201,6 +202,11 @@ impl Detail {
             KeyCode::Char('c') if ctrl => Step::Quit,
             KeyCode::Esc => Step::Back,
             KeyCode::Enter if self.acceptable() => Step::Accept,
+            KeyCode::Char('r') if ctrl => {
+                self.parsed = parse_title(&self.text);
+                self.structured = false;
+                Step::Editing
+            }
             KeyCode::Tab => {
                 self.next_field();
                 Step::Editing
@@ -238,7 +244,7 @@ impl Detail {
         .areas(frame.area());
         frame.render_widget(format!(" {stem}"), head);
         let note = if self.structured && self.field.is_none() {
-            "fields were edited directly; edit them with tab, or pick a candidate to start over"
+            "fields were edited directly; tab edits them, ^R re-reads the sentence as free text"
         } else if self.flagged && !self.acceptable() {
             "this guess needs a change or a pick before it can be accepted"
         } else {
@@ -277,7 +283,11 @@ impl Detail {
             frame.render_widget(lines.join("\n"), menu);
         }
         frame.render_widget(
-            ratatui::widgets::Paragraph::new(" ⏎ accept   tab next field   ↑↓ candidates   esc back to the table   ^C quit")
+            ratatui::widgets::Paragraph::new(if self.structured {
+                " ⏎ accept   tab next field   ^R free text   ↑↓ candidates   esc back to the table   ^C quit"
+            } else {
+                " ⏎ accept   tab next field   ↑↓ candidates   esc back to the table   ^C quit"
+            })
                 .style(Style::new().add_modifier(Modifier::DIM)),
             foot,
         );
@@ -664,5 +674,35 @@ mod tests {
         d.on_key(key(KeyCode::Up));
         assert_eq!(d.parsed.series, "Witch");
         assert!(matches!(d.on_key(key(KeyCode::Enter)), Step::Accept));
+    }
+
+    #[test]
+    fn an_already_edited_flagged_row_reaccepts_without_another_change() {
+        let mut e = squashed_entry();
+        e.final_fields = Some(ParsedTitle {
+            series: "Hellboy Omnibus".into(),
+            volume: Some(1),
+            subtitle: Some("Seed of Destruction".into()),
+        });
+        let mut d = Detail::for_entry(&e);
+        assert!(matches!(d.on_key(key(KeyCode::Enter)), Step::Accept), "its content already differs from the guess");
+    }
+
+    #[test]
+    fn free_text_comes_back_on_a_row_with_no_candidates() {
+        let mut d = Detail::for_entry(&Entry::new("n".into(), vec![]));
+        d.on_key(key(KeyCode::Tab));
+        type_str(&mut d, "Nemesis: Gallery");
+        for _ in 0..3 {
+            d.on_key(key(KeyCode::Tab));
+        }
+        type_str(&mut d, "x");
+        assert_eq!(d.text, "Nemesis: Gallery", "the box is a view while fields were edited");
+        assert!(screen(&d, "n").contains("^R"), "the footer says how to get free text back");
+        d.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!(d.parsed.series, "Nemesis", "^R re-reads the sentence, visibly");
+        type_str(&mut d, "!");
+        assert_eq!(d.text, "Nemesis: Gallery!");
+        assert_eq!(d.parsed.subtitle.as_deref(), Some("Gallery!"));
     }
 }
