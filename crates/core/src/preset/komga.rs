@@ -80,13 +80,22 @@ impl Preset for Komga {
             stem.push_str(subtitle);
         }
 
+        // Sanitised like every other part of the name. Unsanitised, `.{ext}`
+        // went straight into `join`, so `cbz/sub/dir` added three components
+        // and a 254-byte extension drove the budget to zero, emptied the stem
+        // and left a leaf of `.` plus the extension — a preset emitting `..`,
+        // which invariant 1 forbids in its own words. The `..` and `.` cases
+        // sanitise to `_`, so the suffix is visible and inert rather than gone.
         let suffix = if ext.is_empty() {
             String::new()
         } else {
-            format!(".{ext}")
+            format!(".{}", sanitize(ext))
         };
-        // saturating: a pathological extension longer than the whole budget
-        // underflowed, which panics in debug and wraps in release.
+        // Half the component, so neither the title nor the extension can
+        // squeeze the other out of the name entirely. saturating: a
+        // pathological extension longer than the whole budget underflowed,
+        // which panics in debug and wraps in release.
+        let suffix = truncate_bytes(&suffix, MAX_COMPONENT_BYTES / 2);
         let budget = MAX_COMPONENT_BYTES.saturating_sub(suffix.len());
         let stem = truncate_bytes(&sanitize(&stem), budget);
 

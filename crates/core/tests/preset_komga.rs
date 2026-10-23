@@ -190,6 +190,26 @@ fn an_extension_longer_than_the_budget_does_not_underflow() {
     assert!(!name.is_empty());
 }
 
+/// The extension was the one field the preset never sanitised: it went into
+/// `format!(".{ext}")` and straight into `join`. Invariant 1 says a bad row may
+/// produce a wrong *name* and never a wrong *location*, and `plan::escapes`
+/// rejecting `..` afterwards is an incidental defence, not this one.
+#[test]
+fn the_extension_cannot_add_a_path_component_or_emit_a_parent_dir() {
+    for ext in ["cbz/sub/dir", "cbz/../../etc", "..", ".", &"p".repeat(254), &"q".repeat(300), "/", "\\x"] {
+        let p = Komga.destination(&res("Hellboy", Some(1), 1, None), ext);
+        let parts: Vec<_> = p.components().collect();
+        assert_eq!(parts.len(), 2, "{ext:?} made {parts:?}");
+        assert!(
+            !p.components().any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::RootDir)),
+            "{ext:?} made {parts:?}"
+        );
+        let leaf = p.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(!leaf.is_empty() && leaf.len() <= 255, "{ext:?} leaf is {} bytes", leaf.len());
+        assert!(!leaf.starts_with('.'), "{ext:?} made a hidden file: {leaf:?}");
+    }
+}
+
 #[test]
 fn the_folder_and_the_filename_sanitise_the_same_way() {
     // Building the stem from the raw series while the folder used the
