@@ -1,6 +1,9 @@
 # Mapping-first rebuild
 
-Status: **draft, awaiting approval** — builder-checked 2026-10-22, three owner decisions recorded
+Status: **approved 2026-10-23.** Builder-checked 2026-10-22; owner decisions
+recorded 2026-10-22 and 2026-10-23. Amended after real files from three further
+marketplaces (§5.3.1) and the Kavita source research in
+`docs/research/2026-10-23-kavita-from-source.md`.
 Supersedes parts of `2026-10-19-comic-renamer-design.md` — see §2.
 Date: 2026-10-22
 
