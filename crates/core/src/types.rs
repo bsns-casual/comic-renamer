@@ -208,6 +208,8 @@ pub enum MappingError {
     Parse { line: usize, reason: String },
     #[error("{field} {reason}")]
     Invalid { field: &'static str, reason: String },
+    #[error("local mapping file {path} is unreadable: {reason}")]
+    Unreadable { path: String, reason: String },
 }
 
 #[derive(Debug, thiserror::Error)]

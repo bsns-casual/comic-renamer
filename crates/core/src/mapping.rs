@@ -7,6 +7,8 @@
 use crate::preset::komga::is_invisible;
 use crate::preset::Preset;
 use crate::types::{MappingError, Resolved, Status};
+use std::collections::{BTreeSet, HashMap};
+use std::path::Path;
 use unicode_normalization::UnicodeNormalization;
 
 const HEADER: &str = "key\tseries\tvolume\tsubtitle\tlang\tvolume_count\tbundle";
@@ -215,4 +217,92 @@ pub fn rendered_budget_ok(row: &MappingRow, preset: &dyn Preset) -> bool {
     let parts: Vec<usize> = dest.components().map(|c| c.as_os_str().len()).collect();
     let total = parts.iter().sum::<usize>() + parts.len().saturating_sub(1);
     parts.iter().all(|&n| n <= MAX_COMPONENT_BYTES) && total <= MAX_RENDERED_BYTES
+}
+
+/// Parse and validate one layer, naming the first bad line. `origin` says which
+/// layer, because "line 7" alone is ambiguous across two files.
+fn load_layer(text: &str, origin: &str) -> Result<Vec<MappingRow>, MappingError> {
+    let at = |line: usize, reason: String| MappingError::Parse {
+        line,
+        reason: format!("{origin}: {reason}"),
+    };
+    let rows = parse_tsv(text).map_err(|e| match e {
+        MappingError::Parse { line, reason } => at(line, reason),
+        other => other,
+    })?;
+    // parse_tsv keeps no line numbers; data rows are the non-empty lines after the header.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let lines = text
+        .split('\n')
+        .enumerate()
+        .skip(1)
+        .filter(|(_, l)| !l.strip_suffix('\r').unwrap_or(l).is_empty())
+        .map(|(i, _)| i + 1);
+    for (row, line) in rows.iter().zip(lines) {
+        row.validate().map_err(|e| at(line, e.to_string()))?;
+    }
+    Ok(rows)
+}
+
+fn group(rows: Vec<MappingRow>) -> HashMap<String, Vec<MappingRow>> {
+    let mut by_key: HashMap<String, Vec<MappingRow>> = HashMap::new();
+    for row in rows {
+        by_key.entry(row.key.clone()).or_default().push(row);
+    }
+    by_key
+}
+
+/// Shipped rows plus the user's own. Keyed by `key`; `bundle` only breaks ties.
+pub struct Mappings {
+    by_key: HashMap<String, Vec<MappingRow>>,
+}
+
+impl Mappings {
+    /// `local: None` means there is no local file. A `Some` path that cannot be
+    /// read is an error: it holds the user's own corrections, and dropping them
+    /// quietly would look like the corrections never worked.
+    pub fn load(shipped: &str, local: Option<&Path>) -> Result<Mappings, MappingError> {
+        let mut by_key = group(load_layer(shipped, "shipped mappings")?);
+        if let Some(path) = local {
+            let text = std::fs::read_to_string(path).map_err(|e| MappingError::Unreadable {
+                path: path.display().to_string(),
+                reason: e.to_string(),
+            })?;
+            // A local key replaces every shipped row for it. Merging instead would
+            // leave two rows, and a bundle matching neither would drop the correction.
+            by_key.extend(group(load_layer(&text, &format!("local mappings {}", path.display()))?));
+        }
+        Ok(Mappings { by_key })
+    }
+
+    /// One row for the key: it is the answer for any bundle. Several: the bundle
+    /// selects, and a bundle matching none returns `None` rather than a guess.
+    pub fn lookup(&self, key: &str, bundle: &str) -> Option<&MappingRow> {
+        match self.by_key.get(key)?.as_slice() {
+            [only] => Some(only),
+            many => many.iter().find(|r| r.bundle == bundle),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.by_key.values().map(Vec::len).sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_key.is_empty()
+    }
+}
+
+/// `(key, bundle)` pairs held by rows that disagree. The same title under the
+/// same key in two bundles is not a collision, and neither is an exact repeat.
+pub fn find_key_collisions(rows: &[MappingRow]) -> Vec<(String, String)> {
+    let mut first: HashMap<(&str, &str), &MappingRow> = HashMap::new();
+    let mut bad = BTreeSet::new();
+    for r in rows {
+        let slot = first.entry((&r.key, &r.bundle)).or_insert(r);
+        if *slot != r {
+            bad.insert((r.key.clone(), r.bundle.clone()));
+        }
+    }
+    bad.into_iter().collect()
 }
