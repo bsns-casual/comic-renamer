@@ -37,16 +37,21 @@ pub fn seed() -> Result<(), String> {
 
     let mut rows = Vec::new();
     let mut classes: BTreeMap<&'static str, Vec<(String, MappingRow)>> = BTreeMap::new();
-    let mut rejected = 0usize;
+    let mut rejected: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for line in GROUND_TRUTH.lines().skip(1) {
         let f: Vec<&str> = line.split('\t').collect();
         let [bundle, title, stem] = f[..f.len().min(3)] else {
-            rejected += 1;
+            rejected.entry("short line".into()).or_default().push(line.to_string());
             continue;
         };
-        let Ok(row) = build_row(title, stem, bundle) else {
-            rejected += 1;
-            continue;
+        let row = match build_row(title, stem, bundle) {
+            Ok(row) => row,
+            Err(e) => {
+                // The error names the title; group by what follows it.
+                let why = e.split_once("\": ").map_or(e.as_str(), |(_, w)| w).to_string();
+                rejected.entry(why).or_default().push(title.to_string());
+                continue;
+            }
         };
         classes.entry(classify(title, &row)).or_default().push((title.to_string(), row.clone()));
         rows.push(row);
@@ -62,9 +67,13 @@ pub fn seed() -> Result<(), String> {
     let total: usize = classes.values().map(Vec::len).sum();
     println!("\nhumble candidates (NOT shipped): {} unique rows -> {}", rows.len(), out.display());
     println!(
-        "{total} rows built; {rejected} rejected (no usable key, or failed validate); {} key collisions",
+        "{total} rows built; {} rejected; {} key collisions",
+        rejected.values().map(Vec::len).sum::<usize>(),
         collisions.len()
     );
+    for (why, titles) in &rejected {
+        println!("  rejected: {why} ({}) e.g. {:?}", titles.len(), titles[0]);
+    }
     for (class, members) in &classes {
         println!("  {:5}  {:5.1}%  {class}", members.len(), percent(members.len(), total));
     }
@@ -112,7 +121,7 @@ fn classify(title: &str, row: &MappingRow) -> &'static str {
     } else if row.volume.is_none() && !last.is_empty() && last.chars().all(|c| c.is_ascii_digit()) {
         "bare trailing number (not a marker)"
     } else if title.split_whitespace().any(|t| t.starts_with('#')) {
-        "issue number dropped"
+        "issue number kept (subtitle, or range dropped beside a volume)"
     } else {
         "clean"
     }

@@ -12,7 +12,7 @@ fn parses_the_elfquest_example_from_the_spec() {
 fn preserves_case_and_punctuation_verbatim() {
     let p = parse_title("DIE: Loaded #1");
     assert_eq!(p.series, "DIE", "case is never folded");
-    assert_eq!(p.subtitle.as_deref(), Some("Loaded"), "trailing #1 is dropped");
+    assert_eq!(p.subtitle.as_deref(), Some("Loaded #1"), "the issue number is what tells issues apart");
     let p = parse_title("Hack/Slash: Back to School");
     assert_eq!(p.series, "Hack/Slash");
     assert_eq!(p.subtitle.as_deref(), Some("Back to School"));
@@ -65,7 +65,29 @@ fn no_boundary_means_the_whole_text_is_the_series() {
     let p = parse_title("Saga");
     assert_eq!((p.series.as_str(), p.volume, p.subtitle), ("Saga", None, None));
     let p = parse_title("Red Sonja #7");
-    assert_eq!(p.series, "Red Sonja");
+    assert_eq!((p.series.as_str(), p.volume, p.subtitle.as_deref()), ("Red Sonja", None, Some("#7")));
+}
+
+#[test]
+fn two_issues_of_one_series_render_to_different_paths() {
+    use comic_renamer_core::preset::{komga::Komga, Preset};
+    use comic_renamer_core::types::{Resolved, Status};
+    let dest = |title: &str| {
+        let p = parse_title(title);
+        let r = Resolved {
+            series: p.series,
+            volume: p.volume,
+            subtitle: p.subtitle,
+            run: 0,
+            status: Status::Mapped,
+            record: None,
+        };
+        Komga.destination(&r, "pdf")
+    };
+    for (a, b) in [("Minotaur #1", "Minotaur #2"), ("DIE: Loaded #1", "DIE: Loaded #2")] {
+        assert_ne!(dest(a), dest(b), "{a} vs {b}");
+    }
+    assert_eq!(dest("Minotaur #1").to_string_lossy(), "Minotaur/Minotaur - #1.pdf");
 }
 
 #[test]

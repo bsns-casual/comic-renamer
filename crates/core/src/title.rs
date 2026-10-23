@@ -23,9 +23,13 @@ pub fn parse_title(text: &str) -> ParsedTitle {
 
 /// Splits at the first boundary: the series ends at whichever comes first of
 /// a colon and a volume marker (`Vol.`/`Volume` followed by an Arabic or Roman
-/// number). Returns (series, volume, subtitle), all slices of `text`, with a
-/// trailing `#7`-style issue number dropped from each end. Subtitle is empty
-/// when there is none.
+/// number). Returns (series, volume, subtitle), all slices of `text`. Subtitle
+/// is empty when there is none.
+///
+/// A trailing `#7` is kept: with no volume it is the only thing telling two
+/// issues of one series apart, so it lands in the subtitle (`Red Sonja #7` is
+/// `Red Sonja` / `#7`). Once a volume exists the volume tells them apart, and
+/// the collection's issue range (`(#1-6)`) is dropped as before.
 ///
 /// The colon is found first so a number and the subtitle's first word cannot
 /// share a token: Humble writes `Vol. 3:Planet Death`.
@@ -47,11 +51,18 @@ pub fn split_at_boundary(text: &str) -> (&str, Option<u32>, &str) {
             return (finish_series(series), Some(volume), finish_subtitle(rest));
         }
     }
-    (
-        finish_series(&text[..head_end]),
-        None,
-        finish_subtitle(&text[head_end..]),
-    )
+    let series = text[..head_end].trim_end_matches(|c: char| c.is_whitespace() || c == ',');
+    let subtitle = text[head_end..].trim_start_matches(|c: char| c.is_whitespace() || c == ':' || c == ',');
+    // No colon: a trailing `#7` is the subtitle, not part of the series name.
+    if head_end == text.len() {
+        if let Some(last) = series.rsplit(char::is_whitespace).next() {
+            if last.contains('#') && last.len() < series.len() {
+                let cut = series.len() - last.len();
+                return (series[..cut].trim_end(), None, &series[cut..]);
+            }
+        }
+    }
+    (series, None, subtitle)
 }
 
 /// `Harbinger, ` before `Vol.` leaves a separator behind.
