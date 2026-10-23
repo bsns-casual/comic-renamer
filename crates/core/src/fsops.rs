@@ -437,6 +437,20 @@ pub fn stream_verified(src: &Path, dest_root: &Path, relative: &Path) -> io::Res
     Ok(())
 }
 
+/// A temp file's basename: unique per process and per call, so two writers in
+/// one directory never fight over a name — including under the parallel apply
+/// that the single-threaded shortcut defers, and across two `map` sessions
+/// writing the mapping file at once.
+///
+/// One definition on purpose. A second writer that picked its own fixed name
+/// could create, truncate and rename over a temp this one was mid-write on,
+/// and the renamed result would be two files spliced together.
+pub fn temp_basename() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!(".comic-renamer.{}.{seq}.partial", std::process::id())
+}
+
 /// A temp file this code created, unlinked on drop unless it was renamed away.
 ///
 /// Everything goes through the parent descriptor. An earlier version derived
@@ -452,16 +466,8 @@ struct Temp {
 impl Temp {
     fn create(destination: &Destination) -> io::Result<(Temp, std::fs::File)> {
         use std::os::fd::FromRawFd;
-        // Unique per process and per call, so two rows in one directory never
-        // fight over a name — including under the parallel apply that the
-        // single-threaded shortcut defers.
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let name = CString::new(format!(
-            ".comic-renamer.{}.{seq}.partial",
-            std::process::id()
-        ))
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "temp name holds a NUL"))?;
+        let name = CString::new(temp_basename())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "temp name holds a NUL"))?;
 
         let parent = std::os::fd::AsRawFd::as_raw_fd(&destination.parent);
         // O_EXCL: the name is ours or this fails. O_NOFOLLOW: never write

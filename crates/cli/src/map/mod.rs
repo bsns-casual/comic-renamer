@@ -161,7 +161,9 @@ fn approved_rows(entries: &[table::Entry], bundle: &str, lang: &str) -> Result<(
 /// left out, so the rest of the session is kept.
 // shortcut: no lock around the read-modify-write, so two sessions inside the
 // read-to-rename window lose one set of rows; an advisory lock beside the file
-// (as apply's lockfile does) closes it.
+// (as apply's lockfile does) closes it. The *file* is safe either way now —
+// each writer has its own temp name, so the loser's rows are missing rather
+// than spliced into the winner's.
 pub fn commit_session(entries: &[table::Entry], local: &Path, bundle: &str, lang: &str) -> Result<Committed, String> {
     let (fresh, clashes) = approved_rows(entries, bundle, lang)?;
     if fresh.is_empty() {
@@ -181,13 +183,21 @@ pub fn commit_session(entries: &[table::Entry], local: &Path, bundle: &str, lang
     }
     let dir = local.parent().ok_or("the mapping file has no parent directory")?;
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let tmp = local.with_extension("tsv.tmp");
+    // Unique per writer, through the one name generator `apply`'s temps use. A
+    // fixed name plus `File::create`, which truncates, let a second session
+    // write over this one's half-finished temp: the rename then published two
+    // files spliced together, torn mid-row, and `parse_tsv` refused the result
+    // for both `scan` and `map` until a human repaired it.
+    let tmp = dir.join(comic_renamer_core::fsops::temp_basename());
     let write = || -> std::io::Result<()> {
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(to_tsv(&rows).as_bytes())?;
         f.sync_all()?;
         // Replacing the old file is the point here; the no-clobber rule is for comics.
-        std::fs::rename(&tmp, local)
+        std::fs::rename(&tmp, local)?;
+        // `sync_all` makes the contents durable, not the name, as
+        // `UndoWriter::create` says in the same situation.
+        std::fs::File::open(dir)?.sync_all()
     };
     write().map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
@@ -354,6 +364,92 @@ fn clash_warning(a: &str, b: &str) -> String {
     )
 }
 
+/// At most this many rows are listed before the count takes over. A 300-file
+/// bundle must not push the question itself off the screen.
+const ROWS_LISTED: usize = 30;
+
+/// What the user is agreeing to (§6.5): every approved row as filename → final
+/// name, then the two things the save is about to do that they cannot see from
+/// the table — rows that would land on one path, and rows whose filenames share
+/// a mapping key. Both used to be printed after the write, which informs
+/// without consenting.
+fn confirmation(
+    entries: &[table::Entry],
+    writing: usize,
+    clashes: &[(String, String)],
+    collisions: &[(String, String)],
+    local: &Path,
+) -> String {
+    let mut out = String::from("\n");
+    let listed: Vec<&table::Entry> = entries.iter().filter(|e| e.approved_row().is_some()).collect();
+    for e in listed.iter().take(ROWS_LISTED) {
+        let (fields, _) = e.approved_row().expect("filtered");
+        out.push_str(&format!(
+            "  {}  ->  {}\n",
+            e.stem,
+            table::show(&fields.series, fields.volume, fields.subtitle.as_deref())
+        ));
+    }
+    if listed.len() > ROWS_LISTED {
+        out.push_str(&format!("  ...and {} more\n", listed.len() - ROWS_LISTED));
+    }
+    for (a, b) in collisions {
+        out.push_str(&format!("\n{}\n", collision_warning(a, b)));
+    }
+    for (a, b) in clashes {
+        out.push_str(&format!("\n{}\n", clash_warning(a, b)));
+    }
+    out.push_str(&format!(
+        "\nSave {writing} {} to {}? [y/N] ",
+        if writing == 1 { "mapping" } else { "mappings" },
+        local.display()
+    ));
+    out
+}
+
+/// Shows the confirmation, then writes only on a yes. `ask` takes the text and
+/// returns the answer, so "present it, *then* write" is a property a test can
+/// hold rather than an ordering in one function nobody can call.
+fn save(
+    entries: &[table::Entry],
+    local: &Path,
+    bundle: &str,
+    lang: &str,
+    preset: &dyn Preset,
+    ask: impl FnOnce(&str) -> Result<bool, String>,
+) -> Result<Outcome, String> {
+    // The same pure call `commit_session` makes, so the two cannot disagree
+    // about which rows are about to be saved.
+    let (rows, clashes) = approved_rows(entries, bundle, lang)?;
+    let collisions = intra_session_collisions(entries, preset);
+    if !ask(&confirmation(entries, rows.len(), &clashes, &collisions, local))? {
+        println!("Nothing was saved.");
+        return Ok(Outcome::Quit);
+    }
+    let done = commit_session(entries, local, bundle, lang)?;
+    // `commit_session` recomputes these from the same entries, so a
+    // disagreement would mean the confirmation described a different save
+    // from the one that happened.
+    debug_assert_eq!(done.clashes, clashes, "the confirmation and the write disagree");
+    let n = done.written;
+    println!("{n} {} saved to {}", if n == 1 { "mapping" } else { "mappings" }, local.display());
+    // The mappings are already saved; a failed offer must not make the run report failure.
+    if let Err(e) = offer_contribution(entries, bundle, lang) {
+        println!("warning: the contribution was not prepared: {e}");
+    }
+    Ok(Outcome::Done)
+}
+
+/// One line from the terminal. EOF reads as a refusal, as `apply`'s prompt
+/// has it: nobody typed a yes.
+fn ask_on_stdin(text: &str) -> Result<bool, String> {
+    print!("{text}");
+    std::io::stdout().flush().map_err(|e| e.to_string())?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer).map_err(|e| e.to_string())?;
+    Ok(is_yes(&answer))
+}
+
 /// `apply` removes every row of a collision from the run, so the user must hear
 /// that neither file is filed, not that one of them is.
 fn collision_warning(a: &str, b: &str) -> String {
@@ -457,22 +553,7 @@ fn session(
         .collect();
     let mut t = table::Table::new(folder.to_string(), entries);
     match table::run(&mut t, preset).map_err(|e| e.to_string())? {
-        table::Action::Done => {
-            for (a, b) in intra_session_collisions(&t.entries, preset) {
-                println!("{}", collision_warning(&a, &b));
-            }
-            let done = commit_session(&t.entries, local, folder, lang)?;
-            for (a, b) in &done.clashes {
-                println!("{}", clash_warning(a, b));
-            }
-            let n = done.written;
-            println!("{n} {} saved to {}", if n == 1 { "mapping" } else { "mappings" }, local.display());
-            // The mappings are already saved; a failed offer must not make the run report failure.
-            if let Err(e) = offer_contribution(&t.entries, folder, lang) {
-                println!("warning: the contribution was not prepared: {e}");
-            }
-            Ok(Outcome::Done)
-        }
+        table::Action::Done => save(&t.entries, local, folder, lang, preset, ask_on_stdin),
         _ => Ok(Outcome::Quit),
     }
 }
@@ -757,6 +838,91 @@ mod tests {
         assert!(text.contains("Good") && !text.contains("Hellboy"), "neither clashing row is guessed at: {text}");
         let msg = clash_warning("hellboy-1", "hellboy1");
         assert!(msg.contains("hellboy-1") && msg.contains("hellboy1") && msg.contains("Rename one"), "{msg}");
+    }
+
+    /// The temp name was fixed — `local.with_extension("tsv.tmp")` — and
+    /// `File::create` truncates, so interleaving two sessions (A create, B
+    /// create, A write 10k, B write 8k, A rename) left `mappings.tsv` holding
+    /// B's bytes spliced onto A's tail, torn mid-row. `parse_tsv` then fails
+    /// on column count and **both `scan` and `map` refuse** until a human
+    /// repairs the file. The old `shortcut:` comment claimed the exposure was
+    /// one set of rows.
+    #[test]
+    fn concurrent_sessions_cannot_splice_the_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let local = dir.path().join("mappings.tsv");
+        std::thread::scope(|s| {
+            for i in 0..8 {
+                let local = local.clone();
+                s.spawn(move || {
+                    let e = approved(&format!("file{i}_vol1"), &format!("Series {i}"), Some(1), None);
+                    commit_session(&[e], &local, "B", "en").unwrap();
+                });
+            }
+        });
+        // Whichever interleaving won, the file is a mapping file. Losing a
+        // set of rows is the documented shortcut; a torn one is not.
+        assert!(!read_rows(&local).is_empty());
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "mappings.tsv")
+            .collect();
+        assert!(left.is_empty(), "temp files left behind: {left:?}");
+    }
+
+    /// The confirmation is the last thing the user sees before the rows land,
+    /// so both kinds of warning have to be in it. Printed afterwards they
+    /// inform without consenting.
+    #[test]
+    fn the_confirmation_names_the_rows_and_both_warnings() {
+        let entries = vec![
+            approved("one", "Usagi Yojimbo", None, None),
+            approved("two", "usagi yojimbo", None, None),
+            approved("hellboy-1", "Hellboy", Some(1), None),
+            approved("hellboy1", "Hellboy Omnibus", Some(1), None),
+        ];
+        let (rows, clashes) = approved_rows(&entries, "B", "en").unwrap();
+        let collisions = intra_session_collisions(&entries, &Komga);
+        let text = confirmation(&entries, rows.len(), &clashes, &collisions, Path::new("/cfg/mappings.tsv"));
+        assert!(text.contains("one") && text.contains("Usagi Yojimbo"), "{text}");
+        assert!(text.contains("same path") && text.contains("neither is placed"), "the collision: {text}");
+        assert!(text.contains("neither was saved"), "the clash: {text}");
+        assert!(text.contains("/cfg/mappings.tsv"), "{text}");
+        assert!(text.trim_end().ends_with("[y/N]"), "it ends by asking: {text}");
+    }
+
+    #[test]
+    fn declining_the_confirmation_writes_nothing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let local = dir.path().join("mappings.tsv");
+        let mut shown = None;
+        let out = save(&[approved("a_vol1", "A", Some(1), None)], &local, "B", "en", &Komga, |text| {
+            shown = Some(text.to_string());
+            Ok(false)
+        })
+        .unwrap();
+        assert!(matches!(out, Outcome::Quit));
+        assert!(!local.exists(), "a declined save writes nothing at all");
+        assert!(shown.unwrap().contains("a_vol1"));
+    }
+
+    #[test]
+    fn the_warnings_are_shown_while_the_file_is_still_untouched() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let local = dir.path().join("mappings.tsv");
+        let entries = vec![
+            approved("one", "Usagi Yojimbo", None, None),
+            approved("two", "usagi yojimbo", None, None),
+        ];
+        let out = save(&entries, &local, "B", "en", &Komga, |text| {
+            assert!(text.contains("same path"), "{text}");
+            assert!(!local.exists(), "the rows were written before the user was asked");
+            Ok(true)
+        })
+        .unwrap();
+        assert!(matches!(out, Outcome::Done));
+        assert_eq!(read_rows(&local).len(), 2, "a yes saves them");
     }
 
     #[test]
