@@ -758,6 +758,27 @@ mod tests {
         assert!(matches!(d.on_key(key(KeyCode::Enter)), Step::Editing));
     }
 
+    /// The *ambiguous* half of `needs_review` -- two candidates close enough
+    /// that neither is verified, and no squashed subtitle to split. Nothing
+    /// here has an unsplit candidate, so the prefill comparison is the only
+    /// clause that can refuse: a space after `Witch` renders to the same path
+    /// as the top candidate nobody confirmed, which is exactly what a flagged
+    /// row must not be able to store.
+    #[test]
+    fn a_trailing_space_on_an_ambiguous_row_is_not_a_correction() {
+        let e = Entry::new(
+            "w".into(),
+            vec![sug("Witch", Some(1), None, None), sug("Witcher", Some(1), None, None)],
+        );
+        let mut d = Detail::for_entry(&e, &Komga);
+        let before = d.destination_line();
+        d.on_key(key(KeyCode::Tab)); // series
+        d.on_key(key(KeyCode::Char(' ')));
+        assert_eq!(d.parsed.series, "Witch ", "the space is in the field");
+        assert_eq!(d.destination_line(), before, "and gone again by the time it is a path");
+        assert!(matches!(d.on_key(key(KeyCode::Enter)), Step::Editing));
+    }
+
     /// Whitespace is not the only thing that normalises away: the preset drops
     /// `?` and `*` outright.
     #[test]

@@ -180,4 +180,15 @@ fn a_bundles_case_does_not_make_a_second_bundle() {
     .unwrap();
     assert_eq!(m.lookup("alpha", "fanatical").unwrap().series, "A");
     assert_eq!(m.lookup("alpha", "SWEET SHOP").unwrap().series, "B");
+
+    // Composition folds with case, because `collision_key` is NFC-then-fold.
+    // HFS+ stored NFD and those folder names survive copies, so the tie-break
+    // has to hold at the comparison rather than trust every caller to have
+    // normalised -- which is what invariant 7 says for paths.
+    let m = Mappings::load(
+        &tsv(&[("alpha", "A", "Caf\u{e9} Comics"), ("alpha", "B", "Sweet Shop")]),
+        None,
+    )
+    .unwrap();
+    assert_eq!(m.lookup("alpha", "Cafe\u{301} comics").unwrap().series, "A");
 }
