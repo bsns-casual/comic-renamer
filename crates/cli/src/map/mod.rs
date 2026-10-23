@@ -256,6 +256,7 @@ fn contribute_in(tsv: &str, branch: &str, dir: &Path) -> Result<Contribution, St
         format!("gh repo fork {UPSTREAM} --clone"),
         format!("cd {repo}"),
         format!("git checkout -b {branch}"),
+        "mkdir -p data/mappings".to_string(),
         format!("cp {} {target}", quote(&path.to_string_lossy())),
         format!("git add {target}"),
         format!("git commit -m {}", quote(&title)),
@@ -287,16 +288,42 @@ fn offer_contribution(entries: &[table::Entry], bundle: &str, lang: &str) -> Res
         println!("Kept local only.");
         return Ok(());
     }
-    let slug: String = bundle.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
-    // shortcut: the branch is the bundle slug, so a second contribution from one bundle reuses it; add a timestamp when that bites.
-    let c = contribute(&tsv, &format!("map-{}", slug.trim_matches('-')))?;
-    println!("Your rows are in {}.", c.path.display());
-    println!("To send them you need `gh` signed in (`gh auth login`). The first command forks {UPSTREAM} into your GitHub account and clones it next to the file;");
-    println!("if you own that repository, skip the fork and run the rest in your own clone. Then run:");
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let c = contribute(&tsv, &branch_for(bundle, secs))?;
+    for line in guidance(&c) {
+        println!("{line}");
+    }
     for line in &c.commands {
         println!("  {line}");
     }
     Ok(())
+}
+
+/// Branch for one contribution. The seconds make a second contribution from
+/// one bundle a new branch, directory and file; a bundle with no ASCII letters
+/// falls back to `bundle` so it is not `map--`.
+fn branch_for(bundle: &str, secs: u64) -> String {
+    let slug: String = bundle.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
+    let slug = slug.split('-').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("-");
+    let slug = if slug.is_empty() { "bundle" } else { &slug };
+    format!("map-{slug}-{secs}")
+}
+
+/// The prose printed above the commands. It names where the clone lands and
+/// which commands an owner skips, because the commands are all the user has.
+fn guidance(c: &Contribution) -> Vec<String> {
+    let work = c.path.with_extension("");
+    vec![
+        format!("Your rows are in {}.", c.path.display()),
+        "To send them you need `gh` signed in (`gh auth login`).".to_string(),
+        format!(
+            "The commands below create {} and fork {UPSTREAM} into your GitHub account, cloning it to {}.",
+            work.display(),
+            work.join(UPSTREAM.rsplit('/').next().unwrap()).display()
+        ),
+        "If you own that repository, skip the first three commands and run the rest in your own clone.".to_string(),
+        "Then run:".to_string(),
+    ]
 }
 
 fn clash_warning(a: &str, b: &str) -> String {
@@ -418,7 +445,10 @@ fn session(
             }
             let n = done.written;
             println!("{n} {} saved to {}", if n == 1 { "mapping" } else { "mappings" }, local.display());
-            offer_contribution(&t.entries, folder, lang)?;
+            // The mappings are already saved; a failed offer must not make the run report failure.
+            if let Err(e) = offer_contribution(&t.entries, folder, lang) {
+                println!("warning: the contribution was not prepared: {e}");
+            }
             Ok(Outcome::Done)
         }
         _ => Ok(Outcome::Quit),
@@ -852,5 +882,51 @@ mod tests {
         for no in ["", "\n", "n", "ok", "yep", "sure"] {
             assert!(!is_yes(no), "{no:?}");
         }
+    }
+
+    #[test]
+    fn a_path_like_stem_cannot_put_a_path_in_the_contribution() {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/mike".into());
+        let stem = format!("{home}/Comics/Humble/alpha_vol1");
+        let tsv = contribution_tsv(&[approved(&stem, "Alpha", Some(1), None)], "B", "en").unwrap();
+        assert!(!tsv.contains('/') && !tsv.contains("Comics") && !tsv.contains("Users"), "{tsv}");
+    }
+
+    #[test]
+    fn the_map_module_has_no_way_to_run_a_process() {
+        // "Nothing executes" is structural; this pins it. Test modules are cut off first.
+        let needle = ["Command", "::new"].concat();
+        let pm = ["process", "::Command"].concat();
+        for (name, src) in [
+            ("mod.rs", include_str!("mod.rs")),
+            ("table.rs", include_str!("table.rs")),
+            ("detail.rs", include_str!("detail.rs")),
+        ] {
+            let code = src.split("#[cfg(test)]").next().unwrap();
+            assert!(!code.contains(&needle) && !code.contains(&pm), "{name} can start a process");
+        }
+    }
+
+    #[test]
+    fn branches_differ_per_run_and_per_bundle_even_without_ascii_letters() {
+        assert_eq!(branch_for("Humble  Manga!", 7), "map-humble-manga-7");
+        assert_ne!(branch_for("Humble Manga", 7), branch_for("Humble Manga", 8));
+        assert_eq!(branch_for("\u{6F2B}\u{753B}", 7), "map-bundle-7");
+        assert!(contribute_in(&one_row_tsv(), &branch_for("\u{6F2B}\u{753B}", 7), tempfile::tempdir().unwrap().path()).is_ok());
+    }
+
+    #[test]
+    fn the_prose_matches_the_commands_it_introduces() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = contribute_in(&one_row_tsv(), "map-b", dir.path()).unwrap();
+        // Owners skip exactly the commands that make the fresh clone.
+        assert!(c.commands[0].starts_with("mkdir -p") && c.commands[1].starts_with("gh repo fork") && c.commands[2].starts_with("cd "));
+        let prose = guidance(&c).join("\n");
+        assert!(prose.contains("skip the first three commands"), "{prose}");
+        assert!(prose.contains(&dir.path().join("map-b").join("comic-renamer").to_string_lossy().into_owned()), "{prose}");
+        assert!(prose.contains("gh auth login"));
+        assert!(!prose.contains("first command forks"));
+        let mk = c.commands.iter().position(|l| l == "mkdir -p data/mappings").expect("shared by clones of main");
+        assert!(mk < c.commands.iter().position(|l| l.starts_with("cp ")).unwrap());
     }
 }
