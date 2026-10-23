@@ -115,3 +115,21 @@ fn collisions_report_same_key_and_bundle_with_different_fields() {
     let rows = [row("k", "S", "a"), other, row("j", "T", "a"), row("j", "U", "b")];
     assert_eq!(find_key_collisions(&rows), vec![("k".to_string(), "a".to_string())]);
 }
+
+#[test]
+fn a_local_row_shadows_its_shipped_siblings() {
+    // Deliberate cost of "local outranks shipped": a local row replaces EVERY shipped
+    // row for its key. If shipped holds A and B and the user corrects only A, the
+    // lookup for B returns the local row, not shipped B. Merging instead would ignore
+    // the correction whenever the bundle matched a shipped row, and that is silent;
+    // an orphaned sibling surfaces in the plan. Multi-row keys do not exist in
+    // shipped data today.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("local.tsv");
+    std::fs::write(&path, tsv(&[("alpha", "Fixed", "a")])).unwrap();
+    let shipped = tsv(&[("alpha", "One", "a"), ("alpha", "Two", "b")]);
+    let m = Mappings::load(&shipped, Some(&path)).unwrap();
+    assert_eq!(m.lookup("alpha", "a").unwrap().series, "Fixed");
+    // One local row left for the key, so it answers any bundle, B included.
+    assert_eq!(m.lookup("alpha", "b").unwrap().series, "Fixed");
+}
