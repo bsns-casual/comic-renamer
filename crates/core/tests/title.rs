@@ -69,6 +69,15 @@ fn no_boundary_means_the_whole_text_is_the_series() {
 }
 
 #[test]
+fn an_issue_number_before_a_colon_does_not_fragment_the_series() {
+    // Every issue of an anthology must share one series folder.
+    let p = parse_title("Baltic Comics Anthology š! #26: dADa");
+    assert_eq!(p.series, "Baltic Comics Anthology š!");
+    assert_eq!(p.subtitle.as_deref(), Some("dADa"));
+    assert_eq!(parse_title("X #26: Y").series, "X");
+}
+
+#[test]
 fn two_issues_of_one_series_render_to_different_paths() {
     use comic_renamer_core::preset::{komga::Komga, Preset};
     use comic_renamer_core::types::{Resolved, Status};

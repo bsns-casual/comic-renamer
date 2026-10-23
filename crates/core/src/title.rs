@@ -62,7 +62,9 @@ pub fn split_at_boundary(text: &str) -> (&str, Option<u32>, &str) {
             }
         }
     }
-    (series, None, subtitle)
+    // A colon follows: `X #26: Y` is issue 26 of X, so the number must not
+    // become part of the series name and give every issue its own folder.
+    (drop_trailing_issue(series), None, subtitle)
 }
 
 /// `Harbinger, ` before `Vol.` leaves a separator behind.

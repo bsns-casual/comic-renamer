@@ -17,12 +17,12 @@ use xtask::strip_promo;
 
 use super::{percent, GROUND_TRUTH, LANG, MARKETPLACE};
 
-pub fn seed() -> Result<(), String> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+/// Rows by marketplace. A short line is an error, never a panic.
+fn marketplace_rows(text: &str) -> Result<BTreeMap<String, Vec<MappingRow>>, String> {
     let mut by_market: BTreeMap<String, Vec<MappingRow>> = BTreeMap::new();
-    for line in MARKETPLACE.lines().skip(1) {
+    for line in text.lines().skip(1) {
         let f: Vec<&str> = line.split('\t').collect();
-        let [market, title, stem] = f[..3] else {
+        let [market, title, stem] = f[..f.len().min(3)] else {
             return Err(format!("bad marketplace row {line:?}"));
         };
         by_market
@@ -30,6 +30,28 @@ pub fn seed() -> Result<(), String> {
             .or_default()
             .push(build_row(title, stem, market)?);
     }
+    Ok(by_market)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_short_marketplace_line_is_an_error_not_a_panic() {
+        let text = "marketplace\ttitle\tstem\tformats\nFanatical\tOnly a title\n";
+        assert!(marketplace_rows(text).is_err());
+    }
+
+    #[test]
+    fn the_real_marketplace_fixture_builds() {
+        assert_eq!(marketplace_rows(MARKETPLACE).unwrap().values().map(Vec::len).sum::<usize>(), 12);
+    }
+}
+
+pub fn seed() -> Result<(), String> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let by_market = marketplace_rows(MARKETPLACE)?;
     for (market, rows) in &by_market {
         let slug = market.to_lowercase().replace(' ', "-");
         let path = root.join("data/mappings").join(format!("{slug}.tsv"));

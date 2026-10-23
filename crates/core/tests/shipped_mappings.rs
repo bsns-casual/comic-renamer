@@ -66,6 +66,26 @@ fn the_marketplace_fixture_is_fully_covered() {
 }
 
 #[test]
+fn every_tsv_in_data_mappings_is_embedded() {
+    // SHIPPED_FILES is a hand-kept list. A mapping file added to the directory
+    // and not to the list would sit in the repo doing nothing, silently.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/mappings");
+    let shipped = all_rows();
+    let mut files = 0;
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "tsv") {
+            continue;
+        }
+        files += 1;
+        for row in parse_tsv(&std::fs::read_to_string(&path).unwrap()).unwrap() {
+            assert!(shipped.contains(&row), "{} is not in SHIPPED_FILES: {}", path.display(), row.key);
+        }
+    }
+    assert!(files >= 3);
+}
+
+#[test]
 fn shipped_files_are_embedded_not_read_from_the_cwd() {
     // include_str! bakes the text in, so a changed working directory changes
     // nothing. (Process-wide cwd is safe here: no other test in this binary
