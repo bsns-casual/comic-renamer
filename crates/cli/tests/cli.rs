@@ -683,3 +683,49 @@ fn undo_exits_non_zero_when_a_row_cannot_be_reversed() {
     // And it left the stranger alone rather than reversing over it.
     assert!(f.placed.exists());
 }
+
+// ---------------------------------------------------------------------------
+// map
+// ---------------------------------------------------------------------------
+
+fn map_cmd(f: &Fixture, config: &Path) -> Command {
+    let mut c = Command::new(EXE);
+    c.current_dir(f.source.parent().unwrap())
+        .env("XDG_CONFIG_HOME", config)
+        .arg("map")
+        .arg(&f.source)
+        .arg("--dest")
+        .arg(&f.dest)
+        .stdin(Stdio::null());
+    c
+}
+
+#[test]
+fn map_over_a_pipe_with_unmapped_files_is_refused_and_writes_no_plan() {
+    let f = fixture(Mode::Move);
+    let config = TempDir::new().unwrap();
+    let out = map_cmd(&f, config.path()).output().unwrap();
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("terminal"), "{}", stderr(&out));
+    assert!(!stdout(&out).contains('\x1b'));
+    assert!(!f.source.parent().unwrap().join("comic-renamer-plan.jsonl").exists());
+    assert!(f.source.join("hellboy_vol1.pdf").exists());
+}
+
+#[test]
+fn map_with_nothing_unmapped_needs_no_terminal_and_writes_the_plan() {
+    let f = fixture(Mode::Move);
+    let config = TempDir::new().unwrap();
+    let dir = config.path().join("comic-renamer");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("mappings.tsv"),
+        "key\tseries\tvolume\tsubtitle\tlang\tvolume_count\tbundle\n\
+         hellboyvol1\tHellboy\t1\t\ten\t\t\n",
+    )
+    .unwrap();
+    let out = map_cmd(&f, config.path()).output().unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("nothing needed mapping"), "{}", stdout(&out));
+    assert!(f.source.parent().unwrap().join("comic-renamer-plan.jsonl").exists());
+}

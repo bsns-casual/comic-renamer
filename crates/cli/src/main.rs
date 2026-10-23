@@ -21,6 +21,8 @@ use comic_renamer_core::types::{
     UndoReport,
 };
 use comic_renamer_core::{apply, komga_api, plan, scan};
+mod map;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -83,6 +85,35 @@ enum Command {
         copy: bool,
     },
 
+    /// Identify every file, then walk you through the ones the database does
+    /// not know. Writes the same plan `scan` does. Needs a terminal.
+    Map {
+        /// The folder of comics to rename. Not searched recursively.
+        source: PathBuf,
+        /// Where the renamed library goes. Must already exist.
+        #[arg(long)]
+        dest: PathBuf,
+        /// Where to write the plan [default: comic-renamer-plan.jsonl]
+        #[arg(long, short = 'o')]
+        out: Option<PathBuf>,
+        /// Which library app's layout to produce.
+        #[arg(long, default_value = "komga")]
+        preset: String,
+        /// Which language's editions to match. Never falls back to another.
+        #[arg(long, default_value = "en")]
+        lang: String,
+        /// Which marketplace the files came from. Decides how an unmapped
+        /// file is guessed at; only Humble consults the corpus.
+        #[arg(long, default_value = "Humble")]
+        marketplace: String,
+        /// Relocate the files; the originals stop existing. The default.
+        #[arg(long = "move")]
+        move_: bool,
+        /// Keep the originals. Clones on APFS, so it usually costs nothing.
+        #[arg(long, conflicts_with = "move_")]
+        copy: bool,
+    },
+
     // The mode flag is on `scan`, not here: §6.10 selects a per-row mechanism
     // during the scan, which is impossible if scan is never told the mode.
     // That is what makes `apply` reproducible from the plan alone (§6.13).
@@ -135,6 +166,24 @@ fn main() -> ExitCode {
             move_: _,
             copy,
         } => run_scan(
+            source,
+            dest,
+            out,
+            preset,
+            lang,
+            marketplace,
+            if copy { Mode::Copy } else { Mode::Move },
+        ),
+        Command::Map {
+            source,
+            dest,
+            out,
+            preset,
+            lang,
+            marketplace,
+            move_: _,
+            copy,
+        } => map::run(
             source,
             dest,
             out,
