@@ -31,6 +31,10 @@ pub struct Detail {
     /// The user has typed, edited a field or picked a candidate. A flagged
     /// row's pre-filled value only counts as verified once this is set.
     touched: bool,
+    /// A field was edited directly. The sentence is then only a view of the
+    /// fields: re-parsing it could move content between them (a series with a
+    /// colon would split), so typing in the box is ignored until a pick resets.
+    structured: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -42,7 +46,7 @@ enum Field {
 
 impl Detail {
     pub fn from_text(text: &str) -> Detail {
-        Detail { text: text.to_string(), parsed: parse_title(text), candidates: vec![], picked: None, ext: String::new(), field: None, flagged: false, touched: false }
+        Detail { text: text.to_string(), parsed: parse_title(text), candidates: vec![], picked: None, ext: String::new(), field: None, flagged: false, touched: false, structured: false }
     }
 
     /// Starts from what the user already typed, else the top candidate, else
@@ -107,11 +111,15 @@ impl Detail {
         }
         self.text = show(&p.series, p.volume, p.subtitle.as_deref());
         self.touched = true;
+        self.structured = true;
     }
 
     pub fn on_input(&mut self, c: char) {
         if let Some(f) = self.field {
             return self.edit_field(f, Some(c));
+        }
+        if self.structured {
+            return;
         }
         self.text.push(c);
         self.reparse();
@@ -120,6 +128,9 @@ impl Detail {
     fn on_backspace(&mut self) {
         if let Some(f) = self.field {
             return self.edit_field(f, None);
+        }
+        if self.structured {
+            return;
         }
         self.text.pop();
         self.reparse();
@@ -130,8 +141,12 @@ impl Detail {
     fn pick(&mut self, delta: isize) {
         let Some(last) = self.candidates.len().checked_sub(1) else { return };
         let at = (self.picked.unwrap_or(0) as isize + delta).clamp(0, last as isize) as usize;
+        if self.picked == Some(at) {
+            return; // nothing moved: keep what the user typed
+        }
         self.picked = Some(at);
         self.field = None;
+        self.structured = false;
         self.parsed = as_parsed(&self.candidates[at]);
         self.text = show(&self.parsed.series, self.parsed.volume, self.parsed.subtitle.as_deref());
         self.touched = true;
@@ -145,7 +160,7 @@ impl Detail {
     }
 
     /// The path the current fields produce, from the real preset.
-    pub fn destination_line(&self, preset: &dyn Preset, ext: &str) -> String {
+    pub fn destination_line(&self, preset: &dyn Preset) -> String {
         if self.parsed.series.trim().is_empty() {
             return "(type a series name)".to_string();
         }
@@ -158,7 +173,7 @@ impl Detail {
             volume_count: self.volume_count(),
             bundle: String::new(),
         };
-        preset.destination(&row.resolved(), ext).display().to_string()
+        preset.destination(&row.resolved(), &self.ext).display().to_string()
     }
 
     fn on_key(&mut self, k: KeyEvent) -> Step {
@@ -203,7 +218,9 @@ impl Detail {
         ])
         .areas(frame.area());
         frame.render_widget(format!(" {stem}"), head);
-        let note = if self.flagged && !self.touched {
+        let note = if self.structured && self.field.is_none() {
+            "fields were edited directly; edit them with tab, or pick a candidate to start over"
+        } else if self.flagged && !self.touched {
             "this guess needs a change or a pick before it can be accepted"
         } else {
             "type a title, or press tab to edit a field; check the path below"
@@ -227,7 +244,7 @@ impl Detail {
         );
         // Wrapped: a long path must not clip the extension off the end.
         frame.render_widget(
-            ratatui::widgets::Paragraph::new(format!("\n files to   {}", self.destination_line(preset, &self.ext)))
+            ratatui::widgets::Paragraph::new(format!("\n files to   {}", self.destination_line(preset)))
                 .wrap(ratatui::widgets::Wrap { trim: false }),
             dest,
         );
@@ -300,6 +317,10 @@ mod tests {
         }
     }
 
+    fn titled(text: &str, ext: &str) -> Detail {
+        Detail { ext: ext.into(), ..Detail::from_text(text) }
+    }
+
     fn key(c: KeyCode) -> KeyEvent {
         KeyEvent::new(c, KeyModifiers::NONE)
     }
@@ -348,42 +369,42 @@ mod tests {
     #[test]
     fn the_destination_line_is_rendered_by_the_real_preset() {
         let d = Detail::from_text("Hack/Slash: Back to School");
-        let line = d.destination_line(&Komga, "cbz");
+        let line = d.destination_line(&Komga);
         assert!(line.contains("Hack - Slash"), "the slash is sanitised by the preset, not stored mangled: {line}");
         assert_eq!(line.matches('/').count(), 1, "only the series/book separator: {line}");
     }
 
     #[test]
     fn the_destination_line_matches_the_spec_example() {
-        let d = Detail::from_text("The Complete ElfQuest Volume 1: The Original Quest TPB");
+        let d = titled("The Complete ElfQuest Volume 1: The Original Quest TPB", "cbz");
         assert_eq!(
-            d.destination_line(&Komga, "cbz"),
+            d.destination_line(&Komga),
             "The Complete ElfQuest/The Complete ElfQuest Vol. 01 - The Original Quest TPB.cbz"
         );
     }
 
     #[test]
     fn padding_comes_from_volume_count_not_from_the_volume() {
-        let d = Detail::for_entry(&Entry::new("s".into(), vec![sug("Manga", Some(2), None, Some(100))]));
-        let line = d.destination_line(&Komga, "cbz");
+        let d = Detail::for_entry(&Entry::new("s".into(), vec![sug("Manga", Some(2), None, Some(100))]).with_extension("cbz"));
+        let line = d.destination_line(&Komga);
         assert!(line.contains("Vol. 002"), "{line}");
-        let d = Detail::from_text("Manga Volume 2");
-        let line = d.destination_line(&Komga, "cbz");
+        let d = titled("Manga Volume 2", "cbz");
+        let line = d.destination_line(&Komga);
         assert!(line.contains("Vol. 02."), "no count means the two-digit floor: {line}");
     }
 
     #[test]
     fn retyping_the_series_drops_the_picked_candidates_count() {
-        let mut d = Detail::for_entry(&Entry::new("s".into(), vec![sug("Manga", Some(2), None, Some(100))]));
+        let mut d = Detail::for_entry(&Entry::new("s".into(), vec![sug("Manga", Some(2), None, Some(100))]).with_extension("cbz"));
         d.text = "Other Volume 2".into();
         d.on_input('0');
-        let line = d.destination_line(&Komga, "cbz");
+        let line = d.destination_line(&Komga);
         assert!(line.contains("Vol. 20."), "{line}");
     }
 
     #[test]
     fn a_blank_title_has_no_destination() {
-        let line = Detail::from_text("").destination_line(&Komga, "cbz");
+        let line = Detail::from_text("").destination_line(&Komga);
         assert!(!line.contains('/') && !line.contains(".cbz"), "{line}");
     }
 
@@ -472,7 +493,7 @@ mod tests {
 
     #[test]
     fn tab_edits_one_field_and_leaves_the_others_intact() {
-        let mut d = Detail::from_text("Series Volume 1: Sub");
+        let mut d = titled("Series Volume 1: Sub", "pdf");
         d.on_key(key(KeyCode::Tab)); // series
         d.on_key(key(KeyCode::Tab)); // volume
         d.on_key(key(KeyCode::Backspace));
@@ -481,7 +502,7 @@ mod tests {
         assert_eq!(d.parsed.series, "Series");
         assert_eq!(d.parsed.subtitle.as_deref(), Some("Sub"));
         assert_eq!(d.text, "Series Volume 7: Sub");
-        assert!(d.destination_line(&Komga, "pdf").contains("Series Vol. 07 - Sub.pdf"));
+        assert!(d.destination_line(&Komga).contains("Series Vol. 07 - Sub.pdf"));
     }
 
     #[test]
@@ -545,7 +566,7 @@ mod tests {
         d.pick(1);
         assert_eq!(d.parsed.series, "Batman: Year One");
         assert_eq!(d.parsed.subtitle, None);
-        let line = d.destination_line(&Komga, "cbz");
+        let line = d.destination_line(&Komga);
         assert!(line.contains("Vol. 002"), "volume_count survives the pick: {line}");
         let first = Detail::for_entry(&Entry::new("b".into(), vec![sug("Batman: Year One", Some(1), None, None)]));
         assert_eq!(first.parsed.series, "Batman: Year One", "the initial fill is not re-parsed either");
@@ -560,5 +581,37 @@ mod tests {
         .with_extension("pdf");
         let s = screen_at(&Detail::for_entry(&e), &e.stem, 80);
         assert!(s.contains("TPB.pdf"), "{s}");
+    }
+
+    #[test]
+    fn returning_to_the_sentence_box_cannot_re_split_a_series_with_a_colon() {
+        let mut d = Detail::from_text("Nemesis Volume 1");
+        d.on_key(key(KeyCode::Tab)); // series
+        type_str(&mut d, ": Rogues' Gallery");
+        for _ in 0..3 {
+            d.on_key(key(KeyCode::Tab)); // volume, subtitle, sentence box
+        }
+        type_str(&mut d, "x");
+        assert_eq!(d.parsed.series, "Nemesis: Rogues' Gallery");
+        assert_eq!(d.parsed.subtitle, None);
+        assert_eq!(d.parsed.volume, Some(1));
+    }
+
+    #[test]
+    fn a_pick_that_changes_nothing_keeps_what_was_typed() {
+        let mut d = Detail::for_entry(&Entry::new("s".into(), vec![sug("Only", Some(1), None, None)]));
+        type_str(&mut d, " typed");
+        d.on_key(key(KeyCode::Up));
+        d.on_key(key(KeyCode::Down));
+        assert_eq!(d.text, "Only Volume 1 typed");
+    }
+
+    #[test]
+    fn up_at_the_top_of_several_candidates_keeps_what_was_typed() {
+        let e = Entry::new("w".into(), vec![sug("Witch", Some(1), None, None), sug("Witcher", Some(1), None, None)]);
+        let mut d = Detail::for_entry(&e);
+        type_str(&mut d, "!");
+        d.on_key(key(KeyCode::Up));
+        assert_eq!(d.text, "Witch Volume 1!");
     }
 }
