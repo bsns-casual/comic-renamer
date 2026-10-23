@@ -1,0 +1,576 @@
+# Mapping-first rebuild
+
+Status: **draft, awaiting approval** — builder-checked 2026-10-22, three owner decisions recorded
+Supersedes parts of `2026-10-19-comic-renamer-design.md` — see §2.
+Date: 2026-10-22
+
+---
+
+## 1. Intent
+
+Comic Renamer currently *derives* each comic's title by matching its filename
+against a 1.2-million-series GCD corpus. That was the wrong shape for the
+problem.
+
+The files this tool exists to rename are bought in distributor bundles —
+Humble Bundle, Fanatical, Sweet Shop. **The distributor publishes the real
+title next to every download.** The title is a known quantity. We were
+throwing it away and then paying a large, fragile machine to guess it back.
+
+### 1.1 What the guessing actually costs, measured
+
+`cargo xtask measure`, 2026-10-22, against the implemented resolver and the
+2,223 verified rows in `fixtures/humble-ground-truth.tsv`:
+
+```
+   1172   52.7%  ready
+    430   19.3%  review - ambiguous
+    290   13.0%  failed - no series matched
+    238   10.7%  review - unsplit subtitle
+     67    3.0%  review - volume infeasible
+     26    1.2%  review - no language match
+
+located   91.6%   gate >= 92.3%   FAIL
+ready     52.7%   gate >= 66.0%   FAIL
+silent FP 10.12%  gate <= 0.48%   FAIL
+```
+
+Every gate fails. The silent false-positive rate — §4's "confident wrongness"
+anti-goal, the one the design calls the one that matters — is **21x its
+target**, and 0.48% was never re-measured against the implemented resolver at
+all. Folding case in the grader takes it to 4.23%, still 9x, and case folding
+was rejected on 2026-10-22 because it would hide real mismatches.
+
+### 1.2 Why a lookup is not merely better but exact
+
+The same filenames, keyed by a normalised stem (§5.3) rather than resolved:
+
+```
+usable rows 2223   distinct titles 1703   distinct stems 2055
+normalised keys 1876   keys mapping to >1 title: 0  (0.00%)
+```
+
+**Zero ambiguity.** The 430 rows the resolver calls "review — ambiguous" are
+ambiguous only because the answer was discarded before the search began. In
+the actual input domain, filename → title is a function.
+
+### 1.3 The reframe
+
+This is not a generic renamer. It is a renamer for files bought in
+distributor bundles, where titles are known and recorded. Sorting for Komga,
+Kavita and friends is a convenience layered on top.
+
+**An unmapped filename means nobody has mapped it yet.** It is a gap in a
+contributed dataset, not a failure of inference. The tool's job in that
+moment is to make filling the gap easy and to offer its best guess as a
+starting point.
+
+---
+
+## 2. What this supersedes
+
+| In the 2026-10-19 design | Now |
+|---|---|
+| §6.1 Stage ① title resolution | Demoted. Resolution produces *suggestions* for the mapping session only. Never authoritative. |
+| §6.3 Disambiguation, "mandatory, not a refinement" | Deleted as a decision procedure. Candidates become a picker's menu. |
+| §6.7 Status model (`ready`/`review`/`failed`) | Replaced by `mapped` / `unmapped`. See §6.2. |
+| §7 Fixture suite, the silent-false-positive gate | Dissolved, not re-derived. See §8. |
+| §6.5 Corpus distribution | Retained, but the download becomes lazy and optional. See §5.6. |
+| §6.11 Rule-data safety | Unchanged in content, promoted from Phase 3 to load-bearing on day one. See §7.3. |
+
+Unchanged and not to be touched: §6.8 presets, §6.9 the plan, §6.10 execution
+and safety, §6.13's `scan`/`apply`/`undo` contract, and all nine invariants in
+`CLAUDE.md`.
+
+---
+
+## 3. Goals
+
+1. A mapped bundle renames deterministically, with no inference and no corpus.
+2. An unmapped bundle is announced plainly, then mapped in one interactive
+   session with guesses pre-filled.
+3. A user's corrections persist locally and can be contributed upstream in one
+   step.
+4. Every filesystem guarantee the current tool has survives intact.
+
+## 4. Non-goals and anti-goals
+
+Inherits all of §3 and §4 from the 2026-10-19 design. Additions:
+
+**Non-goals**
+- Mapping files that did not come from a distributor bundle. Scene releases
+  and hand-renamed libraries stay out of scope (invariant 9).
+- Guess quality as a product promise. Guesses are a typing aid.
+
+**Anti-goals**
+- **Storing anything the user did not approve.** The old silent-FP risk is
+  removed by construction: nothing enters the mapping without a keystroke.
+- **A mapping table whose keys can silently change.** See §5.3 — key
+  normalisation is effectively a hash of the filename, and altering it
+  invalidates every row ever contributed.
+- **Contributed data that can influence a path.** §6.11 exists for this and is
+  now live.
+
+---
+
+## 5. The mapping
+
+### 5.1 Row shape
+
+A row carries metadata fields only — never a path, never a separator
+(invariant 1, §6.11).
+
+```
+key          normalised filename stem (§5.3)
+series       display string, the Komga series folder
+volume       integer, optional
+subtitle     optional, e.g. "The Original Quest TPB", "The Special Edition"
+lang         informational only — see below
+volume_count series' known highest volume — see §5.5
+bundle       provenance, and the lookup tiebreaker — see §5.4
+```
+
+**`subtitle`, not `edition`.** `Resolved` and `preset/komga.rs:55` already have
+`subtitle` and render it as ` - Subtitle`. An earlier draft of this document
+invented `edition` and dropped `subtitle` while also promising §6.8 presets
+would not be touched; those cannot both hold. Keeping `subtitle` holds the
+promise and avoids the collisions below.
+
+Measured cost of getting this wrong: with series and volume alone, **280 of
+2,223 titles (12.6%) share a destination with at least one other distinct
+title**, in 49 groups — all three of `Usagi Yojimbo: 35 Years of Covers`,
+`: 40th Anniversary Reader` and `: The Special Edition` collapse onto one
+path. Invariant 6 then refuses them, so they would be `mapped` and still
+unplaceable, which is strictly worse than today's `review`.
+
+**`lang` is informational.** Lookup never consults it (§5.4), so `--lang` and
+D33's hard no-fallback filter govern *guessing* only. On a mapped row the
+field records what the corpus thought at mapping time and nothing reads it.
+
+No field may contain a tab, which is what makes the storage format below safe.
+
+### 5.2 Format and location
+
+**Format: TSV, one row per line, header row first.** Chosen because the table
+is already ~1,900 rows and will grow; a TSV diff is reviewable line-by-line in
+a PR; contributors can edit it in a spreadsheet; and §6.11 already forbids tab
+in every contributed field, so the format needs no quoting rules at all. TOML
+becomes unreadable at this row count and JSON triples the diff noise.
+
+Two layers, local winning:
+
+| Layer | Location | Loaded how |
+|---|---|---|
+| Shipped | `data/mappings/*.tsv` in-repo | `include_str!`, embedded in the binary |
+| Local | `$XDG_CONFIG_HOME/comic-renamer/` else `~/Library/Application Support/comic-renamer/` | read at runtime |
+
+**The local file goes in Application Support, not Caches.** The existing
+`cache_dir()` points at `~/Library/Caches`, which is correct for a
+re-downloadable corpus and wrong for user data — macOS may evict it. These are
+different directories for different reasons and the builder should not reuse
+`cache_dir()` here.
+
+Shipped mappings are embedded because an installed binary run from an
+arbitrary directory must still have its data. This repo has already shipped
+that defect once, with `Overrides::load(Path::new("data/overrides.toml"))`
+resolving against the cwd.
+
+Local overrides shipped, for the same reason Layer B outranks the corpus in
+§6.2.1: the local file is the only place a user can correct a wrong row.
+
+### 5.3 Key normalisation, and why it is frozen
+
+```
+1. NFC
+2. lowercase
+3. strip a trailing download-id run of 9 or more digits, with any single
+   leading separator:            /[_-]?\d{9,}$/
+4. strip a trailing quality token, with its separator:
+                                 /[_-](hd|sd|lq|hq)$/
+5. strip all non-alphanumerics
+```
+
+**Validated: 1,846 keys over 2,223 rows, zero collisions.** That is the number
+the pinning test asserts.
+
+Three things about this rule were wrong in the first draft and are corrected
+here, because it is frozen and a wrong freeze is unrecoverable:
+
+- **Step order is load-bearing.** The quality token is only *trailing* after
+  the download id is stripped — `xo_manowar_vol1_hd_1410891143` exposes `hd`
+  at the end only at step 4. The draft ran the quality step first.
+- **The draft's quality step was a no-op.** It used `\b(hd|sd|lq|hq)\b`, and
+  `\b` never matches between `_` and `h` because `_` is a word character. So
+  the published figure of 1,876 keys was the count with that step doing
+  nothing. Both counts happen to give zero collisions, but the rule and its
+  asserted number have to agree.
+- **Substring matching is forbidden.** Matching `sd`/`hd` anywhere turns
+  `waltdisneysdonaldduck…` into `waltdisneyonaldduck…` and `comicsdementia`
+  into `comicementia` — 63 rows mangled. Trailing-token only.
+
+**This rule is a one-way function from filename to key. Changing it
+invalidates every mapping ever contributed.** Treat it as frozen. It must be
+pinned by a test against the committed ground-truth fixture, and any change is
+a breaking data migration with a version bump and a rewrite of every shipped
+row — not a refactor.
+
+**CI must fail if any two rows share a key *and* bundle with different fields.**
+That check is what replaces the entire §6.3 disambiguation apparatus. The
+`bundle` qualifier is in the comparison from day one — see §5.4, which is what
+keeps a future cross-distributor collision from needing a migration.
+
+### 5.4 Lookup, and why `bundle` is a tiebreaker rather than part of the key
+
+Lookup is `key → rows`. One row: that is the answer. More than one row:
+`bundle` disambiguates, and a source folder that matches no bundle leaves the
+file unmapped rather than guessing.
+
+This is deliberately different from both the draft and §6.2.1. The draft
+removed `bundle` from lookup entirely on the strength of the zero-collision
+measurement, which reverses §6.2.1's explicit warning that a bare filename key
+recurs across publishers. But §6.2.1's examples — `vol1.pdf`, `001.pdf`,
+`cover.pdf` — are substantially already filtered by the ancillary rules in
+`scan.rs`, which is part of why the measurement saw no collisions.
+
+Making `bundle` a tiebreaker rather than a key component gets both properties:
+the common path is a single stem lookup with no folder-name dependency, and a
+genuine collision from a second distributor is a *new row*, not a breaking
+change to a frozen key rule. Without this, D40's freeze would make the first
+cross-distributor collision unrecoverable.
+
+Note that 155 of the 1,846 keys already appear under more than one bundle with
+the *same* title, so the CI gate must compare fields rather than merely count
+rows per key.
+
+### 5.5 `volume_count`, and the D37 problem this solves
+
+D37 pads volume numbers to a per-series width taken from the corpus
+`issue_count`. With the corpus no longer consulted on the mapped path, that
+width has to come from somewhere else.
+
+Deriving it from the highest volume present in the mapping is wrong: a user who
+maps volumes 1–9 gets `Vol. 01`, then adds volume 10 and every existing file is
+now misnamed. The width must not move.
+
+So the row stores `volume_count`, pre-filled from corpus `issue_count` when a
+guess is available and user-editable otherwise, floored at two digits as D37
+already specifies. It is metadata, not a path, so §6.11 permits it.
+
+### 5.6 The corpus becomes lazy and optional
+
+The corpus is only needed to *suggest*. A user whose bundle is fully mapped
+should never download it.
+
+- Fetch on first need — when a session has at least one unmapped file.
+- A missing or undownloadable corpus degrades to "no guess", never to an error.
+- `rusqlite` and `ring` remain compile-time dependencies, so
+  `xcode-select --install` remains a documented prerequisite. Feature-gating
+  them would fragment the binary and strip guesses from exactly the users who
+  need them most.
+
+---
+
+## 6. Flow
+
+### 6.1 Commands
+
+```
+comic-renamer map   <source> --dest <dir> --preset komga [--move|--copy] [-o plan.jsonl]
+comic-renamer scan  <source> --dest <dir> --preset komga [--move|--copy] [-o plan.jsonl]
+comic-renamer apply plan.jsonl
+comic-renamer undo  plan.jsonl
+```
+
+`map` is the interactive session. `scan` stays exactly as specified in §6.13 —
+non-interactive, scriptable, and the right command for an already-mapped
+bundle. When `scan` finds unmapped files it reports the count and names `map`.
+
+`map` takes `-o` and defaults to `comic-renamer-plan.jsonl` exactly as `scan`
+does. It must not write to a temp directory: `undo` takes the *plan* path and
+derives the manifest beside it (D38), so a plan that vanishes makes the run
+un-undoable — losing the single guarantee §6.6 exists to preserve.
+
+`apply` and `undo` are untouched.
+
+### 6.2 Status model
+
+`mapped` or `unmapped`. Nothing else. A mapped row has a series and, where
+applicable, a volume; an unmapped row stays where it is and is reported.
+
+The current `ReviewReason` variants do not survive as statuses. `Ambiguous`
+carries `Vec<SeriesRecord>` and that payload is exactly a picker's candidate
+list — the type was right and was being used to refuse rather than to offer.
+
+### 6.3 The mapping session
+
+Opens when `map` finds unmapped files. Leads with plain orientation text:
+
+> Below is every file in your bundle we could not match: its filename, our
+> guess, and a spot for you to approve or correct the final name.
+>
+> `thecompleteelfquest_vol1` → *The Complete ElfQuest Volume 1* → **The
+> Complete ElfQuest Volume 1: The Original Quest TPB**
+
+Then the table:
+
+```
+ Unmapped files in "Humble Comics Bundle: ElfQuest"          12 of 40 approved
+
+ filename                      our guess                    final name
+ ───────────────────────────────────────────────────────────────────────────────
+ thecompleteelfquest_vol1      The Complete ElfQuest Vol…    The Complete ElfQuest Volume 1: The Original Quest TPB ▏
+ thecompleteelfquest_vol2      The Complete ElfQuest Vol…    ✓ The Complete ElfQuest Volume 2
+ elfquest_siege_vol1           ElfQuest: Siege at Blue M…    ✓ ElfQuest: Siege at Blue Mountain
+ elfquest_kingsofthebrokenw…   (no guess)                    ▏
+
+ ↑↓ row   ⏎ approve   e edit   ^A approve all remaining   ^S done
+```
+
+Every row needs explicit approval. `^A` exists because a 300-file bundle
+cannot want 300 keystrokes; it approves the remaining guesses as-is and is
+reported in the final confirmation.
+
+### 6.4 Editing a row
+
+The stored truth is structured fields. The user may instead type a sentence,
+which is parsed into those fields with the result shown before it is accepted.
+
+```
+ thecompleteelfquest_vol1
+
+ type a title, or edit the fields directly
+ ┌────────────────────────────────────────────────────────────────────────┐
+ │ The Complete ElfQuest Volume 1: The Original Quest TPB                 │
+ └────────────────────────────────────────────────────────────────────────┘
+ parsed as
+   series   The Complete ElfQuest
+   volume   1
+   edition  The Original Quest TPB
+
+ files to   The Complete ElfQuest/The Complete ElfQuest Vol. 01.cbz
+
+ ⏎ accept   tab edit a field directly   esc cancel
+```
+
+**The destination line is the safety mechanism.** It renders through the real
+preset, so a mis-parse is visible before anything is stored. Parsing at *edit*
+time with the result on screen is categorically different from parsing at
+rename time: a bad parse costs a correction, not a misfiled file.
+
+The boundary detection already exists and is validated. `split_title` in
+`xtask/src/lib.rs` locates `Volume N:` mid-title, roman numerals,
+`Volume 1 (Second Edition)`, trailing `#7` and `(#1-6)`, measured against
+2,223 real Humble titles.
+
+**It is not the parser, though — it is a grader, and the distinction matters.**
+It returns normalised word vectors, strips punctuation, and discards the volume
+number it found, because comparison was all it ever needed. The parser needs
+the user's string verbatim, the volume as an integer, and byte offsets. So the
+boundary-detection logic moves to core and both callers share it; the grader is
+not retrofitted into a parser.
+
+### 6.5 Confirmation and the two offers
+
+On `^S`: a filename → final name list, then
+
+1. Rename now? Writes a plan and runs `apply` on it in this session.
+2. Contribute these mappings? §7.
+
+### 6.6 The TUI writes a plan; it never renames directly
+
+`map` produces a plan and hands it to `apply`. This is not negotiable and is
+the reason the rebuild is an excision rather than a rewrite: it keeps
+invariant 2 (`apply` recomputes destinations from metadata, never trusting a
+path string — D14), invariant 6 (no-clobber at the syscall), `TreeGuard`
+proving refusals move nothing, the free-space reserve, the collision report,
+and the plan-as-undo-record. The Task 13 disclosure *is* the final
+confirmation screen's content.
+
+---
+
+## 7. Contribution
+
+### 7.1 Mechanism
+
+`gh pr create`. The user is already authenticated, no credentials pass through
+this tool, and no HTTP client is added.
+
+When `gh` is absent or unauthenticated: write the rows to a file, print the
+path and the exact commands to run. Never a silent failure, never a degraded
+half-submission.
+
+### 7.2 What the PR contains
+
+Only approved rows, and only the fields in §5.1. **No filesystem paths** —
+the row is keyed by a normalised stem, so a contribution cannot leak directory
+layout, usernames or library locations. The builder must confirm this holds
+for the `bundle` provenance field too.
+
+Rows the user corrected but chose not to contribute stay local.
+
+### 7.3 Which characters are rejected, and which are sanitised
+
+**Owner decision, 2026-10-22: the forbid-list splits.**
+
+§6.11 rejects contributed data containing `:` among much else. That was correct
+when a contributed rule was a small patch over trusted corpus titles. It is not
+correct now, because the contributed `series` field *is* the title: **595 of
+2,223 real Humble titles (26.8%) contain a rejected character** — 587 colons,
+7 slashes, 4 `?`, 2 `"`. `Nemesis: Rogues' Gallery` and
+`Hypnotwist / Scarlet By Starlight` would be unstorable as published.
+
+So §6.11's own distinction is applied by character class rather than by data
+origin:
+
+| | |
+|---|---|
+| **Rejected** | `/` `\` · `.` and `..` · leading `.` · drive-letter and UNC prefixes · leading `/` · NUL and all C0/C1 controls · tab, CR, LF · leading `=` `+` `-` `@` · bidi controls · zero-width · non-NFC · mixed-script confusables · trailing dot or space · Windows device names · per-field byte cap |
+| **Stored verbatim, sanitised by the preset on the way to a path** | `:` `?` `"` `|` `<` `>` `*` |
+
+The reject column is exactly the set that can influence a *location*; the
+sanitise column is the set that is merely hostile to some filesystem. Invariant
+1 is unaffected: the preset remains the sole path constructor, and a bad row
+can still only produce a wrong name.
+
+Storing the real title verbatim also keeps the table reusable by a preset with
+different path rules — Kavita and Plex are Phase 2 — and lets a contributed row
+be checked against the distributor's published title, which a pre-sanitised
+table cannot support.
+
+### 7.4 §6.11 is now load-bearing
+
+`CLAUDE.md` currently defers three §6.11 items — total path budget, rule-count
+cap, file-size cap — on the grounds that contributed rule data is Phase 3. **A
+contribution pipeline is Phase 3.** All three ship with this work, enforced in
+CI on every PR *and* re-validated at `apply`, because the plan file is
+untrusted too.
+
+§6.11 names the three without numbers. These are my call, and a reviewer should
+push back on any of them:
+
+| Cap | Value | Why |
+|---|---|---|
+| Per field | 120 bytes | Already in `overrides.rs`; unchanged. |
+| Rendered destination | 255 bytes per component, 1024 total | "Total path budget" cannot mean a path — a row contains none (invariant 1). It means the destination the preset *renders* from the row: series, volume, subtitle, extension. CI cannot know `dest_root`, so it budgets the part the row controls and leaves headroom. |
+| Rows per PR | 2,500 | Must clear the §10 seeding PR of ~1,850 rows, or seeding bypasses the gate it exists to enforce. |
+| Bytes per mapping file | 2 MiB | ~1,850 rows is well under 1 MiB at this row width. |
+
+---
+
+## 8. What happens to the gate
+
+Task 14's three thresholds dissolve. They are not re-derived.
+
+They existed because a wrong guess silently misfiled a file. Nothing is
+stored without approval now, so there is no silent anything. A 10.12%
+suggestion-error rate that fails today's gate 21x is unremarkable for a
+pre-filled field a human confirms.
+
+Replacing them:
+
+| Check | Kind |
+|---|---|
+| No two mapping rows share a key with different fields | **hard CI gate** |
+| Every §6.11 forbid-list rule, per contributed field | **hard CI gate** |
+| Key normalisation unchanged against the ground-truth fixture | **hard CI gate** |
+| Mapping coverage of `humble-ground-truth.tsv` | reported |
+| Guess quality (`located`, currently 91.6%) | reported, non-gating |
+
+`cargo xtask measure` keeps the reporting rows and loses the exit code.
+
+---
+
+## 9. Risks
+
+- **The first user of every new bundle does all the work.** Inherent to the
+  reframe and accepted: guesses plus one-step contribution are the mitigation,
+  and the second user of that bundle pays nothing.
+- **Key normalisation is a migration hazard.** §5.3.
+- **Untrusted data now flows in.** §7.3.
+- **`volume_count` is user-supplied and affects padding.** A wrong value gives
+  a wrong *name*, never a wrong *location* — invariant 1 holds.
+- **Guess quality is now a UX cost, not a correctness one.** A bad guess means
+  typing, which is the right place for that cost to land.
+
+---
+
+## 10. Seeding the shipped table
+
+**Owner decision, 2026-10-22: seed from the ground-truth fixture, reviewed
+before it ships.**
+
+Shipping empty would make goal 1 describe nobody at launch, and §1.2's
+zero-ambiguity measurement a property of a table that does not exist. So the
+~1,850 keys become the first `data/mappings/*.tsv`.
+
+The fixture holds `bundle`, `title`, `stem` only. `volume`, `subtitle` and
+`volume_count` have to be derived by running §6.4's parser over 2,223 titles —
+and **shipping that output unreviewed would violate §4's "nothing stored
+without a keystroke" anti-goal on the very first commit.** So seeding is a
+two-step task: generate, then review in the TUI, then commit. The TUI is
+therefore a dependency of seeding, not the reverse.
+
+One fixture defect to handle: line 1267 has no `stem` and must be dropped or
+repaired, which is why 2,224 lines yield 2,223 usable rows.
+
+**Open, and a release blocker rather than a build blocker:** `data/LICENSE`
+attributes rule data to GCD under CC BY-SA 4.0. These titles came from Humble's
+order API, and D31 committed them as *test data* with no URLs, prices or
+account data. Shipping them as the product's dataset in a public repository is
+a different use and needs its own licence answer. Building and reviewing the
+table locally does not wait on this; publishing it does.
+
+---
+
+## 11. Left to the builder
+
+- Whether `map` on a fully-mapped bundle is an error, a no-op, or falls
+  through to `scan` behaviour.
+- TUI library. My call: `ratatui` with `crossterm`, version pinned at
+  implementation time against this workspace's `rust-version = "1.85"`.
+  Hand-rolling three scrolling columns with inline editing is a few hundred
+  lines of redraw and cursor arithmetic that breaks on resize and multi-byte
+  input.
+- How shipped mappings are sharded across `data/mappings/*.tsv` — per bundle
+  reads well in PRs; per publisher or per letter may scale better.
+- Whether `scan` should refuse outright when nothing is mapped, or produce a
+  plan covering only the mapped rows.
+- Migration of the existing `data/overrides.toml` rows into the mapping table.
+- Terminal capability floor, and the fallback when stdout is not a TTY.
+
+## 12. Decision log entries this proposes
+
+Next free number is **D39**.
+
+- **D39** Titles are looked up, not derived. Measured: 0 key collisions over
+  2,223 verified rows against 10.12% silent false positives from the resolver.
+- **D40** Key normalisation is frozen at §5.3's five ordered steps, asserting
+  1,846 keys; a change is a breaking data migration. Trailing-token matching
+  only — substring matching mangles 63 known rows.
+- **D41** `bundle` is a lookup tiebreaker, not part of the key, so a future
+  cross-distributor collision is a new row rather than a migration against
+  D40's freeze.
+- **D42** Mapping storage is TSV, two layers, local winning; user data in
+  Application Support, never Caches.
+- **D43** The row carries `subtitle`, not an invented `edition`. Series and
+  volume alone put 280 of 2,223 titles (12.6%) on a shared destination.
+- **D44** `volume_count` is stored per row, because D37's padding width cannot
+  be derived from a growing table without renaming files already placed.
+- **D45** The mapping session writes a plan and delegates to `apply`; it never
+  touches the filesystem itself, and the plan is not written to a temp
+  directory because D38 makes it the undo anchor.
+- **D46** A user may type a sentence; the parse is shown with its rendered
+  destination before acceptance.
+- **D47** §6.11's forbid-list splits by character class: the set that can
+  influence a location is rejected, the set that is merely filesystem-hostile
+  is stored verbatim and sanitised by the preset. 26.8% of real titles depend
+  on this.
+- **D48** Contribution is `gh pr create`; §6.11's three deferred caps ship
+  with it, at the values in §7.4.
+- **D49** The corpus is lazy and optional; absent corpus degrades to "no
+  guess", never to an error.
+- **D50** Task 14's thresholds dissolve rather than being re-derived, because
+  nothing is stored without approval.
+- **D51** The shipped table is seeded from the ground-truth fixture, generated
+  by the parser and reviewed in the TUI before commit. Licence for publishing
+  Humble-derived titles is open and gates release, not development.
