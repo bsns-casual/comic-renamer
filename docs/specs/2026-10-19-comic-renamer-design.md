@@ -5,6 +5,12 @@
 **Owners:** Mike (engineering), Rob (UX)
 **Org:** Business Casual
 
+> **Amended 2026-10-23.** `2026-10-22-mapping-first-rebuild.md` supersedes
+> parts of this document: §6.1 title resolution is now a suggestion engine,
+> §6.3 disambiguation and the §6.7 status model are replaced, and §7's
+> silent-false-positive gate is dissolved (D50). Its §2 lists exactly what
+> changed. Its decisions, D39–D53, are folded into §13 below.
+
 Supersedes `2026-10-19-comic-renamer-design-v1-superseded.md`, whose resolver
 architecture was wrong. Why, and the evidence that replaced it:
 `docs/research/2026-10-19-adversarial-review-findings.md` and
@@ -1017,6 +1023,17 @@ convention** — it performs its own metadata matching, is in private beta, and
 supports CBZ/CB7/CBT but not CBR. **Calibre** manages its own directory layout
 on import and may not be renameable-toward at all.
 
+> **Amended 2026-10-23.** The spike's Kavita finding came back, read from
+> source (`docs/research/2026-10-23-kavita-from-source.md`), and it refutes
+> the Specials premise for Comic libraries: a PDF in one is never filed as a
+> Special from our output. Kavita still fails (c), for a different reason.
+> It reads the series from the filename, and its last series pattern is a
+> catch-all, so a file with no volume marker becomes its own one-book series.
+> That is 890 of 2,223 Humble rows (40%). The choice above (promote PDF→CBZ or
+> drop the preset) was framed around the wrong cause. Writing PDF metadata,
+> not conversion, is the more direct fix. Nothing here was tested against a
+> running Kavita.
+
 ### 9.1 Data source terms — settled
 
 | Source | Bundle a derived corpus? | Terms |
@@ -1392,4 +1409,66 @@ file manager and most scripts sort lexically, and under those `Vol. 10` precedes
 `Vol. 2`. Width is the digit count of the series' highest volume, read from the
 corpus `issue_count` the resolver already has, floored at two. Per-series rather
 than fixed, because a fixed two digits breaks silently at volume 100 and manga
-runs pass it. §6.8.1.
+runs pass it. §6.8.1. *Where the width comes from was amended by D44: it is now
+stored per mapping row.*
+
+### Decisions D39–D53, from the mapping-first rebuild
+
+Added 2026-10-23. The reasoning and measurements behind each are in
+`docs/specs/2026-10-22-mapping-first-rebuild.md`; section numbers in the entries
+below refer to that document, not this one.
+
+**D39 — Titles are looked up, not derived.** Measured: 0 key collisions over
+2,223 verified rows against 10.12% silent false positives from the resolver.
+
+**D40 — Key normalisation is minimal — NFC, lowercase, strip
+non-alphanumerics — asserting 2,036 keys; a change is a breaking data
+migration.** Stripping marketplace noise was tried and withdrawn: it bought
+190 rows of 2,036 (9.3%) and was already wrong for Global Comix's hyphenated
+ISBN and Sweet Shop's type suffixes. Deciding which parts of a filename are
+noise is inference, which §1.3 removes.
+
+**D41 — `bundle` is a lookup tiebreaker, not part of the key, so a future
+cross-distributor collision is a new row rather than a migration against
+D40's freeze.**
+
+**D42 — Mapping storage is TSV, two layers, local winning; user data in
+Application Support, never Caches.**
+
+**D43 — The row carries `subtitle`, not an invented `edition`.** Series and
+volume alone put 280 of 2,223 titles (12.6%) on a shared destination.
+
+**D44 — `volume_count` is stored per row, because D37's padding width cannot
+be derived from a growing table without renaming files already placed.**
+
+**D45 — The mapping session writes a plan and delegates to `apply`; it never
+touches the filesystem itself, and the plan is not written to a temp
+directory because D38 makes it the undo anchor.**
+
+**D46 — A user may type a sentence; the parse is shown with its rendered
+destination before acceptance.**
+
+**D47 — §6.11's forbid-list splits by character class: the set that can
+influence a location is rejected, the set that is merely filesystem-hostile
+is stored verbatim and sanitised by the preset.** 26.8% of real titles depend
+on this.
+
+**D48 — Contribution is `gh pr create`; §6.11's three deferred caps ship
+with it, at the values in §7.4.**
+
+**D49 — The corpus is lazy and optional; absent corpus degrades to "no
+guess", never to an error.**
+
+**D50 — Task 14's thresholds dissolve rather than being re-derived, because
+nothing is stored without approval.**
+
+**D51 — The shipped table is seeded from the ground-truth fixture, generated
+by the parser and reviewed in the TUI before commit.** Licence for publishing
+Humble-derived titles is open and gates release, not development.
+
+**D52 — One mapping row serves every format of a comic.** `.cbz`, `.pdf` and
+`.epub` share a stem, and `PlanRow` already carries `extension` separately.
+
+**D53 — The guess source dispatches on marketplace.** The corpus is one
+strategy; for Fanatical, title-casing the stem beats it, because the
+filename is already the title modulo sanitisation.

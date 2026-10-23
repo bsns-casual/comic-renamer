@@ -694,6 +694,13 @@ Disclosure states the mode, its consequence, disk arithmetic and **download cost
 
 ### Task 14: The gate
 
+> **Superseded 2026-10-23 by `docs/plans/2026-10-23-mapping-first-rebuild.md`
+> (its Task 13).** Do not implement this task. The three thresholds were
+> dissolved rather than re-derived (D50): nothing is stored without approval, so
+> a wrong guess costs typing, not a misfiled file. `cargo xtask measure` now
+> reports and exits 0, and the hard checks are in `cargo xtask check-mappings`
+> and the `mappings` CI job. The text below is kept for the reasoning only.
+
 **Files:** `xtask/src/lib.rs` (grading logic, testable), `xtask/src/main.rs`, `.github/workflows/verify.yml`.
 
 `cargo xtask measure` prints located-rate, ready-rate and silent false positive rate, exiting non-zero when any gate is breached. Logic lives in `lib.rs` because a bin-only crate cannot be imported by its own tests.
@@ -727,6 +734,10 @@ Corpora are committed: `fixtures/heldout-filenames.txt` (2,717 names) gives the 
 ---
 
 ### Task 15: Homebrew
+
+> **Not superseded.** The mapping-first rebuild did not touch this task. It is
+> still open, and the build prerequisites it must state changed: Rust 1.88 or
+> newer (not 1.80), plus a C toolchain from `xcode-select --install`.
 
 **Files:** `Formula/comic-renamer.rb`, `.github/workflows/release.yml`, `README.md`.
 

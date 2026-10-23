@@ -625,7 +625,9 @@ table locally does not wait on this; publishing it does.
 - Whether `map` on a fully-mapped bundle is an error, a no-op, or falls
   through to `scan` behaviour.
 - TUI library. My call: `ratatui` with `crossterm`, version pinned at
-  implementation time against this workspace's `rust-version = "1.85"`.
+  implementation time against this workspace's `rust-version`. (That was 1.85 when this was written and is 1.88
+now: `instability`, which `ratatui` pulls in, needs 1.88, as do five other
+dependencies.)
   Hand-rolling three scrolling columns with inline editing is a few hundred
   lines of redraw and cursor arithmetic that breaks on resize and multi-byte
   input.
@@ -638,7 +640,11 @@ table locally does not wait on this; publishing it does.
 
 ## 12. Decision log entries this proposes
 
-Next free number is **D39**.
+> **Folded into `2026-10-19-comic-renamer-design.md` §13 on 2026-10-23.**
+> That copy is the decision log of record; this list is what was proposed.
+> If they differ, §13 is right.
+
+Next free number was **D39**.
 
 - **D39** Titles are looked up, not derived. Measured: 0 key collisions over
   2,223 verified rows against 10.12% silent false positives from the resolver.

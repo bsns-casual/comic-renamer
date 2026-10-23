@@ -6,9 +6,9 @@ Point it at a folder, pick your app, and it identifies each file and shows you
 every proposed rename. Nothing moves until you approve the plan. Files it cannot
 identify are flagged for review rather than guessed at.
 
-**Status: scan, apply and undo work. Komga is the only preset, and there is no
-Homebrew formula yet** — install from source, which is three commands. See
-[`docs/specs/`](docs/specs/) for the design and
+**Status: `map`, `scan`, `apply` and `undo` work. Komga is the only preset, and
+there is no Homebrew formula yet** — install from source, which is three
+commands. See [`docs/specs/`](docs/specs/) for the design and
 [`docs/research/`](docs/research/) for the measurements behind it.
 
 ## Install
@@ -18,23 +18,30 @@ Homebrew formula yet** — install from source, which is three commands. See
 and no fallback path, so there is nothing to build elsewhere. Developed and
 tested on Apple Silicon.
 
-Two prerequisites:
+Prerequisites:
 
 ```sh
-# Rust 1.85 or newer
+# Rust 1.88 or newer
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# A C compiler. The corpus is a SQLite database and the driver builds SQLite
-# from source, so rustup on its own is not enough.
+# A C compiler. `rusqlite` builds SQLite from source and `ring` compiles C,
+# so rustup on its own is not enough.
 xcode-select --install
 ```
 
-`command not found: cargo` means the first is missing, or your shell has not
-picked it up yet — open a new terminal, or `source ~/.cargo/env`. An error out
-of `cc` or `libsqlite3-sys` means the second. And run `rustc --version` before
-anything else: on an older toolchain the build stops on a dependency needing
-`edition2024` rather than on this project's own `rust-version`, so it reads
-like a broken dependency instead of an old compiler. (Measured on 1.84.1.)
+To send mappings upstream, you also need the GitHub CLI
+([`gh`](https://cli.github.com)), signed in with `gh auth login`. `map` does not
+call `gh` itself: it prints the commands for you to run, and `gh` is what they
+use. Nothing else needs it.
+
+`command not found: cargo` means the first prerequisite is missing, or your
+shell has not picked it up yet — open a new terminal, or `source ~/.cargo/env`.
+An error out of `cc` or `libsqlite3-sys` means the second. Run `rustc --version`
+before anything else. The `rust-version` in `Cargo.toml` is 1.88 because six
+dependencies declare it, but an older toolchain does not report that. On 1.84.1
+the build stops on a dependency that needs the `edition2024` Cargo feature, so
+it reads like a broken dependency instead of an old compiler. (Measured on
+1.84.1. Toolchains from 1.85 to 1.87 were not tried.)
 
 Then:
 
@@ -46,8 +53,8 @@ cargo install --path crates/cli --locked
 
 That puts `comic-renamer` in `~/.cargo/bin`, which rustup already adds to your
 `PATH`. `cargo uninstall comic-renamer` removes it. The binary carries the
-corpus manifest and the curated overrides compiled in, so it works from any
-directory.
+shipped mappings, the corpus manifest and the curated overrides compiled in, so
+it works from any directory.
 
 To run without installing, `cargo build --release` and use
 `./target/release/comic-renamer`.
@@ -55,7 +62,11 @@ To run without installing, `cargo build --release` and use
 ## Use it
 
 ```sh
-# Identify everything and write a plan. Touches nothing.
+# Name the files the database does not know, in a terminal session.
+# Writes a plan and offers to run `apply` on it.
+comic-renamer map ~/Bundles/humble-dark-horse --dest ~/Comics
+
+# Or, with no session: plan what is mapped, list what is not. Touches nothing.
 comic-renamer scan ~/Bundles/humble-dark-horse --dest ~/Comics   # add --copy to keep the originals
 
 # Read the plan, fix what needs fixing, delete rows you do not want.
@@ -68,18 +79,33 @@ comic-renamer apply comic-renamer-plan.jsonl
 comic-renamer undo comic-renamer-plan.jsonl
 ```
 
-The first `scan` downloads the corpus — a 34 MiB archive, hash-verified against
+`map` is the command for a bundle the tool has not seen. It looks every
+filename up in a table of recorded titles. For each file it does not find, it
+shows the filename, a guess, and a field for the name you approve. Nothing is
+saved until you approve it. Approved names persist in
+`~/Library/Application Support/comic-renamer` (or `$XDG_CONFIG_HOME/comic-renamer`).
+At the end it writes a plan and hands it to `apply`, and offers to prepare a
+contribution of your approved mappings (see below). It refuses to run when
+stdout is not a terminal.
+
+`scan` is the non-interactive path. It plans the files the table knows, lists
+the ones it does not along with a guess for each, and saves nothing. A file with
+no mapping stays where it is.
+
+Shipped coverage is small today: 12 titles, from Fanatical, Global Comix and
+Sweet Shop. For most bundles, `map` asks about every file. A much larger Humble
+table exists as generated candidates and is held back for review (see
+[`CLAUDE.md`](CLAUDE.md)).
+
+A `map` or `scan` run with an unmapped Humble file downloads the corpus it
+guesses from on first need — a 34 MiB archive, hash-verified against
 [`corpus/manifest.json`](corpus/manifest.json) — and caches it in
-`~/Library/Caches/comic-renamer`, where it unpacks to 97 MiB. Later runs are
-offline.
+`~/Library/Caches/comic-renamer`, where it unpacks to 97 MiB. A fully mapped
+bundle never needs it, and a failed download means "no guess", not an error.
 
-Between one and two rows in three need a human, so reading the plan is the
-normal path and not an escape hatch. Rows still marked `review` are left where
-they are; `apply` never guesses.
-
-Merging into a library that already holds some of these books is the ordinary
-case, not the awkward one. A file already at the destination is refused by
-name and left exactly as it is — never overwritten, never renamed around. The
+A file already at the destination is refused by name and left exactly as it is
+— never overwritten, never renamed around. Merging into a library that already
+holds some of these books is the ordinary case, not the awkward one. The
 disclosure says which ones before you confirm, and a run that can place
 nothing tells you why and exits non-zero rather than reporting success.
 
@@ -91,10 +117,11 @@ assistant or attach to a pull request.
 
 | Flag | On | Does |
 |---|---|---|
-| `--dest <dir>` | `scan` | Where the library goes. Required. |
-| `--copy` | `scan` | Keeps the originals. Clones on APFS, so it usually costs nothing. |
-| `-o <file>` | `scan` | Where to write the plan. |
-| `--lang <code>` | `scan` | Which language's editions to match. Defaults to `en`, and never falls back to another. |
+| `--dest <dir>` | `map`, `scan` | Where the library goes. Required. |
+| `--copy` | `map`, `scan` | Keeps the originals. Clones on APFS, so it usually costs nothing. |
+| `-o <file>` | `map`, `scan` | Where to write the plan. Defaults to `comic-renamer-plan.jsonl`. |
+| `--marketplace <name>` | `map`, `scan` | Where the files were bought. Decides how a guess is made. Defaults to `Humble`. |
+| `--lang <code>` | `map`, `scan` | Which language's editions the corpus guess matches. Defaults to `en`, and never falls back to another. |
 | `--komga-url <url>` | `apply` | Refuses unless your Komga can survive a rename. Token from `COMIC_RENAMER_KOMGA_TOKEN`. |
 | `--yes` | `apply` | Skips the typed confirmation. The disclosure still prints. |
 | `--allow-cloud-move` | `apply` | Permits a move out of a cloud-sync folder, where it is a server-side delete. |
@@ -111,25 +138,47 @@ hash. **Hashing has to already be on** — switching it on afterwards cannot hel
 because a deleted record can never acquire a hash. Pass `--komga-url` and the
 check is done for you, and refuses rather than warns.
 
+Komga is the only preset, and its layout does not suit Kavita. Komga names a
+series from its folder; Kavita names it from the filename, so the Komga layout
+splits a Kavita library into one-book series for roughly 40% of a Humble bundle.
+This was read from Kavita's source, not tested against a running Kavita. See
+[`docs/research/2026-10-23-kavita-from-source.md`](docs/research/2026-10-23-kavita-from-source.md).
+
 ## How it works
 
-Filenames from distributors are often squashed and unhelpful —
-`hellboyomnibusvolume1_seedofdestruction.pdf`. Rather than guess at where the
-words break, Comic Renamer looks the name up against a corpus of real published
-comic titles — 229,836 series from the Grand Comics Database — and routes what
-it cannot place to review rather than renaming it wrongly.
+Comic marketplaces publish the real title next to every download, so the title
+is a known quantity. The filename is often squashed and unhelpful —
+`hellboyomnibusvolume1_seedofdestruction.pdf` — and sometimes the characters
+that carry the title are already gone. Fanatical ships
+`HackSlash Back to School.cbz` for *Hack/Slash: Back to School*. No inference
+recovers a slash that is not in the input.
 
-Measured against 2,717 held-out real filenames, the implemented resolver
-locates the series for **91.6%**. Design-time research put it at 92.3%; the
-implementation withdrew a tiebreaker that was holding part of that up, and the
-gap is [recorded](CLAUDE.md) rather than rounded away.
+So the tool looks a filename up instead of working out its title. A row in the
+mapping table is keyed by the filename with Unicode normalised, case folded and
+every non-alphanumeric character removed, and carries the series, volume and
+subtitle. That key rule is frozen: changing it invalidates every row ever
+contributed. One row serves every format of a comic, so the `.cbz`, `.pdf` and
+`.epub` of one title share it.
 
-The number that actually matters is the rate of files renamed confidently and
-wrongly, because a wrong rename is the failure you do not notice. Against 2,223
-filename-to-title pairs verified from a real Humble library, the research
-measurement put it at **0.48%**, and the target is to stay at or under 0.5%.
-That measurement has not yet been re-run against the shipped resolver, so treat
-it as the design's number and not a claim about this binary.
+When a file has no row, the tool offers a guess to start from. For Humble
+bundles the guess comes from a corpus of published comic titles, the Grand
+Comics Database, and for the other marketplaces from the filename itself. A
+guess is a typing aid. It is never stored without your approval.
+
+Measured against the 2,223 verified Humble filename-to-title pairs in
+[`fixtures/humble-ground-truth.tsv`](fixtures/humble-ground-truth.tsv), the
+guess's series is right 62.9% of the time and its full title 48.9% of the time.
+The corpus locates the series for 91.6% of 2,717 held-out filenames.
+`cargo xtask measure` reports these. None is a pass-or-fail threshold: a wrong
+guess costs you some typing, not a misfiled file.
+
+## Contributing mappings
+
+A mapping row holds metadata only — never a path. When you say yes at the end of
+a `map` session, it writes the rows you approved to a file under
+`~/Library/Application Support/comic-renamer/contributions` and prints the
+`gh` and `git` commands that fork the repository and open a pull request. It
+runs none of them. Rows you corrected and chose not to contribute stay local.
 
 ## Prior art
 
@@ -140,11 +189,13 @@ renamed from the filename alone, without opening multi-gigabyte files.**
 
 ## Credits
 
-Comic data from the [Grand Comics Database](https://www.comics.org), licensed
+Guessing data from the [Grand Comics Database](https://www.comics.org), licensed
 [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/), via the
 [paperbunkr GCD extract](https://github.com/heisehis/paperbunkr-gcd-data). The
 GCD does not endorse this project.
 
 ## Licence
 
-Code [MIT](LICENSE). Corpus data CC BY-SA 4.0, per its source.
+Code [MIT](LICENSE). Corpus data CC BY-SA 4.0, per its source. The licence for
+publishing titles taken from Humble's order API as a dataset is not settled;
+that question gates a release.

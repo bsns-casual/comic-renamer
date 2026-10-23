@@ -6,10 +6,15 @@ identifies each file, shows a reviewable plan, and changes nothing until the use
 approves it.
 
 **Read `docs/specs/2026-10-19-comic-renamer-design.md` before changing anything.**
-Its §13 decision log records every call and why; D1–D27. If you think a decision
+Its §13 decision log records every call and why; D1–D53. If you think a decision
 is wrong, read its entry first — most have survived an adversarial review and the
 reasoning is written down. Say what's wrong with the reasoning rather than
 re-deciding silently.
+
+**Then read `docs/specs/2026-10-22-mapping-first-rebuild.md`.** The tool no longer
+derives a title by resolving a filename against a corpus; it looks the filename up
+in a recorded mapping. That design supersedes parts of the first (its §2 lists
+which), and its decisions, D39–D53, are folded into the first document's §13.
 
 ---
 
@@ -29,7 +34,8 @@ without changing the spec first.**
    zero-byte files. An "empty means corrupt" guard silently disables all of it.
    (§6.10, D21)
 4. **Never commit the corpus binary.** Bump `corpus/manifest.json` instead. (§6.5, D19)
-5. **The resolver never opens a file.** Filenames only, always. (§5)
+5. **The resolver never opens a file.** Filenames only, always. It is a
+   suggestion engine now (invariant 10), but that does not loosen this. (§5)
 6. **No-clobber is enforced at the syscall, not by a prior check.**
    `renamex_np(…, RENAME_EXCL)` on move, `clonefile`'s native `EEXIST`, `O_EXCL`
    on streams. A collision check followed by plain `rename(2)` is a data-loss
@@ -42,23 +48,65 @@ without changing the spec first.**
 9. **Evaluation input is distributor bundles only.** Not scene releases, not
    hand-renamed files. Tests use generated files, never anyone's real library.
    (§7, D12)
+10. **The key rule is frozen: NFC, lowercase, strip non-alphanumerics, nothing
+    else.** The key is effectively a hash of the filename, so changing the rule
+    invalidates every mapping row ever contributed. It is a breaking data
+    migration with a version bump, not a refactor. The pin is
+    `key_is_frozen_at_2036_over_the_humble_fixture` in
+    `crates/core/tests/mapping.rs`. Resist adding "just strip the download id" or
+    "just drop `_hd`": deciding which parts of a filename are noise is inference,
+    and a token that looks like noise in one marketplace is a title in another.
+    (rebuild §5.3, D40)
 
-### The gate is real, and here are its numbers
+Also load-bearing, though not numbered: **nothing is stored without a keystroke.**
+A guess is a typing aid. The mapping session writes only rows the user approved,
+and `^A` (approve all remaining) is reported in the final confirmation. (rebuild §4)
 
-§7's silent-false-positive gate is **measured**, not estimated:
-`fixtures/humble-ground-truth.tsv` holds 2,223 verified filename→title pairs
-pulled from the maintainer's own Humble library, where every download is
-published next to its real title.
+### The gate dissolved, and what replaced it
+
+§7's silent-false-positive gate existed because a wrong guess silently misfiled a
+file. It was never measured against the implemented resolver until the rebuild
+did so on 2026-10-22: **10.12%**, against the 0.48% the research had reported.
+The decision was not to fix the resolver to meet the gate (D50). Nothing is
+stored without approval now, so there is no silent false positive left to gate,
+and the three thresholds were dissolved rather than re-derived.
+
+`cargo xtask measure` reports and exits 0. Against the 2,223 verified pairs in
+`fixtures/humble-ground-truth.tsv` (pulled from the maintainer's own Humble
+library, where every download is published next to its real title):
 
 ```
-ready                66.1%
-silent false pos      0.48%   <- the gate: hold at or below 0.5%
+located               91.6%   held-out, 2,717 names
+series accuracy       62.9%   top suggestion's series alone
+suggestion accuracy   48.9%   top suggestion against the verified title
 ```
 
-**Grade against it carefully.** A first pass reported 2.65% and every sampled
-failure was the grader's fault: Humble writes `&` where the corpus writes "and",
-prefixes promo items with "Free Issue" (containing a zero-width character), and
-inserts `Vol 1:` mid-title. Normalise both sides or you will chase phantoms.
+**None of these is a gate. Do not turn one into a merge gate.** A wrong suggestion
+costs the user some typing. If a number looks bad, the response is a better
+suggestion, not a failed build.
+
+The checks that do fail the build (`cargo xtask check-mappings` and the `rust`
+job's `cargo test --workspace`):
+
+- No two mapping rows share a key with different fields. Compare *fields*, not
+  row counts: 158 of 2,036 Humble keys appear under more than one bundle, with an
+  identical title each time.
+- Every §6.11 per-field rule holds for every shipped row (rebuild §7.3).
+- The frozen key rule, pinned at 2,036 keys (invariant 10).
+- Each file under `data/mappings/` is at most 2 MiB, on every push and PR.
+- A PR adds at most 2,500 rows. **This one is PR-only.** `check-mappings` diffs
+  against the PR's base, so a direct push to `main` can add any number of rows.
+  That is deliberate: the cap bounds contributed data, which arrives as a PR
+  (§6.11 says "per PR"), and the conventions below sanction the maintainer
+  pushing directly. Do not read the green `mappings` job on a push to `main` as
+  having checked the row count.
+
+**Grade against the ground truth carefully.** A first pass reported 2.65% and
+every sampled failure was the grader's fault: Humble writes `&` where the corpus
+writes "and", prefixes promo items with "Free Issue" (containing a zero-width
+character), and inserts `Vol 1:` mid-title. Normalise both sides or you will
+chase phantoms. The seed generator shares the grader's promo-prefix logic for the
+same reason.
 
 ---
 
@@ -68,6 +116,9 @@ inserts `Vol 1:` mid-title. Normalise both sides or you will chase phantoms.
 docs/specs/      design documents          docs/plans/      implementation plans
 docs/research/   reviews and experiments   fixtures/        test data, filenames only
 corpus/          manifest.json — the pinned corpus. Never the .sqlite itself.
+data/mappings/   the shipped filename→title table, one TSV per marketplace
+data/overrides.toml   first-party Layer B title overrides
+xtask/           cargo xtask measure | seed | check-mappings [base-ref]
 scripts/         CI checks, runnable locally: python3 scripts/check-manifest.py
 .github/         workflows: verify (every PR), corpus-refresh (monthly)
 ```
@@ -76,50 +127,107 @@ Dated `YYYY-MM-DD-<topic>.md`.
 
 ## State
 
-Design approved. **Phase 0 is complete. Phase 1 Tasks 1-13 are complete.**
-`scan`, `apply` and `undo` all run from the CLI, and the whole round trip is
-verified against a real bundle, a real second volume and a real Komga-shaped
-HTTP server. **The tool is usable** — Tasks 14 (the gate) and 15 (Homebrew)
-are the remainder, and neither blocks a user.
+Design approved. **Phase 0 is complete. Phase 1 is complete, and the tool was then
+rebuilt around a recorded filename→title mapping.** The rebuild is
+`docs/specs/2026-10-22-mapping-first-rebuild.md`, planned in
+`docs/plans/2026-10-23-mapping-first-rebuild.md`, 14 tasks, all done. The old
+Phase 1 plan's Task 14 (the gate) is superseded by it; its Task 15 (Homebrew) is
+not, and is still open.
+
+`scan`, `map`, `apply` and `undo` all run from the CLI. **`map` is the primary
+command for a bundle the tool has not seen**: it needs a terminal, shows each
+unmapped filename beside a guess, and writes a plan only from rows the user
+approved. **`scan` is the non-interactive path**: it plans the mapped files,
+lists the unmapped ones with a guess for each, and saves nothing. `apply` and
+`undo` are unchanged by the rebuild. The resolver is now a suggestion engine,
+and the corpus is lazy and optional: a missing or undownloadable corpus means "no
+guess", not an error (D49).
 
 ```
 done   repo harness, CI, corpus manifest            (this file, .github/, corpus/)
 done   D23  cloning a placeholder hydrates it -- move stays the default
-done   D26  ground truth, 2,223 verified rows; the gate is measured at 0.48%
+done   D26  ground truth, 2,223 verified rows
 done   D34  Komga convention, specified from source (sections 6.8.1, 6.8.2)
-done   T1   workspace skeleton; `cargo check --workspace --all-targets` clean
-done   T2   normalise + residue          T8   sparse fixtures + TreeGuard
-done   T3   corpus, verified fetch       T9   no-clobber syscalls + collisions
-done   T4   Layer B overrides            T10  scan + a CLI that runs it
-done   T5   resolver ladder              T11  apply pre-flight (refusals only)
-done   T6   Komga preset                 T12  apply execution + undo
-done   T7   JSONL plan + checksum       T13  CLI: apply, undo, disclosure
-todo   T14  the gate — see below      T15  Homebrew — see below
+done   T1-T13  Phase 1: workspace, normalise, corpus, overrides, resolver, Komga
+               preset, plan, sparse fixtures, no-clobber syscalls, scan, apply
+               pre-flight, apply execution and undo, CLI
+done   R1-R14  the rebuild: frozen key and TSV I/O, §6.11 validation, the
+               two-layer store, the title parser, scan via lookup, suggestions per
+               marketplace, `map`, the approval table, the detail editor,
+               confirmation, contribution, seeding, the three hard checks,
+               documentation
+todo   T15  Homebrew — see below
 ```
 
-**202 tests pass** (`cargo test --workspace`), plus seven `#[ignore]`d ones that
-need real hardware. **CI runs all of them** — `.github/workflows/verify.yml`
-has a macOS job that mounts a RAM disk, because a same-volume move is a rename
-and the streamed path, the `placed` state and abort-on-failure are otherwise
-unreachable.
+### What ships, and what does not
+
+**Shipped mapping coverage is 12 rows**, in `data/mappings/fanatical.tsv` (5),
+`global-comix.tsv` (2) and `sweet-shop.tsv` (5): titles the maintainer confirmed
+one at a time. `cargo xtask seed` regenerates them from
+`fixtures/marketplace-ground-truth.tsv`.
+
+**The Humble table is generated and deliberately not shipped.** `cargo xtask seed`
+also writes about 2,200 candidate rows to `target/seed/humble.tsv`, which is
+untracked. It waits for the maintainer to review it, because D51 and the rebuild's
+§4 forbid storing rows nobody approved, and committing 2,200 unreviewed rows on
+the first commit would do exactly that. On its last run (2026-10-23) the
+generator built 2,223 rows, rejected 1 (a short line), found 0 key collisions, and
+de-duplicated to 2,204. Its own classification of the 2,223:
+
+```
+1896   85.3%  clean
+ 197    8.9%  bare trailing number in the series (not a volume marker)
+ 129    5.8%  volume marker swallowed into the subtitle (colon came first)
+   1    0.0%  multiple colons
+```
+
+**"Clean" is an upper bound.** It means no heuristic fired, not that a human
+agreed. The other 14.7% are known-bad decompositions, such as
+`Attack on Titan: Before the Fall Vol. 9` becoming series "Attack on Titan" with
+subtitle "Before the Fall Vol. 9" and no volume. Review them in a `map` session
+before any of this is committed.
+
+**Tests:** `cargo test --workspace` runs 380 and ignores 7 (counted 2026-10-23),
+with no compiler warnings. The seven `#[ignore]`d tests need real hardware or the
+real corpus release, and **CI runs all seven**. That claim was false until the
+rebuild's Task 13: the workflow ran the three volume-gated tests, and its own
+comment said the four corpus tests were not run. Task 13 added the `rust-corpus`
+macOS job, which downloads the pinned release, checks its sha256 **and**
+`sizeBytes`, and runs those four. The three volume tests run in the `rust` job
+on a RAM disk, because a same-volume move is a rename and the streamed path, the
+`placed` state and abort-on-failure are otherwise unreachable. This is read
+from the workflow file. The four corpus tests were run locally against the pinned
+release at the end of the rebuild (green, 54 s). No run on GitHub was observed
+when this was written.
 
 - `COMIC_RENAMER_TEST_ZIP=<gcd-*.zip>` — four tests against the real corpus
   release: install-and-open, coverage rates, and the publisher hint's effect
-  on real titles.
-- `COMIC_RENAMER_TEST_VOLUME=<mount on another device>` — two tests that need
-  a genuine second volume, because a same-volume move is a rename and cannot
-  reach the streamed path. A 1.3 GiB HFS+ RAM disk works:
+  on real titles. Run by the `rust-corpus` job.
+- `COMIC_RENAMER_TEST_VOLUME=<mount on another device>` — three tests that need
+  a genuine second volume. A 1.3 GiB HFS+ RAM disk works:
   `hdiutil attach -nomount ram://2726297` then
   `diskutil eraseVolume "HFS+" CRTEST <dev>`. **Under ~1.1 GiB every run is
   refused by the free-space reserve**, which is how the reserve is specified.
 
 ### CI checks neither formatting nor clippy
 
-`rustfmt` is not installed in the maintainer's toolchain, so the tree has never
-been formatted by `cargo fmt`, and CI runs neither `cargo fmt --check` nor
-`cargo clippy`. Do not assume CI will catch a style or lint regression. Adding
-either gate means formatting the whole tree in the same change (and clearing
-the clippy warnings in `crates/core`), or CI goes red on arrival.
+Both are by decision, and the tree is **not formatted**. Do not describe it as
+formatted, and do not assume CI will catch a style or lint regression.
+
+- `rustfmt` is not installed in the maintainer's toolchain: `cargo fmt` fails
+  with "'cargo-fmt' is not installed for the toolchain" (checked 2026-10-23), and
+  the tree has never been through it.
+- `cargo clippy --workspace --all-targets` reports 10 warnings across three
+  crates (checked 2026-10-23, clippy on rustc 1.99.1): two `i64`→`i64` casts and
+  one `u64`→`u64` cast in `fsops.rs` and `apply.rs`; "items after a test module"
+  in `apply.rs` and `xtask/src/seed.rs`; three needless `clone` calls in
+  `crates/core/tests`; and a "very complex type" in each of
+  `crates/cli/src/map/mod.rs` and `crates/core/tests/shipped_mappings.rs`.
+- `cargo fmt` would reformat files under `crates/core/src/preset/`, which the
+  rebuild's briefs forbade touching. Adding a format gate means reformatting the
+  whole tree in the same change, or CI goes red on arrival.
+
+The compiler itself is warning-free: `cargo test --workspace` prints none.
 
 ### Packaging, all of it measured
 
@@ -144,8 +252,8 @@ build scripts.
 One packaging claim measured rather than assumed, because the README now
 makes it: **an older toolchain does not fail on `rust-version`.** On 1.84.1,
 `cargo check` stops at `block-buffer-0.12.1` needing the `edition2024` Cargo
-feature, long before it reads this workspace's `rust-version = "1.85"` — so
-the failure reads as a broken dependency, not an old compiler. A
+feature, long before it reads this workspace's `rust-version` — so the failure
+reads as a broken dependency, not an old compiler. A
 `rust-toolchain.toml` would fix it by forcing a specific download on everyone,
 including people already on a newer stable, so the README says it in a
 sentence instead.
@@ -156,21 +264,32 @@ Also unproven, and left that way: whether the crate fails to build on Linux.
 `fsops.rs:538`'s `std::os::macos::fs::MetadataExt`. The macOS-only claim rests
 on that import and on `libc::fclonefileat`, both Apple-gated, not on a build.
 
+**The real toolchain floor is 1.88, and `rust-version` said 1.85.** Measured
+2026-10-23 with `cargo metadata`: six locked dependencies declare 1.88 — `darling`
+0.24.1 and its two macro crates, `instability` 0.3.14 (pulled in by `ratatui`),
+`sha2` 0.11.1 and `zopfli` 0.8.4. The last two were in the lockfile before the
+rebuild, so the declaration was already wrong before the TUI landed. This is the
+same shape as the 1.84.1 failure above, and it is now the third time this repo
+has declared a floor it never built against (1.80 → 1.85 → 1.88). `Cargo.toml`
+says 1.88. The measurement shows which dependencies *declare* 1.88; it does not
+show that 1.88 builds the workspace, which was not tried on a 1.88 toolchain.
+
 Two environment notes: `cargo` lives in `~/.cargo/bin` and is not on a
-non-interactive shell's PATH, and **clippy is now installed** —
-`cargo clippy --workspace --all-targets` is clean for `crates/cli`, and leaves
-five warnings in `crates/core` plus three unused-variable warnings in `xtask`'s
-Task 14 stubs. `rust-version` was bumped 1.80 → 1.85: `ErrorKind::CrossesDevices`
-has needed 1.85 since Task 12, so the old claim could never have built.
+non-interactive shell's PATH, and clippy is installed (see above for what it says).
 
 Install is `cargo install --path crates/cli --locked` — note `crates/cli`,
 not `.`, since the workspace root is not a package. Verified from three
 directories after installing, and `cargo uninstall comic-renamer` round-trips.
 
-The Phase 1 plan is written and survived three adversarial reviews:
-`docs/plans/2026-10-20-phase-1-implementation.md`, 15 tasks.
+The Phase 1 plan survived three adversarial reviews:
+`docs/plans/2026-10-20-phase-1-implementation.md`, 15 tasks. Its Task 14 is
+superseded by the rebuild plan; its Task 15 is not.
 
 ### Task 13's departures from the written text
+
+This section is Phase 1 history. It speaks of `ready` and `review` rows; the
+rebuild replaced that status model with `mapped` and `unmapped` (rebuild §6.2).
+The departures themselves still stand.
 
 Three, all deliberate, none hidden. Each is pinned by a test in
 `crates/cli/src/main.rs`'s `mod tests`.
@@ -232,60 +351,88 @@ never updated.
 
 ### Pick up here
 
-**Task 14, the gate — and it does not pass today.** `cargo xtask measure` is
-still `todo!()`. Before wiring it into CI, settle the targets:
+Two things are open and gate a release. Neither blocks development.
 
-```
-located 91.6%   gate >= 92.3%   <- fails
-ready   63.6%   gate >= 66.0%   <- fails
-```
+**1. The licence for publishing Humble-derived titles.** `data/LICENSE` ties
+rule data to the Grand Comics Database under CC BY-SA 4.0. The Humble titles came
+from Humble's order API, and D31 committed them as *test* data, with no URLs,
+prices or account data. Shipping them as the product's dataset in a public
+repository is a different use, and nobody has answered whether it is allowed.
+**This gates release, not development.** Building and reviewing the table locally
+does not wait on it; publishing it does. (D51, rebuild §10)
 
-Re-deriving those two numbers against the implemented ladder is an owner
-decision, not a refactor: lowering a quality gate to match the code is how a
-gate stops meaning anything, and D28's withdrawn tiebreaker is a legitimate
-reason the ready rate moved. The silent-false-positive rate — the one that
-actually matters — has **not** been re-measured against the implemented
-resolver at all; 0.48% is the research number.
+**2. The Humble table review.** See "What ships" above. The generator's output
+sits in `target/seed/humble.tsv`, and the 14.7% in known-bad decomposition
+classes need correcting by hand before anything is committed. A `map` session is
+the intended tool for it.
 
-**Task 15, Homebrew.** `cargo install --path crates/cli --locked` works and
-is what the README documents, so the tool is installable today; the formula is
-the convenience, not the gate. Do not write it blind. This repo has twice
-been wrong about a packaging claim that failed on contact with a real build,
-and a formula that cannot be `brew install --build-from-source`-tested in the
-session that writes it is the third instance waiting to happen.
+Then, in rough priority:
 
-### Known gaps, all spec-level
+**Kavita is not a Komga-with-a-different-template.** The research in
+`docs/research/2026-10-23-kavita-from-source.md` found Kavita is
+filename-driven where Komga is folder-driven, so the Komga layout fragments a
+Kavita library: **890 of 2,223 Humble rows (40%) would become one-book series**,
+because Kavita's last series pattern is a catch-all and a filename with no volume
+marker becomes its own series name. It also withdrew §8's stated reason for
+PDF→CBZ conversion ("Kavita files every issue-number-less file as a Special");
+that is true only for Book libraries. The backlog entries in the design's §8 and
+§9 now say so. Conversion may still be worth doing, but not for that reason, and
+writing PDF metadata is the more direct fix for both problems. **All of this is
+read from source and was not confirmed against a running Kavita**, which the
+research flags itself.
 
-- `located`: *Domestic Girlfriend* and *Altair* are absent from the corpus —
-  manga romanisation, the gap §6.2.1 gives Layer B. And
-  `mirkaandolfosmercy_vol1` is the reverse match direction, where §6.1
-  specifies the opposite; making matching bidirectional is a spec change with
-  real false-positive risk.
-- `ready`: largely the cost of implementing D28 correctly. Rows the original
-  measurement picked with the withdrawn earliest-edition tiebreaker now go to
-  review. **Re-derive the 66% target against the implemented ladder** before
-  Task 14 turns it into a merge gate.
+**Task 15, Homebrew.** `cargo install --path crates/cli --locked` works and is
+what the README documents, so the tool is installable today; the formula is the
+convenience, not the gate. Do not write it blind. This repo has been wrong about
+a packaging claim three times now, and a formula that cannot be
+`brew install --build-from-source`-tested in the session that writes it is the
+next instance waiting to happen. The formula must state Rust 1.88 and the C
+toolchain.
+
+### Known gaps
+
+- **`scan` does not name `map`.** The rebuild's §6.1 says that when `scan` finds
+  unmapped files it "reports the count and names `map`". Run 2026-10-23 on a
+  folder with one unmapped file, `scan` printed the count, listed the file with a
+  guess, and wrote a plan, and the word `map` appears nowhere in the output. The
+  README documents what the code does, not what §6.1 says.
+- **§6.11's caps are enforced in CI, and only partly at `apply`.** Field
+  validation (forbid-list, 120-byte cap) runs when a mapping is loaded, in `map`,
+  and in `seed`. The row and file-size caps run in CI. `rendered_budget_ok`
+  exists but only tests call it, and for Komga it cannot fail because `sanitize`
+  truncates every component at 255 bytes; it is kept for Phase 2 presets. The
+  rebuild's §7.4 says all three are "re-validated at `apply`", and a search on
+  2026-10-23 found no call to `MappingRow::validate` or `rendered_budget_ok` in
+  `apply.rs`. `apply`
+  protects itself a different way: it recomputes every destination through the
+  preset, never trusting a path in the plan (invariant 2). Whether that satisfies
+  §7.4's intent is the owner's call.
+- **`volume_count` is user-supplied** and sets the zero-padding width (D44, which
+  replaced D37's corpus lookup). A wrong value produces a wrong *name*, never a
+  wrong *location*.
+- `located`: *Domestic Girlfriend* and *Altair* were absent from the corpus when
+  Task 12 was written — manga romanisation, the gap §6.2.1 gives Layer B — and
+  `mirkaandolfosmercy_vol1` is the reverse match direction, where §6.1 specifies
+  the opposite. Not re-checked since the rebuild. Making matching bidirectional is
+  a spec change with real false-positive risk.
 - The free-space reserve is `max(1 GiB, 10%)` taken literally from the plan,
   so **no run is possible on a volume with under ~1.1 GiB free**. Correct per
   spec, harsh in practice.
-- Three §6.11 items stay unenforced on purpose — total path budget,
-  rule-count cap, file-size cap. All three govern *contributed* rule data,
-  which is Phase 3; `data/overrides.toml` is first-party and CI validates it.
 - `ApplyResult.failed` and `Collision.existing` **are both read now** (T13).
-  This bullet used to say they were unread and deferred; the disclosure needed
-  `Collision.existing` to name what is already at a destination, and the
-  post-run line prints `failed`. One caveat survives: `apply` abandons the run
-  on the first row that fails, so `ApplyResult.failed` is still structurally
-  always 0 — it is read but it cannot yet be non-zero.
+  One caveat survives: `apply` abandons the run on the first row that fails, so
+  `ApplyResult.failed` is still structurally always 0 — it is read but it cannot
+  yet be non-zero.
 
 Phase 0b — the 13-app research spike — runs *parallel* to Phase 1 and gates
-Phase 2 only. Nothing in Phase 1 waits on it.
+Phase 2 only. Nothing in Phase 1 waits on it. Its Kavita result is in, per above.
 
 Volume numbers are **zero-padded to a per-series width** (D37) — the digit count
-of that series' highest volume, from the corpus `issue_count`, floored at two.
-Komga's comparator is numeric and does not need it, but `ls`, Finder and most
-scripts sort lexically, where `Vol. 10` would precede `Vol. 2`. A fixed two-digit
-width breaks silently at volume 100 and manga runs pass it.
+of that series' highest volume, floored at two. Since the rebuild the width is
+stored on each mapping row as `volume_count` (D44), because deriving it from the
+rows in a growing table would rename files already placed. Komga's comparator is
+numeric and does not need the padding, but `ls`, Finder and most scripts sort
+lexically, where `Vol. 10` would precede `Vol. 2`. A fixed two-digit width breaks
+silently at volume 100 and manga runs pass it.
 
 ## Conventions
 
