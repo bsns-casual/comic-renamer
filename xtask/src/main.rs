@@ -122,7 +122,8 @@ fn measure() -> Result<Rates, String> {
 
 fn label(status: &Status) -> &'static str {
     match status {
-        Status::Ready(_) => "ready",
+        Status::Ready(_) | Status::Mapped => "ready",
+        Status::Unmapped => "unmapped",
         Status::Failed => "failed - no series matched",
         Status::Review(ReviewReason::Ambiguous(_)) => "review - ambiguous",
         Status::Review(ReviewReason::UnsplitSubtitle(_)) => "review - unsplit subtitle",

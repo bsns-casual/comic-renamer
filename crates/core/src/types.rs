@@ -45,6 +45,9 @@ pub enum Status {
     Ready(Basis),
     Review(ReviewReason),
     Failed,
+    /// Found in the mapping. A later task removes the three variants above.
+    Mapped,
+    Unmapped,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -198,6 +201,12 @@ pub fn human_bytes(bytes: u64) -> String {
 // Errors. One enum per module, all declared here so later tasks cannot invent
 // a variant that another module's test already names.
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, thiserror::Error)]
+pub enum MappingError {
+    #[error("mapping file line {line}: {reason}")]
+    Parse { line: usize, reason: String },
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum CorpusError {

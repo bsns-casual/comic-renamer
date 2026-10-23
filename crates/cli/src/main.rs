@@ -202,9 +202,9 @@ fn summarise(rows: &[PlanRow], required: u64, download: u64) {
     let mut failed = 0usize;
     for row in rows {
         match row.status {
-            Status::Ready(_) => ready += 1,
+            Status::Ready(_) | Status::Mapped => ready += 1,
             Status::Review(_) => review += 1,
-            Status::Failed => failed += 1,
+            Status::Failed | Status::Unmapped => failed += 1,
         }
     }
     let pct = |n: usize| {

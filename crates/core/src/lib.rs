@@ -5,6 +5,7 @@ pub mod apply;
 pub mod corpus;
 pub mod fsops;
 pub mod komga_api;
+pub mod mapping;
 pub mod normalize;
 pub mod overrides;
 pub mod plan;

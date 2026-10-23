@@ -457,6 +457,7 @@ fn report_coverage_over_the_heldout_set() {
                     comic_renamer_core::types::ReviewReason::VolumeInfeasible => "review:volume",
                 }
             }
+            Status::Mapped | Status::Unmapped => unreachable!("resolve() never returns a mapping status"),
             Status::Failed => {
                 if std::env::var("SHOW_FAILURES").is_ok() {
                     println!("  FAIL {stem}");
