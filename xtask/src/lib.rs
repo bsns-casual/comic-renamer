@@ -1,6 +1,8 @@
 //! Grading logic lives in the lib because a bin-only crate cannot be imported
 //! by its own tests.
 
+use comic_renamer_core::title::{is_volume_word, number_value, split_at_boundary};
+
 /// Normalises both sides before comparing — Humble writes `&` where the corpus
 /// writes "and", prefixes promos with "Free Issue" including a zero-width
 /// character, and inserts `Vol 1:` mid-title. A naive comparison overstates the
@@ -40,16 +42,11 @@ fn split_title(s: &str) -> (Vec<String>, Vec<String>) {
         .replace(['\u{200b}', '\u{200c}', '\u{200d}', '\u{feff}'], "")
         .replace('&', " and ");
 
-    // The colon split comes first so a number and the subtitle's first word
-    // cannot share a token -- Humble writes `Vol. 3:Planet Death`.
-    let (head, tail) = match expanded.split_once(':') {
-        Some((head, tail)) => (head, tail),
-        None => (expanded.as_str(), ""),
-    };
     // Both boundaries apply: the series ends at whichever of the colon and
-    // the volume marker comes first, and everything past it is subtitle.
-    let (mut series, mut subtitle) = split_at_volume(head);
-    subtitle.extend(words(tail));
+    // the volume marker comes first (shared with the title parser).
+    let (head, _volume, tail) = split_at_boundary(&expanded);
+    let mut series = words(head);
+    let subtitle = words(tail);
 
     // Humble's promo prefix. Only when "Free" is followed by "Issue", so a
     // title that genuinely opens with "Free" keeps its first word.
@@ -62,12 +59,10 @@ fn split_title(s: &str) -> (Vec<String>, Vec<String>) {
     (series, subtitle)
 }
 
-/// Normalised words, split at the first volume marker into the part before it
-/// and the part after. The marker and its number are dropped.
-fn split_at_volume(s: &str) -> (Vec<String>, Vec<String>) {
-    let mut before: Vec<String> = Vec::new();
-    let mut after: Vec<String> = Vec::new();
-    let mut past = false;
+/// Normalised words: issue-number tokens dropped, and a leftover volume
+/// marker with its number. The boundary has already been found.
+fn words(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
     let mut raw = s.split_whitespace().peekable();
     while let Some(token) = raw.next() {
         // Issue numbers go before punctuation is stripped, or `#7` survives
@@ -76,49 +71,22 @@ fn split_at_volume(s: &str) -> (Vec<String>, Vec<String>) {
         if token.contains('#') {
             continue;
         }
-        if !past && is_volume_word(token) {
-            if raw.peek().is_some_and(|t| is_number(&alphanumeric(t))) {
+        if is_volume_word(token) {
+            if raw.peek().is_some_and(|t| number_value(t).is_some()) {
                 raw.next();
-                past = true;
             }
             continue;
         }
         let clean = alphanumeric(token);
-        if clean.is_empty() {
-            continue;
-        }
-        if past {
-            after.push(clean);
-        } else {
-            before.push(clean);
+        if !clean.is_empty() {
+            out.push(clean);
         }
     }
-    (before, after)
-}
-
-/// Every normalised word, boundary ignored. For a subtitle, which has none.
-fn words(s: &str) -> Vec<String> {
-    let (mut before, after) = split_at_volume(s);
-    before.extend(after);
-    before
+    out
 }
 
 fn alphanumeric(token: &str) -> String {
     token.chars().filter(|c| c.is_alphanumeric()).collect()
-}
-
-fn is_volume_word(token: &str) -> bool {
-    matches!(
-        alphanumeric(token).to_ascii_lowercase().as_str(),
-        "vol" | "vols" | "volume" | "volumes"
-    )
-}
-
-/// Arabic or Roman. `Vol. IV` and `Vol 1` are both Humble forms.
-fn is_number(token: &str) -> bool {
-    !token.is_empty()
-        && (token.chars().all(|c| c.is_ascii_digit())
-            || token.chars().all(|c| "IVXLCDM".contains(c)))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

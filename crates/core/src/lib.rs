@@ -13,6 +13,7 @@ pub mod preset;
 pub mod residue;
 pub mod resolve;
 pub mod scan;
+pub mod title;
 pub mod types;
 pub mod undo;
 
