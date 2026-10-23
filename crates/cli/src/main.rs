@@ -266,15 +266,15 @@ fn run_scan(
 /// Guesses for the unmapped files, printed and never saved (D49). The corpus is
 /// fetched here and only here: a session with nothing unmapped never needs it,
 /// and a fetch that fails costs the guesses, not the scan.
-fn suggest_for(
+fn guesses_for(
     unmapped: &[PathBuf],
     marketplace: &str,
     folder: &str,
     lang: &str,
     overrides: &Overrides,
-) {
+) -> Vec<(String, Vec<comic_renamer_core::types::Suggestion>)> {
     if unmapped.is_empty() {
-        return;
+        return Vec::new();
     }
     let corpus = if marketplace.to_ascii_lowercase().starts_with("humble") {
         open_corpus().map_err(|e| eprintln!("no corpus, guessing from filenames only: {e}")).ok()
@@ -287,11 +287,24 @@ fn suggest_for(
         overrides: Some(overrides),
         lang,
     };
+    unmapped
+        .iter()
+        .map(|path| {
+            let stem = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+            let found = suggest_with(&stem, marketplace, corpus.as_ref(), &ctx);
+            (stem, found)
+        })
+        .collect()
+}
+
+fn suggest_for(unmapped: &[PathBuf], marketplace: &str, folder: &str, lang: &str, overrides: &Overrides) {
+    let guesses = guesses_for(unmapped, marketplace, folder, lang, overrides);
+    if guesses.is_empty() {
+        return;
+    }
     println!("
 guesses for the unmapped files (nothing is saved):");
-    for path in unmapped.iter().take(COLLISIONS_SHOWN) {
-        let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-        let found = suggest_with(&stem, marketplace, corpus.as_ref(), &ctx);
+    for (stem, found) in guesses.iter().take(COLLISIONS_SHOWN) {
         let shown: Vec<String> = found.iter().map(|s| s.series.clone()).collect();
         let shown = if shown.is_empty() { "no guess".to_string() } else { shown.join(" | ") };
         println!("    {stem}  ->  {shown}");

@@ -1,10 +1,12 @@
 //! `map`: open a mapping session for the files the database does not know.
 
-use crate::{parse_overrides, suggest_for, OVERRIDES, SHIPPED_MAPPINGS};
+use crate::{guesses_for, parse_overrides, OVERRIDES, SHIPPED_MAPPINGS};
 use comic_renamer_core::mapping::Mappings;
 use comic_renamer_core::overrides::Overrides;
 use comic_renamer_core::types::{Mode, ScanOpts};
 use comic_renamer_core::{plan, scan};
+mod table;
+
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
@@ -64,8 +66,6 @@ fn require_terminal(stdout_is_terminal: bool, stdin_is_terminal: bool) -> Result
 /// from is not a plan they asked for.
 pub enum Outcome {
     Done,
-    // shortcut: unconstructed outside tests until the table exists; the table task removes the allow.
-    #[allow(dead_code)]
     Quit,
 }
 
@@ -116,8 +116,9 @@ fn run_with(
         let total = first.rows.len() + first.unmapped.len();
         println!("{}\n", orientation(first.unmapped.len(), total));
         if let Outcome::Quit = session(&first)? {
-            println!("Stopped. No plan was written.");
-            return Ok(());
+            // A quit exits non-zero: an exit code that is zero either way cannot
+            // tell a caller "a plan exists" from "none does".
+            return Err("Stopped. No plan was written.".into());
         }
         // The session records what the user approved in the local mapping
         // file; the plan is built from what that leaves.
@@ -130,9 +131,9 @@ fn run_with(
     Ok(())
 }
 
-// shortcut: prints guesses and records nothing; the next task replaces this
-// body with the interactive table and detail editor, which write approved rows
-// to `config_dir()/mappings.tsv`.
+// shortcut: shows the table and records nothing; the detail editor and the
+// write of approved rows to `config_dir()/mappings.tsv` are later tasks, so
+// `Done` currently builds the plan from what is already mapped.
 fn session(
     unmapped: &[PathBuf],
     marketplace: &str,
@@ -140,8 +141,21 @@ fn session(
     lang: &str,
     overrides: &Overrides,
 ) -> Result<Outcome, String> {
-    suggest_for(unmapped, marketplace, folder, lang, overrides);
-    Ok(Outcome::Done)
+    let entries = guesses_for(unmapped, marketplace, folder, lang, overrides)
+        .into_iter()
+        .map(|(stem, mut found)| table::Entry {
+            stem,
+            // Several candidates are an ambiguity, not a guess to approve.
+            guess: if found.len() == 1 { found.pop() } else { None },
+            final_fields: None,
+            approved: false,
+        })
+        .collect();
+    let mut t = table::Table::new(folder.to_string(), entries);
+    match table::run(&mut t).map_err(|e| e.to_string())? {
+        table::Action::Done => Ok(Outcome::Done),
+        _ => Ok(Outcome::Quit),
+    }
 }
 
 #[cfg(test)]
@@ -239,7 +253,8 @@ mod tests {
     #[test]
     fn a_session_the_user_quit_writes_no_plan() {
         let (_dir, opts, plan, config) = unmapped_bundle();
-        run_with(&opts, plan.clone(), &config, (true, true), |_| Ok(Outcome::Quit)).unwrap();
+        let r = run_with(&opts, plan.clone(), &config, (true, true), |_| Ok(Outcome::Quit));
+        assert!(r.unwrap_err().contains("No plan was written"), "a quit must be an error, so the exit code is non-zero");
         assert!(!plan.exists());
     }
 
