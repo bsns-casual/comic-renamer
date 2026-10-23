@@ -758,6 +758,36 @@ mod tests {
         assert!(matches!(d.on_key(key(KeyCode::Enter)), Step::Editing));
     }
 
+    /// Clause (A)'s own job, and the only case where it is not redundant with
+    /// the prefill clause: the user really did type something, and what they
+    /// typed lands on a *different* unsplit candidate's path. The guard's
+    /// contract is "never another garbled candidate", not "never the one you
+    /// started on". Deleting (A) alone leaves the suite green because `pick`
+    /// clears `edited`, so every other route to a non-prefill candidate is
+    /// refused by `edited` instead -- which makes those two lines a pair that
+    /// has to be mutated together to see the hole, and this the one test that
+    /// sees it from either side.
+    #[test]
+    fn typing_your_way_onto_another_garbled_candidate_is_not_a_correction() {
+        let e = Entry::new(
+            "h".into(),
+            vec![
+                sug("Hellboy", Some(1), Some("wakethedevi"), None),
+                sug("Hellboy", Some(1), Some("wakethedevil"), None),
+            ],
+        );
+        let mut d = Detail::for_entry(&e, &Komga);
+        for _ in 0..3 {
+            d.on_key(key(KeyCode::Tab)); // series, volume, subtitle
+        }
+        d.on_key(key(KeyCode::Char('l')));
+        assert_eq!(d.parsed.subtitle.as_deref(), Some("wakethedevil"), "typed, not picked");
+        assert!(
+            matches!(d.on_key(key(KeyCode::Enter)), Step::Editing),
+            "it is another candidate's garbled subtitle, reached by typing"
+        );
+    }
+
     /// The *ambiguous* half of `needs_review` -- two candidates close enough
     /// that neither is verified, and no squashed subtitle to split. Nothing
     /// here has an unsplit candidate, so the prefill comparison is the only
