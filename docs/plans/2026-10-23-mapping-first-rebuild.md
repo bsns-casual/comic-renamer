@@ -15,7 +15,7 @@
 Every task's requirements implicitly include these.
 
 - **The nine invariants in `CLAUDE.md` are not subject to minimisation**, and neither is the test discipline around them. Minimise the code, never the proof.
-- **Presets are the only code that constructs paths** (invariant 1). No mapping field may contain a path or separator. No task in this plan modifies `crates/core/src/preset/`.
+- **Presets are the only code that constructs paths** (invariant 1). A mapping field is never *used as* a path component directly; it reaches the filesystem only through `preset::komga::sanitize`, which already maps `: / \ | " < > ? *`. Separators therefore **may** appear in a stored title — `Hack/Slash: Back to School` is a real series, and D47 requires storing it verbatim. What is rejected is only the set sanitising cannot fix (§7.3). No task in this plan modifies `crates/core/src/preset/`.
 - **`apply` recomputes destinations from metadata** (invariant 2, D14). No task may make `apply` trust `destination_preview`.
 - **No-clobber at the syscall** (invariant 6). No task replaces `renamex_np(…, RENAME_EXCL)`, `clonefile`'s native `EEXIST`, or `O_EXCL`.
 - **Nothing the binary needs is read from the working directory.** Shipped data is `include_str!`-embedded. This defect has shipped once already.

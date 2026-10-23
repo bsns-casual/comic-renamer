@@ -495,18 +495,34 @@ correct now, because the contributed `series` field *is* the title: **595 of
 7 slashes, 4 `?`, 2 `"`. `Nemesis: Rogues' Gallery` and
 `Hypnotwist / Scarlet By Starlight` would be unstorable as published.
 
-So §6.11's own distinction is applied by character class rather than by data
-origin:
+**The principle, amended 2026-10-23.** An earlier draft of this table stated the
+split as two character lists and put `/` in the reject column — while the
+paragraph above it named `Hypnotwist / Scarlet By Starlight` as a title that
+must be storable. That contradiction propagated into the implementation plan's
+constraints and from there into a module doc and a task brief before it was
+caught. The split is therefore stated as a rule first:
+
+> **Reject what is invisible to a human reviewer. Sanitise what is merely
+> hostile to a filesystem.**
+
+A reviewer reading a pull request can see a colon or a slash and judge it. They
+cannot see a zero-width space or a Cyrillic `е` — `Hell<U+200B>boy` renders to
+the same folder as `Hellboy`, so accepting it creates a duplicate series that
+survives review. That, not path-shapedness, is what divides the two columns.
 
 | | |
 |---|---|
-| **Rejected** | `/` `\` · `.` and `..` · leading `.` · drive-letter and UNC prefixes · leading `/` · NUL and all C0/C1 controls · tab, CR, LF · leading `=` `+` `-` `@` · bidi controls · zero-width · non-NFC · mixed-script confusables · trailing dot or space · Windows device names · per-field byte cap |
-| **Stored verbatim, sanitised by the preset on the way to a path** | `:` `?` `"` `|` `<` `>` `*` |
+| **Rejected** — invisible, or unrepresentable | NUL and all C0/C1 controls · tab, CR, LF · zero-width `U+200B–200F`, `U+FEFF`, `U+00AD` · bidi controls `U+202A–202E`, `U+2066–2069` · mixed-script confusables (at most one of Latin, Cyrillic, Greek) · non-NFC · a field that is empty, whitespace-only, or only dots · leading `=` `+` `-` `@` (spreadsheet formula injection) · per-field byte cap · the rendered-destination budget |
+| **Stored verbatim, sanitised by the preset on the way to a path** | `:` `/` `\` `|` `"` `<` `>` `?` `*` · trailing dot or space · Windows device names |
 
-The reject column is exactly the set that can influence a *location*; the
-sanitise column is the set that is merely hostile to some filesystem. Invariant
-1 is unaffected: the preset remains the sole path constructor, and a bad row
-can still only produce a wrong name.
+`preset::komga::sanitize` already implements every entry in the right-hand
+column, with 255-byte-per-component truncation that does not split a UTF-8
+sequence. It is not to be duplicated in the validator.
+
+Invariant 1 is unaffected: the preset remains the sole path constructor, and a
+bad row can still only produce a wrong *name*. A field is never used as a path
+component directly, so `../../x` is not an escape — it sanitises to a visible,
+inert `.. - .. - x`.
 
 Storing the real title verbatim also keeps the table reusable by a preset with
 different path rules — Kavita and Plex are Phase 2 — and lets a contributed row
