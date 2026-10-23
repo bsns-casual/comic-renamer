@@ -1,6 +1,8 @@
 //! The recorded mapping from a filename to a title. A `MappingRow` is keyed by
 //! `key(stem)`; the row converts to `Resolved`, so the presets stay the only
-//! code that constructs paths. No field here holds a path or a separator.
+//! code that constructs paths. `series` and `subtitle` are stored verbatim
+//! (`Hack/Slash: Back to School` is a real name) and the preset sanitises them
+//! into path components; this module never treats a field as a path.
 
 use crate::types::{MappingError, Resolved, Status};
 use unicode_normalization::UnicodeNormalization;
