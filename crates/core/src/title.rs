@@ -88,9 +88,13 @@ pub fn is_volume_word(token: &str) -> bool {
 }
 
 /// Arabic, or uppercase Roman as a whole token: `IVory` is not `IV`, which
-/// would invent a volume. `None` when it is not a number or does not fit.
+/// would invent a volume. Only wrapping punctuation is stripped, so a range
+/// (`8-10`, `I-V`) or a decimal (`2.5`) is `None`, not a joined number: it has
+/// no single volume. `None` too when it does not fit a `u32`.
 pub fn number_value(token: &str) -> Option<u32> {
-    let t = alphanumeric(token);
+    let t = token
+        .trim_start_matches(['(', '#'])
+        .trim_end_matches([',', '.', ')']);
     if !t.is_empty() && t.chars().all(|c| c.is_ascii_digit()) {
         return t.parse().ok();
     }

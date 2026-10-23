@@ -79,6 +79,26 @@ fn a_volume_too_big_for_u32_is_not_a_volume() {
     assert_eq!(parse_title("Foo Vol. 99999999999").volume, None);
 }
 
+/// A range or a decimal has no single volume number. Storing 810 for
+/// `Vol. 8-10` would file confidently wrong; no volume sends the row to a human.
+#[test]
+fn a_range_or_decimal_is_not_a_volume() {
+    for text in ["Foo Vols. 1-3", "Foo Vol. 8-10", "Foo Vol. 2.5", "Foo Vol. I-V", "Foo Vol1-01"] {
+        assert_eq!(parse_title(text).volume, None, "{text}");
+    }
+    // Pinned: with no boundary found, the whole text stays in the series.
+    let p = parse_title("Foo Vol. 8-10");
+    assert_eq!((p.series.as_str(), p.subtitle), ("Foo Vol. 8-10", None));
+}
+
+#[test]
+fn wrapping_punctuation_around_the_number_is_stripped() {
+    assert_eq!(parse_title("Foo Vol. (3)").volume, Some(3));
+    assert_eq!(parse_title("Foo Vol. #3").volume, Some(3));
+    assert_eq!(parse_title("Foo Vol. 3, Bar").volume, Some(3));
+    assert_eq!(parse_title("Foo Vol. IV.").volume, Some(4));
+}
+
 #[test]
 fn split_at_boundary_returns_slices_of_the_input() {
     let (series, volume, subtitle) = split_at_boundary("Harbinger, Vol. 2: Renegades");

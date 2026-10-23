@@ -1,7 +1,7 @@
 //! Grading logic lives in the lib because a bin-only crate cannot be imported
 //! by its own tests.
 
-use comic_renamer_core::title::{is_volume_word, number_value, split_at_boundary};
+use comic_renamer_core::title::{is_volume_word, split_at_boundary};
 
 /// Normalises both sides before comparing — Humble writes `&` where the corpus
 /// writes "and", prefixes promos with "Free Issue" including a zero-width
@@ -72,7 +72,7 @@ fn words(s: &str) -> Vec<String> {
             continue;
         }
         if is_volume_word(token) {
-            if raw.peek().is_some_and(|t| number_value(t).is_some()) {
+            if raw.peek().is_some_and(|t| looks_numeric(&alphanumeric(t))) {
                 raw.next();
             }
             continue;
@@ -83,6 +83,15 @@ fn words(s: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Loose on purpose: the grader only asks whether a number follows the marker,
+/// so `8-10` is consumed whole. The parser's stricter `number_value` would
+/// leave it behind as a word and change what the gate measures.
+fn looks_numeric(token: &str) -> bool {
+    !token.is_empty()
+        && (token.chars().all(|c| c.is_ascii_digit())
+            || token.chars().all(|c| "IVXLCDM".contains(c)))
 }
 
 fn alphanumeric(token: &str) -> String {
