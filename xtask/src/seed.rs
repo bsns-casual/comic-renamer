@@ -13,6 +13,8 @@ use std::path::Path;
 use comic_renamer_core::mapping::{find_key_collisions, key, to_tsv, MappingRow};
 use comic_renamer_core::title::{is_volume_word, number_value, parse_title};
 
+use xtask::strip_promo;
+
 use super::{percent, GROUND_TRUTH, LANG, MARKETPLACE};
 
 pub fn seed() -> Result<(), String> {
@@ -91,7 +93,7 @@ pub fn seed() -> Result<(), String> {
 
 fn build_row(title: &str, stem: &str, bundle: &str) -> Result<MappingRow, String> {
     let key = key(stem).ok_or_else(|| format!("{stem:?} has no key"))?;
-    let parsed = parse_title(title);
+    let parsed = parse_title(&strip_promo(title));
     let row = MappingRow {
         key,
         series: parsed.series,
@@ -120,8 +122,6 @@ fn classify(title: &str, row: &MappingRow) -> &'static str {
         "volume marker swallowed into the subtitle (colon came first)"
     } else if row.volume.is_none() && !last.is_empty() && last.chars().all(|c| c.is_ascii_digit()) {
         "bare trailing number (not a marker)"
-    } else if title.split_whitespace().any(|t| t.starts_with('#')) {
-        "issue number kept (subtitle, or range dropped beside a volume)"
     } else {
         "clean"
     }

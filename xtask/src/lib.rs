@@ -37,25 +37,33 @@ fn join(series: &[String], subtitle: &[String]) -> String {
 /// 2026-10-22). Humble title-cases function words where the corpus does not,
 /// and folding case to hide that would also let `MASK Omnibus` pass against
 /// *The Mask Omnibus*.
+/// Humble's promo prefix, "Free Issue" behind a zero-width space, and any
+/// stray zero-width characters. Shared by the grader and the seed generator so
+/// the two cannot drift. Only a "Free Issue" followed by more text is a prefix,
+/// so a title that genuinely opens with "Free" keeps its first word.
+pub fn strip_promo(s: &str) -> String {
+    let clean = s.replace(['\u{200b}', '\u{200c}', '\u{200d}', '\u{feff}'], "");
+    let mut words = clean.split_whitespace();
+    if let (Some(a), Some(b)) = (words.next(), words.next()) {
+        if a.eq_ignore_ascii_case("free") && b.eq_ignore_ascii_case("issue") {
+            let rest = clean.trim_start()[a.len()..].trim_start()[b.len()..].trim_start();
+            if !rest.is_empty() {
+                return rest.to_string();
+            }
+        }
+    }
+    clean
+}
+
 fn split_title(s: &str) -> (Vec<String>, Vec<String>) {
-    let expanded = s
-        .replace(['\u{200b}', '\u{200c}', '\u{200d}', '\u{feff}'], "")
-        .replace('&', " and ");
+    let expanded = strip_promo(s).replace('&', " and ");
 
     // Both boundaries apply: the series ends at whichever of the colon and
     // the volume marker comes first (shared with the title parser).
     let (head, _volume, tail) = split_at_boundary(&expanded);
-    let mut series = words(head);
+    let series = words(head);
     let subtitle = words(tail);
 
-    // Humble's promo prefix. Only when "Free" is followed by "Issue", so a
-    // title that genuinely opens with "Free" keeps its first word.
-    if series.len() > 2
-        && series[0].eq_ignore_ascii_case("free")
-        && series[1].eq_ignore_ascii_case("issue")
-    {
-        series.drain(..2);
-    }
     (series, subtitle)
 }
 
@@ -101,6 +109,14 @@ fn alphanumeric(token: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strip_promo_removes_the_prefix_and_zero_width_characters() {
+        assert_eq!(strip_promo("\u{200b}Free Issue Twilight Zone #1"), "Twilight Zone #1");
+        assert_eq!(strip_promo("Free Issue"), "Free Issue", "nothing left to file under");
+        assert_eq!(strip_promo("Free Fall"), "Free Fall");
+        assert_eq!(strip_promo("Saga"), "Saga");
+    }
 
     #[test]
     fn accepts_the_four_grading_artifacts() {
