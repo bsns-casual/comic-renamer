@@ -206,6 +206,8 @@ pub fn human_bytes(bytes: u64) -> String {
 pub enum MappingError {
     #[error("mapping file line {line}: {reason}")]
     Parse { line: usize, reason: String },
+    #[error("{field} {reason}")]
+    Invalid { field: &'static str, reason: String },
 }
 
 #[derive(Debug, thiserror::Error)]

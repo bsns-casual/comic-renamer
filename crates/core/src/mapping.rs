@@ -4,6 +4,7 @@
 //! (`Hack/Slash: Back to School` is a real name) and the preset sanitises them
 //! into path components; this module never treats a field as a path.
 
+use crate::preset::Preset;
 use crate::types::{MappingError, Resolved, Status};
 use unicode_normalization::UnicodeNormalization;
 
@@ -120,4 +121,79 @@ pub fn to_tsv(rows: &[MappingRow]) -> String {
         ));
     }
     out
+}
+
+const MAX_FIELD_BYTES: usize = 120;
+const MAX_COMPONENT_BYTES: usize = 255;
+const MAX_RENDERED_BYTES: usize = 1024;
+
+fn invalid(field: &'static str, reason: impl Into<String>) -> MappingError {
+    MappingError::Invalid { field, reason: reason.into() }
+}
+
+// shortcut: only the Latin/Cyrillic/Greek triple is checked, which is the
+// look-alike attack §6.11 names; Han/Kana/Hangul/Arabic/Hebrew/Thai mix with
+// Latin legitimately. Widen with a script table if another pair is abused.
+fn mixes_confusable_scripts(s: &str) -> bool {
+    let (mut latin, mut other) = (false, false);
+    for c in s.chars() {
+        match c {
+            'A'..='Z' | 'a'..='z' | '\u{C0}'..='\u{24F}' | '\u{1E00}'..='\u{1EFF}'
+                if c != '\u{D7}' && c != '\u{F7}' =>
+            {
+                latin = true
+            }
+            '\u{370}'..='\u{3FF}' | '\u{1F00}'..='\u{1FFF}' | '\u{400}'..='\u{52F}'
+            | '\u{1C80}'..='\u{1C8F}' | '\u{2DE0}'..='\u{2DFF}' | '\u{A640}'..='\u{A69F}' => {
+                other = true
+            }
+            _ => {}
+        }
+    }
+    latin && other
+}
+
+/// Rejects only what the preset's sanitiser cannot repair. `: / \ | " < > ? *`
+/// pass: `sanitize` maps them, and 26.8% of real titles carry one (D47).
+fn validate_field(field: &'static str, s: &str) -> Result<(), MappingError> {
+    if s.len() > MAX_FIELD_BYTES {
+        return Err(invalid(field, format!("is {} bytes; the cap is {MAX_FIELD_BYTES}", s.len())));
+    }
+    if s.chars().any(char::is_control) {
+        return Err(invalid(field, "contains a control character"));
+    }
+    if !s.nfc().eq(s.chars()) {
+        return Err(invalid(field, "is not NFC-normalised"));
+    }
+    if s.starts_with(['=', '+', '-', '@']) {
+        return Err(invalid(field, "starts with a spreadsheet formula character"));
+    }
+    if !s.is_empty() && s.chars().all(|c| c == '.') {
+        return Err(invalid(field, "is only dots"));
+    }
+    if mixes_confusable_scripts(s) {
+        return Err(invalid(field, "mixes Latin with Cyrillic or Greek"));
+    }
+    Ok(())
+}
+
+impl MappingRow {
+    pub fn validate(&self) -> Result<(), MappingError> {
+        validate_field("series", &self.series)?;
+        if let Some(sub) = &self.subtitle {
+            validate_field("subtitle", sub)?;
+        }
+        validate_field("lang", &self.lang)?;
+        validate_field("bundle", &self.bundle)
+    }
+}
+
+/// Whether the destination the preset renders from this row fits 255 bytes
+/// per component and 1024 total. Measures the row-controlled part only: CI
+/// cannot know `dest_root`.
+pub fn rendered_budget_ok(row: &MappingRow, preset: &dyn Preset) -> bool {
+    let dest = preset.destination(&row.resolved(), "cbz");
+    let parts: Vec<usize> = dest.components().map(|c| c.as_os_str().len()).collect();
+    let total = parts.iter().sum::<usize>() + parts.len().saturating_sub(1);
+    parts.iter().all(|&n| n <= MAX_COMPONENT_BYTES) && total <= MAX_RENDERED_BYTES
 }
