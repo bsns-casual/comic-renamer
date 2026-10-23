@@ -143,10 +143,10 @@ fn session(
 ) -> Result<Outcome, String> {
     let entries = guesses_for(unmapped, marketplace, folder, lang, overrides)
         .into_iter()
-        .map(|(stem, mut found)| table::Entry {
+        .map(|(stem, found)| table::Entry {
             stem,
-            // Several candidates are an ambiguity, not a guess to approve.
-            guess: if found.len() == 1 { found.pop() } else { None },
+            guess: found.first().cloned(),
+            candidates: found,
             final_fields: None,
             approved: false,
         })

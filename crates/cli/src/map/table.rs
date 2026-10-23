@@ -14,6 +14,9 @@ use ratatui::Frame;
 pub struct Entry {
     pub stem: String,
     pub guess: Option<Suggestion>,
+    /// Every suggestion the resolver returned, `guess` first. More than one
+    /// means the tool has not decided; the detail editor offers them as a menu.
+    pub candidates: Vec<Suggestion>,
     /// What the user typed or accepted. `None` until one of those happens.
     pub final_fields: Option<ParsedTitle>,
     pub approved: bool,
@@ -30,9 +33,18 @@ impl Entry {
             .is_some_and(|g| g.source == SuggestionSource::Corpus && g.subtitle.is_some())
     }
 
+    pub fn is_ambiguous(&self) -> bool {
+        self.candidates.len() > 1
+    }
+
+    /// Rows `^A` and a bare Enter must leave for the user.
+    fn needs_review(&self) -> bool {
+        self.has_squashed_subtitle() || self.is_ambiguous()
+    }
+
     /// The guess as final fields, when it is safe to take without a human edit.
     fn clean_guess(&self) -> Option<ParsedTitle> {
-        let g = self.guess.as_ref().filter(|_| !self.has_squashed_subtitle())?;
+        let g = self.guess.as_ref().filter(|_| !self.needs_review())?;
         Some(ParsedTitle { series: g.series.clone(), volume: g.volume, subtitle: g.subtitle.clone() })
     }
 
@@ -103,8 +115,8 @@ impl Table {
                 let Some(e) = self.entries.get_mut(self.cursor) else { return Action::Continue };
                 if e.approved {
                     e.approved = false;
-                } else if !e.approve() && e.has_squashed_subtitle() {
-                    // Enter never accepts a squashed guess; it sends the user
+                } else if !e.approve() && e.needs_review() {
+                    // Enter never accepts a squashed or ambiguous guess; it sends the user
                     // to fix it.
                     return Action::OpenDetail(self.cursor);
                 }
@@ -123,10 +135,18 @@ impl Table {
         frame.render_widget(format!(" {title}{}{count}", " ".repeat(pad)), head);
 
         let rows = self.entries.iter().map(|e| {
-            let guess = match (&e.guess, e.has_squashed_subtitle()) {
-                (None, _) => "(no guess)".to_string(),
-                (Some(g), true) => format!("[unsplit] {}", show(&g.series, g.volume, g.subtitle.as_deref())),
-                (Some(g), false) => show(&g.series, g.volume, g.subtitle.as_deref()),
+            let guess = match &e.guess {
+                None => "(no guess)".to_string(),
+                Some(g) => {
+                    let name = show(&g.series, g.volume, g.subtitle.as_deref());
+                    if e.is_ambiguous() {
+                        format!("[{} candidates] {name}", e.candidates.len())
+                    } else if e.has_squashed_subtitle() {
+                        format!("[unsplit] {name}")
+                    } else {
+                        name
+                    }
+                }
             };
             let fin = e.final_fields.as_ref().map_or(String::new(), |f| {
                 let name = show(&f.series, f.volume, f.subtitle.as_deref());
@@ -147,6 +167,10 @@ impl Table {
     }
 }
 
+// seam: the detail editor (next task) edits `entry.final_fields` and may offer
+// `candidates` as a picker; until then `e` is inert.
+fn open_detail(_entry: &mut Entry, _candidates: &[Suggestion]) {}
+
 /// Runs the table until the user finishes or quits.
 pub fn run(table: &mut Table) -> std::io::Result<Action> {
     let mut terminal = ratatui::init();
@@ -158,9 +182,10 @@ pub fn run(table: &mut Table) -> std::io::Result<Action> {
         }
         match table.on_key(key) {
             Action::Continue => {}
-            // seam: the detail editor (next task) takes `table.entries[i]`,
-            // edits `final_fields`, and returns here; until then `e` is inert.
-            Action::OpenDetail(_) => {}
+            Action::OpenDetail(i) => {
+                let candidates = table.entries[i].candidates.clone();
+                open_detail(&mut table.entries[i], &candidates);
+            }
             done => return Ok(done),
         }
     })();
@@ -185,7 +210,7 @@ mod tests {
     }
 
     fn entry(stem: &str, guess: Option<Suggestion>) -> Entry {
-        Entry { stem: stem.into(), guess, final_fields: None, approved: false }
+        Entry { stem: stem.into(), guess, candidates: vec![], final_fields: None, approved: false }
     }
 
     fn clean(stem: &str, series: &str) -> Entry {
@@ -194,6 +219,47 @@ mod tests {
 
     fn squashed(stem: &str) -> Entry {
         entry(stem, Some(sug("Hellboy Omnibus", Some(1), Some("seedofdestruction"), SuggestionSource::Corpus)))
+    }
+
+    fn ambiguous(stem: &str) -> Entry {
+        let a = sug("Witch", Some(1), None, SuggestionSource::Corpus);
+        let b = sug("Witcher", Some(1), None, SuggestionSource::Corpus);
+        Entry { guess: Some(a.clone()), candidates: vec![a, b], ..entry(stem, None) }
+    }
+
+    #[test]
+    fn approve_all_skips_an_ambiguous_row() {
+        let mut t = table(vec![clean("a", "Fine"), ambiguous("b")]);
+        t.on_key(ctrl('a'));
+        assert!(t.entries[0].approved);
+        assert!(!t.entries[1].approved, "several candidates means the tool has not decided");
+        assert!(t.entries[1].final_fields.is_none());
+    }
+
+    #[test]
+    fn enter_on_an_ambiguous_row_opens_the_detail_instead_of_accepting() {
+        let mut t = table(vec![ambiguous("b")]);
+        assert_eq!(t.on_key(key(KeyCode::Enter)), Action::OpenDetail(0));
+        assert!(!t.entries[0].approved);
+    }
+
+    #[test]
+    fn an_ambiguous_row_shows_its_top_candidate_and_is_marked() {
+        let s = screen(&table(vec![ambiguous("b")]));
+        assert!(s.contains("[2 candidates] Witch Volume 1"), "{s}");
+        assert!(!s.contains("(no guess)"), "{s}");
+    }
+
+    #[test]
+    fn the_detail_editor_is_handed_every_candidate() {
+        let t = table(vec![ambiguous("b")]);
+        assert_eq!(t.entries[0].candidates.len(), 2);
+        assert_eq!(t.entries[0].candidates[1].series, "Witcher");
+    }
+
+    #[test]
+    fn a_row_with_zero_suggestions_still_says_no_guess() {
+        assert!(screen(&table(vec![entry("x", None)])).contains("(no guess)"));
     }
 
     fn key(c: KeyCode) -> KeyEvent {
