@@ -12,10 +12,15 @@ Comic Renamer currently *derives* each comic's title by matching its filename
 against a 1.2-million-series GCD corpus. That was the wrong shape for the
 problem.
 
-The files this tool exists to rename are bought in distributor bundles —
-Humble Bundle, Fanatical, Sweet Shop. **The distributor publishes the real
-title next to every download.** The title is a known quantity. We were
-throwing it away and then paying a large, fragile machine to guess it back.
+The files this tool exists to rename are bought from comic marketplaces —
+Humble Bundle, Fanatical, Global Comix, Sweet Shop. **The marketplace
+publishes the real title next to every download.** The title is a known
+quantity. We were throwing it away and then paying a large, fragile machine to
+guess it back.
+
+Worse than wasteful: for some marketplaces it is impossible. Fanatical ships
+`HackSlash Back to School.cbz` for *Hack/Slash: Back to School* — the `/` and
+`:` are gone from the input, so no resolver can recover them (§5.3.1).
 
 ### 1.1 What the guessing actually costs, measured
 
@@ -47,7 +52,7 @@ The same filenames, keyed by a normalised stem (§5.3) rather than resolved:
 
 ```
 usable rows 2223   distinct titles 1703   distinct stems 2055
-normalised keys 1876   keys mapping to >1 title: 0  (0.00%)
+normalised keys 2036   keys mapping to >1 title: 0  (0.00%)
 ```
 
 **Zero ambiguity.** The 430 rows the resolver calls "review — ambiguous" are
@@ -86,7 +91,8 @@ and safety, §6.13's `scan`/`apply`/`undo` contract, and all nine invariants in
 
 ## 3. Goals
 
-1. A mapped bundle renames deterministically, with no inference and no corpus.
+1. A mapped file renames deterministically, with no inference and no corpus,
+   whichever marketplace it came from.
 2. An unmapped bundle is announced plainly, then mapped in one interactive
    session with guesses pre-filled.
 3. A user's corrections persist locally and can be contributed upstream in one
@@ -178,46 +184,113 @@ resolving against the cwd.
 Local overrides shipped, for the same reason Layer B outranks the corpus in
 §6.2.1: the local file is the only place a user can correct a wrong row.
 
-### 5.3 Key normalisation, and why it is frozen
+### 5.3 Key normalisation — minimal, and therefore safe to freeze
 
 ```
 1. NFC
 2. lowercase
-3. strip a trailing download-id run of 9 or more digits, with any single
-   leading separator:            /[_-]?\d{9,}$/
-4. strip a trailing quality token, with its separator:
-                                 /[_-](hd|sd|lq|hq)$/
-5. strip all non-alphanumerics
+3. strip all non-alphanumerics
 ```
 
-**Validated: 1,846 keys over 2,223 rows, zero collisions.** That is the number
-the pinning test asserts.
+That is the whole rule. **2,036 keys over 2,223 Humble rows, zero
+collisions.**
 
-Three things about this rule were wrong in the first draft and are corrected
-here, because it is frozen and a wrong freeze is unrecoverable:
+#### Why it is this and not something cleverer
 
-- **Step order is load-bearing.** The quality token is only *trailing* after
-  the download id is stripped — `xo_manowar_vol1_hd_1410891143` exposes `hd`
-  at the end only at step 4. The draft ran the quality step first.
-- **The draft's quality step was a no-op.** It used `\b(hd|sd|lq|hq)\b`, and
-  `\b` never matches between `_` and `h` because `_` is a word character. So
-  the published figure of 1,876 keys was the count with that step doing
-  nothing. Both counts happen to give zero collisions, but the rule and its
-  asserted number have to agree.
-- **Substring matching is forbidden.** Matching `sd`/`hd` anywhere turns
-  `waltdisneysdonaldduck…` into `waltdisneyonaldduck…` and `comicsdementia`
-  into `comicementia` — 63 rows mangled. Trailing-token only.
+An earlier draft stripped Humble's download-id digit runs and `_hd` quality
+tokens, giving 1,846 keys. Real files from the other three marketplaces
+(§5.3.1) killed that rule, and the trade was never good anyway:
 
-**This rule is a one-way function from filename to key. Changing it
-invalidates every mapping ever contributed.** Treat it as frozen. It must be
-pinned by a test against the committed ground-truth fixture, and any change is
-a breaking data migration with a version bump and a rewrite of every shipped
-row — not a refactor.
+```
+frozen (aggressive)         1846 keys   0 collisions
+minimal (NFC+lower+alnum)   2036 keys   0 collisions
 
-**CI must fail if any two rows share a key *and* bundle with different fields.**
-That check is what replaces the entire §6.3 disambiguation apparatus. The
-`bundle` qualifier is in the comparison from day one — see §5.4, which is what
-keeps a future cross-distributor collision from needing a migration.
+cost of dropping the strip rules: 190 extra rows out of 2036  (9.3%)
+```
+
+190 rows in a generated, contributed table is nothing. A frozen rule that is
+wrong for half the marketplaces is unrecoverable — and D40 freezes it, so the
+migration it forbids would have been needed on day one.
+
+There is a deeper reason. **Deciding which parts of a filename are noise is
+itself inference**, which is the thing §1.3 removes. `_hd` looks like a quality
+marker until a series is actually called that. Minimal normalisation makes no
+claim about meaning: two spellings of a filename are two rows that happen to
+give the same answer, and that is fine.
+
+#### What this means for a variant
+
+`xo_manowar_vol1_1410891143` and `xo_manowar_vol1_hd_1410891143` are two rows
+with identical fields. The seeding generator emits both; a contributor mapping
+one is prompted for the other. Duplication in a data file, zero risk in a
+frozen rule.
+
+#### Still frozen, and still a migration
+
+The rule is a one-way function from filename to key. Changing it invalidates
+every row ever contributed. A pinning test asserts 2,036 keys against the
+committed fixture, and any change is a breaking data migration with a version
+bump — not a refactor.
+
+### 5.3.1 What the four marketplaces actually name files
+
+Measured against real samples, 19 files across three marketplaces beyond
+Humble. **Every marketplace bakes different noise into the filename, which is
+why §5.3 strips none of it.**
+
+| Marketplace | Shape | Noise it bakes in |
+|---|---|---|
+| Humble | `valiantmasters_bloodshot_hd_1410912611` | quality token, download id |
+| Fanatical | `HackSlash Back to School` | none — but see below |
+| Global Comix | `hammer-head-1_release-0001_978-1-5458-3063-5` | release counter, **ISBN-13** |
+| Sweet Shop | `young-shadow-the-watchdogs-graphicnovel` | type suffix: `issue-N`, `anthology`, `graphicnovel` |
+
+Two of these defeat the aggressive rule outright:
+
+- **Global Comix hyphenates its ISBN**, so `\d{9,}` never sees nine
+  consecutive digits and the ISBN lands in the key:
+  `hammerhead1release00019781545830635`. A different printing is a different
+  ISBN is a different key for the same comic. `release-0001` is a revision
+  counter that moves on re-release, changing the key again.
+- **Sweet Shop's type suffix is not a title**, and no Humble-derived rule
+  removes it.
+
+#### Fanatical proves the premise
+
+```
+HackSlash Back to School.cbz   ->  Hack/Slash: Back to School
+Dracula Motherfker.pdf         ->  Dracula, Motherf**ker!
+68 Vol. 6 Last Rites.cbz       ->  '68 Vol. 6: Last Rites
+```
+
+**The marketplace already stripped `/`, `:`, the apostrophe and the profanity.
+The title is not recoverable from the filename by any amount of inference.** No
+resolver, however good, gets `Hack/Slash` back from `HackSlash` — the
+information is gone from the input.
+
+This is the strongest evidence for §1.3, and it independently confirms D47: the
+characters the marketplace strips are exactly the ones §6.11 was arguing about,
+so a table that stores only a sanitised form could never hold the real title.
+
+#### One key per title, across formats
+
+19 files produced 12 keys. `.cbz`, `.pdf` and `.epub` of one comic share a
+stem, so **one mapping row serves every format** — `PlanRow` already carries
+`extension` separately, and the three file into one series folder under one
+name with different extensions. No collision, no duplicate mapping work. This
+was not designed for and it falls out correctly; the builder should pin it with
+a test rather than rediscover it.
+
+#### Guess source is per-marketplace
+
+The corpus is the wrong guess engine for Fanatical, whose filename is already
+the title modulo sanitisation; title-casing the stem beats a GCD lookup there,
+and the same holds for kebab-case Global Comix and Sweet Shop names. So the
+guess layer dispatches on marketplace, with the corpus as one strategy among
+several and "no guess" always permitted (§5.6).
+
+Marketplace is recorded per mapping file, not inferred from a user's folder
+names.
 
 ### 5.4 Lookup, and why `bundle` is a tiebreaker rather than part of the key
 
@@ -238,9 +311,9 @@ genuine collision from a second distributor is a *new row*, not a breaking
 change to a frozen key rule. Without this, D40's freeze would make the first
 cross-distributor collision unrecoverable.
 
-Note that 155 of the 1,846 keys already appear under more than one bundle with
-the *same* title, so the CI gate must compare fields rather than merely count
-rows per key.
+Note that 158 of the 2,036 keys already appear under more than one bundle, and
+in all 158 the title is identical — so the CI gate must compare *fields*, not
+merely count rows per key, or it fires on correct data.
 
 ### 5.5 `volume_count`, and the D37 problem this solves
 
@@ -452,7 +525,7 @@ push back on any of them:
 |---|---|---|
 | Per field | 120 bytes | Already in `overrides.rs`; unchanged. |
 | Rendered destination | 255 bytes per component, 1024 total | "Total path budget" cannot mean a path — a row contains none (invariant 1). It means the destination the preset *renders* from the row: series, volume, subtitle, extension. CI cannot know `dest_root`, so it budgets the part the row controls and leaves headroom. |
-| Rows per PR | 2,500 | Must clear the §10 seeding PR of ~1,850 rows, or seeding bypasses the gate it exists to enforce. |
+| Rows per PR | 2,500 | Must clear the §10 seeding PR of 2,036 rows, or seeding bypasses the gate it exists to enforce. |
 | Bytes per mapping file | 2 MiB | ~1,850 rows is well under 1 MiB at this row width. |
 
 ---
@@ -485,7 +558,11 @@ Replacing them:
 - **The first user of every new bundle does all the work.** Inherent to the
   reframe and accepted: guesses plus one-step contribution are the mitigation,
   and the second user of that bundle pays nothing.
-- **Key normalisation is a migration hazard.** §5.3.
+- **Key normalisation is a migration hazard**, now much reduced: the rule
+  makes no claim about which parts of a filename mean anything. §5.3.
+- **A fifth marketplace may name files in a way nothing here anticipates.**
+  Minimal normalisation is what makes that a new mapping file rather than a
+  migration.
 - **Untrusted data now flows in.** §7.3.
 - **`volume_count` is user-supplied and affects padding.** A wrong value gives
   a wrong *name*, never a wrong *location* — invariant 1 holds.
@@ -501,7 +578,9 @@ before it ships.**
 
 Shipping empty would make goal 1 describe nobody at launch, and §1.2's
 zero-ambiguity measurement a property of a table that does not exist. So the
-~1,850 keys become the first `data/mappings/*.tsv`.
+2,036 Humble keys become the first `data/mappings/*.tsv`, alongside hand-mapped
+files for Fanatical, Global Comix and Sweet Shop (§5.3.1) so that every
+marketplace has coverage and a regression fixture from day one.
 
 The fixture holds `bundle`, `title`, `stem` only. `volume`, `subtitle` and
 `volume_count` have to be derived by running §6.4's parser over 2,223 titles —
@@ -544,9 +623,12 @@ Next free number is **D39**.
 
 - **D39** Titles are looked up, not derived. Measured: 0 key collisions over
   2,223 verified rows against 10.12% silent false positives from the resolver.
-- **D40** Key normalisation is frozen at §5.3's five ordered steps, asserting
-  1,846 keys; a change is a breaking data migration. Trailing-token matching
-  only — substring matching mangles 63 known rows.
+- **D40** Key normalisation is minimal — NFC, lowercase, strip
+  non-alphanumerics — asserting 2,036 keys; a change is a breaking data
+  migration. Stripping marketplace noise was tried and withdrawn: it bought
+  190 rows of 2,036 (9.3%) and was already wrong for Global Comix's hyphenated
+  ISBN and Sweet Shop's type suffixes. Deciding which parts of a filename are
+  noise is inference, which §1.3 removes.
 - **D41** `bundle` is a lookup tiebreaker, not part of the key, so a future
   cross-distributor collision is a new row rather than a migration against
   D40's freeze.
@@ -574,3 +656,8 @@ Next free number is **D39**.
 - **D51** The shipped table is seeded from the ground-truth fixture, generated
   by the parser and reviewed in the TUI before commit. Licence for publishing
   Humble-derived titles is open and gates release, not development.
+- **D52** One mapping row serves every format of a comic. `.cbz`, `.pdf` and
+  `.epub` share a stem, and `PlanRow` already carries `extension` separately.
+- **D53** The guess source dispatches on marketplace. The corpus is one
+  strategy; for Fanatical, title-casing the stem beats it, because the
+  filename is already the title modulo sanitisation.
