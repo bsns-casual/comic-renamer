@@ -115,20 +115,10 @@ pub struct Committed {
     pub clashes: Vec<(String, String)>,
 }
 
-/// Writes the approved entries into the user's local mapping file. Every new
-/// row is validated first and any failure leaves the file as it was; the file
-/// then lands via a sibling temp file and a rename, so an interrupted write
-/// cannot truncate corrections no other record holds.
-/// `bundle` and `lang` are not on an `Entry`, so the caller supplies them.
-///
-/// An existing file that does not load aborts: overwriting it would drop the
-/// user's older corrections. A row with the same `(key, bundle)` is replaced.
-/// Files whose names share a key but whose titles differ are reported and
-/// left out, so the rest of the session is kept.
-// shortcut: no lock around the read-modify-write, so two sessions inside the
-// read-to-rename window lose one set of rows; an advisory lock beside the file
-// (as apply's lockfile does) closes it.
-pub fn commit_session(entries: &[table::Entry], local: &Path, bundle: &str, lang: &str) -> Result<Committed, String> {
+/// The approved entries as validated rows, plus the pairs of files that wanted
+/// one key with different titles (neither of a pair is returned). Shared by the
+/// local write and the contribution, so what is contributed is what was saved.
+fn approved_rows(entries: &[table::Entry], bundle: &str, lang: &str) -> Result<(Vec<MappingRow>, Vec<(String, String)>), String> {
     // Grouped by key, in first-seen order.
     let mut groups: Vec<Vec<(&str, MappingRow)>> = Vec::new();
     for e in entries {
@@ -155,6 +145,24 @@ pub fn commit_session(entries: &[table::Entry], local: &Path, bundle: &str, lang
             }
         }
     }
+    Ok((fresh, clashes))
+}
+
+/// Writes the approved entries into the user's local mapping file. Every new
+/// row is validated first and any failure leaves the file as it was; the file
+/// then lands via a sibling temp file and a rename, so an interrupted write
+/// cannot truncate corrections no other record holds.
+/// `bundle` and `lang` are not on an `Entry`, so the caller supplies them.
+///
+/// An existing file that does not load aborts: overwriting it would drop the
+/// user's older corrections. A row with the same `(key, bundle)` is replaced.
+/// Files whose names share a key but whose titles differ are reported and
+/// left out, so the rest of the session is kept.
+// shortcut: no lock around the read-modify-write, so two sessions inside the
+// read-to-rename window lose one set of rows; an advisory lock beside the file
+// (as apply's lockfile does) closes it.
+pub fn commit_session(entries: &[table::Entry], local: &Path, bundle: &str, lang: &str) -> Result<Committed, String> {
+    let (fresh, clashes) = approved_rows(entries, bundle, lang)?;
     if fresh.is_empty() {
         return Ok(Committed { written: 0, clashes });
     }
@@ -185,6 +193,154 @@ pub fn commit_session(entries: &[table::Entry], local: &Path, bundle: &str, lang
         format!("{}: {e}", local.display())
     })?;
     Ok(Committed { written, clashes })
+}
+
+/// Where a contribution goes.
+const UPSTREAM: &str = "bsns-casual/comic-renamer";
+
+pub enum ContributeOutcome {
+    Opened(String),
+    ManualSteps { path: PathBuf, commands: Vec<String> },
+}
+
+/// Runs one command (`argv[0]` is the program) in `cwd`; stdout on success.
+type Runner<'a> = &'a mut dyn FnMut(&Path, &[String]) -> Result<String, String>;
+
+/// The approved rows as a mapping file, and nothing else: no declined row, no
+/// field beyond the seven, no path. A `bundle` is a folder's *name*; one that
+/// carries a separator is a path fragment and is refused rather than trimmed.
+pub fn contribution_tsv(entries: &[table::Entry], bundle: &str, lang: &str) -> Result<String, String> {
+    if bundle.contains(['/', '\\']) {
+        return Err(format!("{bundle:?} is a path, not a folder name; a contribution never carries one"));
+    }
+    let (rows, _) = approved_rows(entries, bundle, lang)?;
+    Ok(to_tsv(&rows))
+}
+
+/// Single-quotes `s` for a shell unless it is plainly safe, for the commands
+/// printed as manual steps.
+fn quote(s: &str) -> String {
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "_./:=@%+,-".contains(c)) {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Writes `tsv` under `dir` and sends it upstream as a pull request through
+/// `gh`, which owns authentication: no token is read, passed or logged here.
+pub fn contribute(tsv: &str, branch: &str) -> Result<ContributeOutcome, String> {
+    let dir = config_dir()?.join("contributions");
+    contribute_with(tsv, branch, &dir, &mut |cwd, argv| {
+        let out = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .current_dir(cwd)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|e| format!("{}: {e}", argv[0]))?;
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        } else {
+            Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+        }
+    })
+}
+
+/// The decision, with the command execution injected: `run` is the only thing
+/// that touches a process, so a test hands it a recorder.
+///
+/// Absent or unauthenticated `gh` returns manual steps; a step that fails once
+/// `gh` is ready is an error naming the step and the file, never a quiet
+/// fallback. The rows file is written first and is kept either way.
+pub fn contribute_with(tsv: &str, branch: &str, dir: &Path, run: Runner) -> Result<ContributeOutcome, String> {
+    let ok_branch = !branch.is_empty()
+        && !branch.starts_with(['-', '.'])
+        && branch.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if !ok_branch {
+        return Err(format!("{branch:?} is not a usable branch name"));
+    }
+    let n = tsv.lines().count().saturating_sub(1);
+    if n == 0 {
+        return Err("there are no approved mappings to contribute".into());
+    }
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let path = dir.join(format!("{branch}.tsv"));
+    std::fs::write(&path, tsv).map_err(|e| format!("{}: {e}", path.display()))?;
+    let work = dir.join(branch);
+    let target = format!("data/mappings/{branch}.tsv");
+    let s = |v: &[&str]| v.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+    let title = format!("data: {n} mapping{} from {branch}", if n == 1 { "" } else { "s" });
+    // (in the clone?, argv). `gh repo fork --clone` puts the clone in `work/<repo>`.
+    let steps: Vec<(bool, Vec<String>)> = vec![
+        (false, s(&["gh", "repo", "fork", UPSTREAM, "--clone"])),
+        (true, s(&["git", "checkout", "-b", branch])),
+        (true, vec!["cp".into(), path.to_string_lossy().into_owned(), target.clone()]),
+        (true, s(&["git", "add", &target])),
+        (true, s(&["git", "commit", "-m", &title])),
+        (true, s(&["git", "push", "-u", "origin", branch])),
+        (true, s(&["gh", "pr", "create", "--repo", UPSTREAM, "--title", &title, "--body", "Mappings contributed from `comic-renamer map`."])),
+    ];
+    let clone = work.join(UPSTREAM.rsplit('/').next().unwrap());
+    let present = run(dir, &s(&["gh", "--version"])).is_ok();
+    if !(present && run(dir, &s(&["gh", "auth", "status"])).is_ok()) {
+        let mut commands = Vec::new();
+        if present {
+            commands.push("gh auth login".to_string());
+        }
+        commands.push(format!("mkdir -p {0} && cd {0}", quote(&work.to_string_lossy())));
+        let mut cloned = false;
+        for (in_clone, argv) in &steps {
+            let line = argv.iter().map(|a| quote(a)).collect::<Vec<_>>().join(" ");
+            if *in_clone && !cloned {
+                commands.push(format!("cd {}", quote(UPSTREAM.rsplit('/').next().unwrap())));
+                cloned = true;
+            }
+            commands.push(line);
+        }
+        return Ok(ContributeOutcome::ManualSteps { path, commands });
+    }
+    std::fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
+    let mut last = String::new();
+    for (in_clone, argv) in &steps {
+        last = run(if *in_clone { &clone } else { &work }, argv).map_err(|e| {
+            format!("`{}` failed: {e}. Your rows are kept in {}", argv.iter().take(2).cloned().collect::<Vec<_>>().join(" "), path.display())
+        })?;
+    }
+    Ok(ContributeOutcome::Opened(last))
+}
+
+/// Anything but an explicit yes declines: a contribution is public.
+fn is_yes(answer: &str) -> bool {
+    matches!(answer.trim().to_lowercase().as_str(), "y" | "yes")
+}
+
+/// Offers the contribution after the local save (§6.5). Reads one line from
+/// stdin; the pull request is opened only when the user types yes.
+fn offer_contribution(entries: &[table::Entry], bundle: &str, lang: &str) -> Result<(), String> {
+    let tsv = contribution_tsv(entries, bundle, lang)?;
+    if tsv.lines().count() < 2 {
+        return Ok(());
+    }
+    print!("Contribute these mappings so the next person gets them for free? This opens a public pull request. [y/N] ");
+    std::io::stdout().flush().map_err(|e| e.to_string())?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer).map_err(|e| e.to_string())?;
+    if !is_yes(&answer) {
+        println!("Kept local only.");
+        return Ok(());
+    }
+    let slug: String = bundle.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
+    // shortcut: the branch is the bundle slug, so a second contribution from one bundle reuses it; add a timestamp when that bites.
+    match contribute(&tsv, &format!("map-{}", slug.trim_matches('-')))? {
+        ContributeOutcome::Opened(url) => println!("Opened {url}"),
+        ContributeOutcome::ManualSteps { path, commands } => {
+            println!("`gh` is missing or not signed in, so nothing was sent. Your rows are in {}.", path.display());
+            println!("To send them, run:");
+            for c in commands {
+                println!("  {c}");
+            }
+        }
+    }
+    Ok(())
 }
 
 fn clash_warning(a: &str, b: &str) -> String {
@@ -306,6 +462,7 @@ fn session(
             }
             let n = done.written;
             println!("{n} {} saved to {}", if n == 1 { "mapping" } else { "mappings" }, local.display());
+            offer_contribution(&t.entries, folder, lang)?;
             Ok(Outcome::Done)
         }
         _ => Ok(Outcome::Quit),
@@ -645,5 +802,146 @@ mod tests {
         assert_eq!(applied.as_deref(), Some(plan.as_path()));
         // The default is the working directory (see the plan_path test), never a temp dir.
         assert_eq!(plan_path(None), PathBuf::from("comic-renamer-plan.jsonl"));
+    }
+
+    // ---- contribution (Task 11). No test runs a real command: every one hands
+    // `contribute_with` a fake runner that records argv and touches nothing.
+
+    type Calls = std::cell::RefCell<Vec<(PathBuf, Vec<String>)>>;
+
+    /// A runner that records each call and answers from `ok`.
+    fn fake<'a>(calls: &'a Calls, ok: impl Fn(&[String]) -> bool + 'a) -> impl FnMut(&Path, &[String]) -> Result<String, String> + 'a {
+        move |cwd, argv| {
+            calls.borrow_mut().push((cwd.to_path_buf(), argv.to_vec()));
+            if ok(argv) { Ok("https://example.test/pull/1".into()) } else { Err(format!("{} failed", argv[0])) }
+        }
+    }
+
+    fn one_row_tsv() -> String {
+        contribution_tsv(&[approved("alpha_vol1", "Alpha", Some(1), None)], "Humble Manga", "en").unwrap()
+    }
+
+    fn sub(a: &[String]) -> String {
+        a.iter().take(2).cloned().collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn a_contribution_carries_no_filesystem_path() {
+        let tsv = one_row_tsv();
+        assert!(!tsv.contains('/') && !tsv.contains('\\'), "{tsv}");
+        if let Ok(home) = std::env::var("HOME") {
+            assert!(!tsv.contains(&home));
+        }
+    }
+
+    #[test]
+    fn a_bundle_name_that_is_a_path_fragment_is_refused() {
+        for bad in ["a/b", "/Users/mike/Comics", "..\\x"] {
+            let r = contribution_tsv(&[approved("alpha_vol1", "Alpha", Some(1), None)], bad, "en");
+            assert!(r.is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn rows_the_user_declined_to_contribute_stay_local() {
+        let entries = vec![approved("alpha_vol1", "Alpha", Some(1), None), unapproved("beta_vol1", "Beta")];
+        let tsv = contribution_tsv(&entries, "B", "en").unwrap();
+        assert!(tsv.contains("Alpha") && !tsv.contains("Beta"), "{tsv}");
+    }
+
+    #[test]
+    fn a_contribution_holds_exactly_the_row_fields() {
+        let tsv = one_row_tsv();
+        assert_eq!(comic_renamer_core::mapping::parse_tsv(&tsv).unwrap().len(), 1);
+        assert_eq!(tsv.lines().nth(1).unwrap().split('\t').count(), 7, "{tsv}");
+    }
+
+    #[test]
+    fn gh_absent_yields_manual_steps_rather_than_a_silent_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let calls = Calls::default();
+        let out = contribute_with(&one_row_tsv(), "map-b", dir.path(), &mut fake(&calls, |a| a[0] != "gh")).unwrap();
+        let ContributeOutcome::ManualSteps { path, commands } = out else { panic!("expected manual steps") };
+        assert!(path.exists(), "the rows are on disk for the user to use");
+        assert!(commands.iter().any(|c| c.contains("gh pr create")), "{commands:?}");
+        assert!(calls.borrow().iter().all(|(_, a)| a == &["gh", "--version"]), "only the presence probe ran: {:?}", calls.borrow());
+    }
+
+    #[test]
+    fn gh_unauthenticated_yields_manual_steps_that_begin_with_logging_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let calls = Calls::default();
+        let out = contribute_with(&one_row_tsv(), "map-b", dir.path(), &mut fake(&calls, |a| a.get(1).map(String::as_str) != Some("auth"))).unwrap();
+        let ContributeOutcome::ManualSteps { commands, .. } = out else { panic!("expected manual steps") };
+        assert_eq!(commands[0], "gh auth login");
+        assert!(calls.borrow().iter().all(|(_, a)| a[0] == "gh" && (a[1] == "--version" || a[1] == "auth")), "nothing past detection ran");
+    }
+
+    #[test]
+    fn no_command_carries_a_token_or_credential_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let calls = Calls::default();
+        contribute_with(&one_row_tsv(), "map-b", dir.path(), &mut fake(&calls, |_| true)).unwrap();
+        for (_, argv) in calls.borrow().iter() {
+            for a in argv {
+                let l = a.to_lowercase();
+                assert!(!l.contains("token") && !l.contains("password") && !l.starts_with("ghp_"), "{argv:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn with_gh_ready_the_steps_run_in_order_and_the_pr_url_is_returned() {
+        let dir = tempfile::tempdir().unwrap();
+        let calls = Calls::default();
+        let out = contribute_with(&one_row_tsv(), "map-b", dir.path(), &mut fake(&calls, |_| true)).unwrap();
+        let ContributeOutcome::Opened(url) = out else { panic!("expected a PR") };
+        assert!(url.contains("/pull/"));
+        let log: Vec<String> = calls.borrow().iter().map(|(_, a)| sub(a)).collect();
+        let want = ["gh --version", "gh auth", "gh repo", "git checkout", "cp", "git add", "git commit", "git push", "gh pr"];
+        assert_eq!(log.len(), want.len(), "{log:?}");
+        for (got, want) in log.iter().zip(want) {
+            assert!(got.starts_with(want), "{got:?} vs {want:?}");
+        }
+    }
+
+    #[test]
+    fn a_failing_step_is_reported_with_the_rows_kept_not_swallowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let calls = Calls::default();
+        let err = contribute_with(&one_row_tsv(), "map-b", dir.path(), &mut fake(&calls, |a| sub(a) != "git push"))
+            .err()
+            .expect("a failed push is an error");
+        assert!(err.contains("git push") && err.contains("map-b.tsv"), "{err}");
+        assert!(!calls.borrow().iter().any(|(_, a)| sub(a) == "gh pr"), "no PR after a failed push");
+    }
+
+    #[test]
+    fn a_branch_that_could_be_a_flag_or_a_path_is_refused_before_anything_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        for bad in ["", "-x", "../x", "a/b", "a b", ".hidden"] {
+            let calls = Calls::default();
+            assert!(contribute_with(&one_row_tsv(), bad, dir.path(), &mut fake(&calls, |_| true)).is_err(), "{bad:?}");
+            assert!(calls.borrow().is_empty(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn an_empty_contribution_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let calls = Calls::default();
+        let header_only = contribution_tsv(&[unapproved("x", "X")], "B", "en").unwrap();
+        assert!(contribute_with(&header_only, "map-b", dir.path(), &mut fake(&calls, |_| true)).is_err());
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn only_an_explicit_yes_opens_a_public_pull_request() {
+        for yes in ["y", "Y\n", " yes "] {
+            assert!(is_yes(yes), "{yes:?}");
+        }
+        for no in ["", "\n", "n", "ok", "yep", "sure"] {
+            assert!(!is_yes(no), "{no:?}");
+        }
     }
 }
