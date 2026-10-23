@@ -3,6 +3,32 @@
 
 use comic_renamer_core::title::{is_volume_word, split_at_boundary};
 
+/// A single pull request may add at most this many mapping rows. 2,500 and not
+/// less: a seeding PR of about 2,200 rows must clear the check it exists to
+/// pass through, or seeding would bypass its own gate.
+pub const MAX_ROWS_PER_PR: usize = 2500;
+/// One mapping file may not exceed 2 MiB (§6.11).
+pub const MAX_MAPPING_FILE_BYTES: usize = 2 * 1024 * 1024;
+
+pub fn rows_per_pr_ok(n: usize) -> bool {
+    n <= MAX_ROWS_PER_PR
+}
+
+pub fn file_size_ok(bytes: usize) -> bool {
+    bytes <= MAX_MAPPING_FILE_BYTES
+}
+
+/// Rows added by a PR, from numstat output (`added<TAB>removed<TAB>path`).
+/// A binary file reports `-` and counts as zero here; the size cap catches it.
+// shortcut: counts added lines, not net rows, so an edit in place counts as an add;
+// that over-counts, so it errs toward refusing, never toward admitting.
+pub fn added_rows(numstat: &str) -> usize {
+    numstat
+        .lines()
+        .filter_map(|l| l.split('\t').next()?.parse::<usize>().ok())
+        .sum()
+}
+
 /// Normalises both sides before comparing — Humble writes `&` where the corpus
 /// writes "and", prefixes promos with "Free Issue" including a zero-width
 /// character, and inserts `Vol 1:` mid-title. A naive comparison overstates the
@@ -109,6 +135,26 @@ fn alphanumeric(token: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pr_over_the_row_cap_is_refused() {
+        assert!(rows_per_pr_ok(2500));
+        assert!(!rows_per_pr_ok(2501));
+    }
+
+    #[test]
+    fn a_mapping_file_over_two_mebibytes_is_refused() {
+        assert!(file_size_ok(2 * 1024 * 1024));
+        assert!(!file_size_ok(2 * 1024 * 1024 + 1));
+        assert!(file_size_ok(comic_renamer_core::mapping::shipped_mappings().len()));
+    }
+
+    #[test]
+    fn added_rows_sums_numstat_and_skips_binary() {
+        let stat = "12\t3\tdata/mappings/a.tsv\n5\t0\tdata/mappings/b.tsv\n-\t-\tx.bin\n";
+        assert_eq!(added_rows(stat), 17);
+        assert_eq!(added_rows(""), 0);
+    }
 
     #[test]
     fn strip_promo_removes_the_prefix_and_zero_width_characters() {

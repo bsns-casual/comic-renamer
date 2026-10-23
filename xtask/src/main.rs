@@ -10,7 +10,9 @@ use comic_renamer_core::corpus::{ensure_corpus, parse_manifest, Corpus};
 use comic_renamer_core::overrides::Overrides;
 use comic_renamer_core::resolve::{corpus_ladder, publisher_hint, suggest_with, Context};
 use comic_renamer_core::types::PublisherHint;
-use xtask::grade_ok;
+use xtask::{
+    added_rows, file_size_ok, grade_ok, rows_per_pr_ok, MAX_MAPPING_FILE_BYTES, MAX_ROWS_PER_PR,
+};
 
 const MANIFEST: &str = include_str!("../../corpus/manifest.json");
 const OVERRIDES: &str = include_str!("../../data/overrides.toml");
@@ -40,8 +42,15 @@ fn main() {
                 std::process::exit(2);
             }
         }
+        Some("check-mappings") => {
+            let base = std::env::args().nth(2);
+            if let Err(e) = check_mappings(base.as_deref()) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
         _ => {
-            eprintln!("usage: cargo xtask <measure|seed>");
+            eprintln!("usage: cargo xtask <measure|seed|check-mappings [base-ref]>");
             std::process::exit(2);
         }
     }
@@ -159,6 +168,39 @@ fn measure() -> Result<(), String> {
     for (stem, answer, title) in wrong.iter().take(shown) {
         println!("  {stem}\n      said {answer:?}\n      want {title:?}");
     }
+    Ok(())
+}
+
+/// The per-PR caps. Always checks every shipped mapping file's size; with a
+/// base ref, also counts rows added since it. Exits non-zero on a breach.
+fn check_mappings(base: Option<&str>) -> Result<(), String> {
+    for entry in std::fs::read_dir("data/mappings").map_err(|e| e.to_string())? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        let len = std::fs::metadata(&path).map_err(|e| e.to_string())?.len() as usize;
+        if !file_size_ok(len) {
+            return Err(format!(
+                "{} is {len} bytes; the cap is {MAX_MAPPING_FILE_BYTES}",
+                path.display()
+            ));
+        }
+    }
+    if let Some(base) = base {
+        let out = std::process::Command::new("git")
+            .args(["diff", "--numstat", &format!("{base}...HEAD"), "--", "data/mappings"])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(format!("git diff failed: {}", String::from_utf8_lossy(&out.stderr)));
+        }
+        let rows = added_rows(&String::from_utf8_lossy(&out.stdout));
+        if !rows_per_pr_ok(rows) {
+            return Err(format!(
+                "this change adds {rows} mapping rows; the cap is {MAX_ROWS_PER_PR}"
+            ));
+        }
+        println!("{rows} mapping rows added since {base}");
+    }
+    println!("mapping file sizes within the cap");
     Ok(())
 }
 

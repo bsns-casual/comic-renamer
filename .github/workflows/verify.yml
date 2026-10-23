@@ -70,6 +70,25 @@ jobs:
           COMIC_RENAMER_TEST_VOLUME=/Volumes/CRTEST \
             cargo test -p comic-renamer --test cli -- --ignored
 
+  mappings:
+    name: mapping caps (rows per PR, file size)
+    # macOS: xtask links the core crate, which is macOS-only.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # Key collisions and per-field validation are ordinary `cargo test`
+      # assertions (the rust job). Only the per-PR caps need a diff.
+      - name: Caps
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            cargo xtask check-mappings "origin/${{ github.base_ref }}"
+          else
+            cargo xtask check-mappings
+          fi
+
   fixtures:
     name: held-out fixtures well-formed
     runs-on: ubuntu-latest

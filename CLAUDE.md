@@ -113,6 +113,14 @@ unreachable.
   `diskutil eraseVolume "HFS+" CRTEST <dev>`. **Under ~1.1 GiB every run is
   refused by the free-space reserve**, which is how the reserve is specified.
 
+### CI checks neither formatting nor clippy
+
+`rustfmt` is not installed in the maintainer's toolchain, so the tree has never
+been formatted by `cargo fmt`, and CI runs neither `cargo fmt --check` nor
+`cargo clippy`. Do not assume CI will catch a style or lint regression. Adding
+either gate means formatting the whole tree in the same change (and clearing
+the clippy warnings in `crates/core`), or CI goes red on arrival.
+
 ### Packaging, all of it measured
 
 **Nothing the binary needs is read from the working directory.** Both the
