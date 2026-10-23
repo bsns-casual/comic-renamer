@@ -1,7 +1,9 @@
 //! `map`: open a mapping session for the files the database does not know.
 
 use crate::{guesses_for, parse_overrides, OVERRIDES, SHIPPED_MAPPINGS};
-use comic_renamer_core::mapping::Mappings;
+use comic_renamer_core::mapping::{key, parse_tsv, to_tsv, MappingRow, Mappings};
+use comic_renamer_core::normalize::collision_key;
+use comic_renamer_core::title::ParsedTitle;
 use comic_renamer_core::overrides::Overrides;
 use comic_renamer_core::preset::Preset;
 use comic_renamer_core::types::{Mode, ScanOpts};
@@ -9,7 +11,8 @@ use comic_renamer_core::{plan, scan};
 mod detail;
 mod table;
 
-use std::io::IsTerminal;
+use std::collections::HashMap;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 /// The user's own corrections live here. macOS may evict `~/Library/Caches`;
@@ -71,6 +74,88 @@ pub enum Outcome {
     Quit,
 }
 
+/// Pairs of stems whose approved rows render to one destination, NFC-folded
+/// and case-folded as `find_collisions` compares them (invariant 7). Reported
+/// at the gate the user confirms; the syscall still refuses either way.
+pub fn intra_session_collisions(entries: &[table::Entry], preset: &dyn Preset) -> Vec<(String, String)> {
+    let mut first: HashMap<String, &str> = HashMap::new();
+    let mut found = Vec::new();
+    for e in entries {
+        let Some((fields, count)) = e.approved_row() else { continue };
+        // An unkeyable stem is `commit_session`'s error to report.
+        let Some(row) = row_for(&e.stem, fields, count, "", "") else { continue };
+        let dest = collision_key(&preset.destination(&row.resolved(), &e.extension).to_string_lossy());
+        match first.get(&dest) {
+            Some(earlier) => found.push((earlier.to_string(), e.stem.clone())),
+            None => {
+                first.insert(dest, &e.stem);
+            }
+        }
+    }
+    found
+}
+
+fn row_for(stem: &str, fields: &ParsedTitle, count: Option<u32>, bundle: &str, lang: &str) -> Option<MappingRow> {
+    Some(MappingRow {
+        key: key(stem)?,
+        series: fields.series.clone(),
+        volume: fields.volume,
+        subtitle: fields.subtitle.clone(),
+        lang: lang.to_string(),
+        volume_count: count,
+        bundle: bundle.to_string(),
+    })
+}
+
+/// Writes the approved entries into the user's local mapping file and returns
+/// how many. Every new row is validated first and any failure leaves the file
+/// as it was; the file then lands via a sibling temp file and a rename, so an
+/// interrupted write cannot truncate corrections no other record holds.
+/// `bundle` and `lang` are not on an `Entry`, so the caller supplies them.
+///
+/// An existing file that does not load aborts: overwriting it would drop the
+/// user's older corrections. A row with the same `(key, bundle)` is replaced.
+pub fn commit_session(entries: &[table::Entry], local: &Path, bundle: &str, lang: &str) -> Result<usize, String> {
+    let mut fresh = Vec::new();
+    for e in entries {
+        let Some((fields, count)) = e.approved_row() else { continue };
+        let row = row_for(&e.stem, fields, count, bundle, lang)
+            .ok_or_else(|| format!("{:?} has no letters or digits to key a mapping on", e.stem))?;
+        row.validate().map_err(|err| format!("{:?}: {err}", e.stem))?;
+        fresh.push(row);
+    }
+    if fresh.is_empty() {
+        return Ok(0);
+    }
+    let mut rows = match std::fs::read_to_string(local) {
+        Ok(text) => parse_tsv(&text).map_err(|e| format!("{}: {e}", local.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(format!("{}: {e}", local.display())),
+    };
+    let n = fresh.len();
+    for row in fresh {
+        match rows.iter_mut().find(|r| r.key == row.key && r.bundle == row.bundle) {
+            Some(slot) => *slot = row,
+            None => rows.push(row),
+        }
+    }
+    let dir = local.parent().ok_or("the mapping file has no parent directory")?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let tmp = local.with_extension("tsv.tmp");
+    let write = || -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(to_tsv(&rows).as_bytes())?;
+        f.sync_all()?;
+        // Replacing the old file is the point here; the no-clobber rule is for comics.
+        std::fs::rename(&tmp, local)
+    };
+    write().map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("{}: {e}", local.display())
+    })?;
+    Ok(n)
+}
+
 /// `undo` derives the manifest from the plan's path (D38), so the default is
 /// the working directory, as `scan` has it, and never a temp directory.
 fn plan_path(out: Option<PathBuf>) -> PathBuf {
@@ -98,9 +183,16 @@ pub fn run(
     let preset_impl = comic_renamer_core::preset::preset_by_id(&preset).ok_or_else(|| format!("unknown preset {preset:?}"))?;
     let opts = ScanOpts { source_root: source, dest_root: dest, preset, mode: Some(mode), lang: lang.clone() };
     let terminals = (std::io::stdout().is_terminal(), std::io::stdin().is_terminal());
-    run_with(&opts, plan_path(out), &config_dir()?, terminals, |first| {
-        session(&first.unmapped, &marketplace, &folder, &lang, &overrides, preset_impl.as_ref())
-    })
+    let config = config_dir()?;
+    let local = config.join("mappings.tsv");
+    run_with(
+        &opts,
+        plan_path(out),
+        &config,
+        terminals,
+        |first| session(&first.unmapped, &marketplace, &folder, &lang, &overrides, preset_impl.as_ref(), &local),
+        |plan| crate::run_apply(plan, false, false, None),
+    )
 }
 
 fn run_with(
@@ -109,6 +201,7 @@ fn run_with(
     config: &Path,
     (stdout_tty, stdin_tty): (bool, bool),
     session: impl FnOnce(&scan::ScanOutcome) -> Result<Outcome, String>,
+    apply: impl FnOnce(&Path) -> Result<(), String>,
 ) -> Result<(), String> {
     let first = scan_once(opts, config)?;
     let finished = if first.unmapped.is_empty() {
@@ -129,14 +222,17 @@ fn run_with(
     };
     plan::write(&finished.header, &finished.rows, &destination).map_err(|e| e.to_string())?;
     println!("plan written to {}", destination.display());
+    // `apply` shows the disclosure and asks for its own confirmation; declining
+    // there leaves this plan in place for a later `apply`. Without a terminal
+    // nobody can type the word, so the plan is left for `apply --yes`.
+    if stdout_tty && stdin_tty {
+        return apply(&destination);
+    }
     println!("Nothing has been moved. Review it, then:");
     println!("  comic-renamer apply {}", destination.display());
     Ok(())
 }
 
-// shortcut: shows the table and records nothing; the detail editor and the
-// write of approved rows to `config_dir()/mappings.tsv` are later tasks, so
-// `Done` currently builds the plan from what is already mapped.
 fn session(
     unmapped: &[PathBuf],
     marketplace: &str,
@@ -144,6 +240,7 @@ fn session(
     lang: &str,
     overrides: &Overrides,
     preset: &dyn Preset,
+    local: &Path,
 ) -> Result<Outcome, String> {
     let entries = guesses_for(unmapped, marketplace, folder, lang, overrides)
         .into_iter()
@@ -156,7 +253,14 @@ fn session(
         .collect();
     let mut t = table::Table::new(folder.to_string(), entries);
     match table::run(&mut t, preset).map_err(|e| e.to_string())? {
-        table::Action::Done => Ok(Outcome::Done),
+        table::Action::Done => {
+            for (a, b) in intra_session_collisions(&t.entries, preset) {
+                println!("warning: {a} and {b} would land on the same path; the second is skipped, not merged.");
+            }
+            let n = commit_session(&t.entries, local, folder, lang)?;
+            println!("{n} {} saved to {}", if n == 1 { "mapping" } else { "mappings" }, local.display());
+            Ok(Outcome::Done)
+        }
         _ => Ok(Outcome::Quit),
     }
 }
@@ -256,7 +360,7 @@ mod tests {
     #[test]
     fn a_session_the_user_quit_writes_no_plan() {
         let (_dir, opts, plan, config) = unmapped_bundle();
-        let r = run_with(&opts, plan.clone(), &config, (true, true), |_| Ok(Outcome::Quit));
+        let r = run_with(&opts, plan.clone(), &config, (true, true), |_| Ok(Outcome::Quit), |_| Ok(()));
         assert!(r.unwrap_err().contains("No plan was written"), "a quit must be an error, so the exit code is non-zero");
         assert!(!plan.exists());
     }
@@ -264,14 +368,14 @@ mod tests {
     #[test]
     fn a_finished_session_writes_the_plan() {
         let (_dir, opts, plan, config) = unmapped_bundle();
-        run_with(&opts, plan.clone(), &config, (true, true), |_| Ok(Outcome::Done)).unwrap();
+        run_with(&opts, plan.clone(), &config, (true, true), |_| Ok(Outcome::Done), |_| Ok(())).unwrap();
         assert!(plan.exists());
     }
 
     #[test]
     fn no_session_is_opened_without_a_terminal() {
         let (_dir, opts, plan, config) = unmapped_bundle();
-        let r = run_with(&opts, plan.clone(), &config, (false, true), |_| panic!("opened a session"));
+        let r = run_with(&opts, plan.clone(), &config, (false, true), |_| panic!("opened a session"), |_| Ok(()));
         assert!(r.is_err());
         assert!(!plan.exists());
     }
@@ -280,5 +384,149 @@ mod tests {
     fn the_default_plan_path_is_the_working_directory_never_a_temp_dir() {
         assert_eq!(plan_path(None), PathBuf::from("comic-renamer-plan.jsonl"));
         assert_eq!(plan_path(Some("x/p.jsonl".into())), PathBuf::from("x/p.jsonl"));
+    }
+
+    // --- Task 10: commit_session, collisions, delegation ---
+
+    use comic_renamer_core::preset::komga::Komga;
+    use comic_renamer_core::title::ParsedTitle;
+    use comic_renamer_core::types::{Suggestion, SuggestionSource};
+
+    fn sug(series: &str, volume: Option<u32>, subtitle: Option<&str>, count: Option<u32>) -> Suggestion {
+        Suggestion {
+            series: series.into(),
+            volume,
+            subtitle: subtitle.map(String::from),
+            volume_count: count,
+            source: SuggestionSource::Corpus,
+        }
+    }
+
+    fn approved(stem: &str, series: &str, volume: Option<u32>, count: Option<u32>) -> table::Entry {
+        let mut e = table::Entry::new(stem.into(), vec![sug(series, volume, None, count)]).with_extension("cbz");
+        assert!(e.accept_edit(ParsedTitle { series: series.into(), volume, subtitle: None }));
+        e
+    }
+
+    fn unapproved(stem: &str, series: &str) -> table::Entry {
+        table::Entry::new(stem.into(), vec![sug(series, Some(1), None, None)]).with_extension("cbz")
+    }
+
+    fn read_rows(path: &Path) -> Vec<comic_renamer_core::mapping::MappingRow> {
+        comic_renamer_core::mapping::parse_tsv(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn two_approved_rows_rendering_to_one_destination_are_reported_before_apply() {
+        // The brief's example (two subtitles) renders to two paths under Komga,
+        // which puts the subtitle in the filename. Two rows with the same series
+        // and no volume or subtitle are how two rows really share one path.
+        let entries = vec![approved("one", "Usagi Yojimbo", None, None), approved("two", "usagi yojimbo", None, None)];
+        let found = intra_session_collisions(&entries, &Komga);
+        assert_eq!(found, vec![("one".to_string(), "two".to_string())]);
+    }
+
+    #[test]
+    fn distinct_destinations_and_unapproved_rows_are_not_collisions() {
+        let mut pending = unapproved("c", "Usagi Yojimbo");
+        pending.final_fields = Some(ParsedTitle { series: "Usagi Yojimbo".into(), volume: Some(1), subtitle: None });
+        let entries = vec![approved("a", "Usagi Yojimbo", Some(1), None), approved("b", "Usagi Yojimbo", Some(2), None), pending];
+        assert!(intra_session_collisions(&entries, &Komga).is_empty(), "an unapproved row is never written, so never collides");
+    }
+
+    #[test]
+    fn only_approved_rows_reach_the_local_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let local = dir.path().join("config/mappings.tsv");
+        let entries = vec![approved("alpha_vol1", "Alpha", Some(1), None), unapproved("beta_vol1", "Beta")];
+        assert_eq!(commit_session(&entries, &local, "Bundle", "en").unwrap(), 1);
+        let text = std::fs::read_to_string(&local).unwrap();
+        assert!(text.contains("alphavol1\tAlpha"), "{text}");
+        assert!(!text.contains("Beta") && !text.contains("betavol1"), "{text}");
+    }
+
+    #[test]
+    fn nothing_approved_writes_no_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let local = dir.path().join("mappings.tsv");
+        assert_eq!(commit_session(&[unapproved("x", "X")], &local, "B", "en").unwrap(), 0);
+        assert!(!local.exists());
+    }
+
+    #[test]
+    fn volume_count_survives_into_the_written_row() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let local = dir.path().join("mappings.tsv");
+        commit_session(&[approved("lw_vol1", "Lone Wolf", Some(1), Some(128))], &local, "B", "en").unwrap();
+        let rows = read_rows(&local);
+        assert_eq!(rows[0].volume_count, Some(128));
+        // ...and so pads to three digits, not the two-digit floor.
+        let dest = Komga.destination(&rows[0].resolved(), "cbz");
+        assert!(dest.to_string_lossy().contains("Vol. 001"), "{dest:?}");
+    }
+
+    #[test]
+    fn an_edited_series_does_not_inherit_a_count_it_has_no_reason_to_have() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let local = dir.path().join("mappings.tsv");
+        let mut e = table::Entry::new("x".into(), vec![sug("Lone Wolf", Some(1), None, Some(128))]).with_extension("cbz");
+        assert!(e.accept_edit(ParsedTitle { series: "Something Else".into(), volume: Some(1), subtitle: None }));
+        commit_session(&[e], &local, "B", "en").unwrap();
+        assert_eq!(read_rows(&local)[0].volume_count, None);
+    }
+
+    #[test]
+    fn the_local_write_is_validated_before_it_lands() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let local = dir.path().join("mappings.tsv");
+        let before = comic_renamer_core::mapping::to_tsv(&[]);
+        std::fs::write(&local, &before).unwrap();
+        // "=SUM" starts with a spreadsheet formula character, which validate() rejects.
+        let entries = vec![approved("good_vol1", "Good", Some(1), None), approved("bad_vol1", "=SUM(A1)", Some(1), None)];
+        let err = commit_session(&entries, &local, "B", "en").unwrap_err();
+        assert!(err.contains("formula"), "{err}");
+        assert_eq!(std::fs::read_to_string(&local).unwrap(), before, "the file must be untouched");
+        assert!(!dir.path().join("mappings.tsv.tmp").exists());
+    }
+
+    #[test]
+    fn earlier_corrections_are_kept_and_a_repeat_replaces_its_own_row() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let local = dir.path().join("mappings.tsv");
+        commit_session(&[approved("old_vol1", "Old", Some(1), None)], &local, "B", "en").unwrap();
+        commit_session(
+            &[approved("new_vol1", "New", Some(1), None), approved("old_vol1", "Older", Some(1), None)],
+            &local,
+            "B",
+            "en",
+        )
+        .unwrap();
+        let rows = read_rows(&local);
+        let series: Vec<_> = rows.iter().map(|r| r.series.as_str()).collect();
+        assert_eq!(series, ["Older", "New"]);
+    }
+
+    #[test]
+    fn an_unreadable_existing_file_aborts_rather_than_being_overwritten() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let local = dir.path().join("mappings.tsv");
+        std::fs::write(&local, "not a mapping file").unwrap();
+        assert!(commit_session(&[approved("a", "A", Some(1), None)], &local, "B", "en").is_err());
+        assert_eq!(std::fs::read_to_string(&local).unwrap(), "not a mapping file");
+    }
+
+    #[test]
+    fn the_plan_is_written_where_undo_can_find_it_and_apply_is_handed_it() {
+        let (_dir, opts, plan, config) = unmapped_bundle();
+        let mut applied = None;
+        run_with(&opts, plan.clone(), &config, (true, true), |_| Ok(Outcome::Done), |p| {
+            applied = Some(p.to_path_buf());
+            Ok(())
+        })
+        .unwrap();
+        assert!(plan.exists());
+        assert_eq!(applied.as_deref(), Some(plan.as_path()));
+        // The default is the working directory (see the plan_path test), never a temp dir.
+        assert_eq!(plan_path(None), PathBuf::from("comic-renamer-plan.jsonl"));
     }
 }

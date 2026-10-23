@@ -68,6 +68,16 @@ impl Entry {
         self.has_squashed_subtitle() || self.is_ambiguous()
     }
 
+    /// What an approved row writes: the fields and the series' run length. The
+    /// count is recovered from the candidate with the same series, as the
+    /// detail editor's padding does: a series retyped to something else has no
+    /// reason to inherit a width. Without it D37's padding silently floors at two.
+    pub(super) fn approved_row(&self) -> Option<(&ParsedTitle, Option<u32>)> {
+        let fields = self.final_fields.as_ref().filter(|_| self.approved)?;
+        let count = self.candidates.iter().find(|c| c.series == fields.series).and_then(|c| c.volume_count);
+        Some((fields, count))
+    }
+
     /// The guess as final fields, when it is safe to take without a human edit.
     fn clean_guess(&self) -> Option<ParsedTitle> {
         let g = self.guess().filter(|_| !self.needs_review())?;
@@ -90,6 +100,8 @@ pub struct Table {
     pub folder: String,
     pub entries: Vec<Entry>,
     pub cursor: usize,
+    /// A quit was asked for while approvals exist; the next key answers it.
+    confirming_quit: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -113,7 +125,7 @@ pub(super) fn show(series: &str, volume: Option<u32>, subtitle: Option<&str>) ->
 
 impl Table {
     pub fn new(folder: String, entries: Vec<Entry>) -> Self {
-        Table { folder, entries, cursor: 0 }
+        Table { folder, entries, cursor: 0, confirming_quit: false }
     }
 
     fn approved_count(&self) -> usize {
@@ -128,12 +140,25 @@ impl Table {
         }
     }
 
+    /// A quit discards approvals that the session is about to persist, so with
+    /// any approved it asks first; `y` confirms and any other key keeps going.
+    pub(super) fn request_quit(&mut self) -> Action {
+        if self.approved_count() == 0 {
+            return Action::Cancel;
+        }
+        self.confirming_quit = true;
+        Action::Continue
+    }
+
     pub fn on_key(&mut self, k: KeyEvent) -> Action {
+        if std::mem::take(&mut self.confirming_quit) {
+            return if k.code == KeyCode::Char('y') { Action::Cancel } else { Action::Continue };
+        }
         let last = self.entries.len().saturating_sub(1);
         match (k.code, k.modifiers.contains(KeyModifiers::CONTROL)) {
             (KeyCode::Char('a'), true) => self.approve_all_remaining(),
             (KeyCode::Char('s'), true) => return Action::Done,
-            (KeyCode::Esc | KeyCode::Char('q'), false) | (KeyCode::Char('c'), true) => return Action::Cancel,
+            (KeyCode::Esc | KeyCode::Char('q'), false) | (KeyCode::Char('c'), true) => return self.request_quit(),
             (KeyCode::Up, _) => self.cursor = self.cursor.saturating_sub(1),
             (KeyCode::Down, _) => self.cursor = (self.cursor + 1).min(last),
             (KeyCode::Char('e'), false) if !self.entries.is_empty() => return Action::OpenDetail(self.cursor),
@@ -189,6 +214,11 @@ impl Table {
         let mut state = TableState::default().with_selected(Some(self.cursor));
         frame.render_stateful_widget(table, body, &mut state);
 
+        if self.confirming_quit {
+            let n = self.approved_count();
+            frame.render_widget(format!(" Quit and discard {n} approved? Nothing is saved.   y quit   any other key stays"), foot);
+            return;
+        }
         frame.render_widget(" ↑↓ row   ⏎ approve   e edit   ^A approve all remaining   ^S done   q quit", foot);
     }
 }
@@ -205,7 +235,9 @@ pub fn run(table: &mut Table, preset: &dyn Preset) -> std::io::Result<Action> {
         match table.on_key(key) {
             Action::Continue => {}
             Action::OpenDetail(i) => {
-                if super::detail::run(&mut terminal, &mut table.entries[i], preset)? == Action::Cancel {
+                if super::detail::run(&mut terminal, &mut table.entries[i], preset)? == Action::Cancel
+                    && table.request_quit() == Action::Cancel
+                {
                     return Ok(Action::Cancel);
                 }
             }
@@ -249,6 +281,32 @@ mod tests {
         let a = sug("Witch", Some(1), None, SuggestionSource::Corpus);
         let b = sug("Witcher", Some(1), None, SuggestionSource::Corpus);
         Entry::new(stem.into(), vec![a, b])
+    }
+
+    #[test]
+    fn quitting_with_approvals_asks_first() {
+        let mut t = table(vec![clean("a", "Fine")]);
+        t.on_key(key(KeyCode::Enter));
+        assert_eq!(t.on_key(key(KeyCode::Char('q'))), Action::Continue);
+        assert!(screen(&t).contains("discard 1 approved"), "{}", screen(&t));
+        assert_eq!(t.on_key(key(KeyCode::Char('n'))), Action::Continue, "any other key stays");
+        assert_eq!(t.on_key(key(KeyCode::Esc)), Action::Continue);
+        assert_eq!(t.on_key(key(KeyCode::Char('y'))), Action::Cancel);
+    }
+
+    #[test]
+    fn quitting_with_nothing_approved_is_immediate() {
+        let mut t = table(vec![clean("a", "Fine")]);
+        assert_eq!(t.on_key(key(KeyCode::Char('q'))), Action::Cancel);
+        assert_eq!(t.request_quit(), Action::Cancel);
+    }
+
+    #[test]
+    fn approved_row_carries_the_matching_candidates_volume_count() {
+        let mut e = Entry::new("s".into(), vec![Suggestion { volume_count: Some(120), ..sug("Series", Some(1), None, SuggestionSource::Corpus) }]);
+        assert!(e.approved_row().is_none(), "unapproved rows have no row");
+        assert!(e.approve());
+        assert_eq!(e.approved_row().unwrap().1, Some(120));
     }
 
     #[test]
