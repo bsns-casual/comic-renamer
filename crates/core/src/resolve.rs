@@ -40,6 +40,11 @@ pub fn suggest_with(
     corpus: Option<&Corpus>,
     ctx: &Context,
 ) -> Vec<Suggestion> {
+    // Layer B needs no corpus, so it comes before anything that might lack
+    // one: a failed fetch must not cost the one answer a human verified.
+    if let Some(found) = override_suggestion(stem, ctx) {
+        return vec![found];
+    }
     let is_humble = marketplace.to_ascii_lowercase().starts_with("humble");
     if is_humble {
         if let Some(found) = corpus.and_then(|c| corpus_ladder(stem, c, ctx)) {
@@ -158,6 +163,23 @@ fn corpus_suggestion(
     }
 }
 
+/// Layer B outranks the corpus: it is the only place a wrong corpus match is
+/// correctable (§6.2.1).
+fn override_suggestion(stem: &str, ctx: &Context) -> Option<Suggestion> {
+    let cleaned = strip_cruft(stem);
+    let entry = ctx.overrides.and_then(|o| {
+        o.lookup(stem, ctx.source_folder)
+            .or_else(|| o.lookup(&cleaned, ctx.source_folder))
+    })?;
+    Some(Suggestion {
+        series: entry.series.clone(),
+        volume: entry.volume,
+        subtitle: entry.subtitle.clone(),
+        volume_count: None,
+        source: SuggestionSource::Override,
+    })
+}
+
 /// Longest-prefix with the boundary guard, then language (hard filter, no
 /// fallback -- D33), publisher hint, volume feasibility, shortest run last.
 /// Shortest-run fires only when a volume token is present.
@@ -168,13 +190,8 @@ fn corpus_suggestion(
 pub fn corpus_ladder(stem: &str, corpus: &Corpus, ctx: &Context) -> Option<Vec<Suggestion>> {
     let cleaned = strip_cruft(stem);
 
-    // Layer B first: it is the only place a wrong corpus match is correctable
-    // (§6.2.1), so it has to outrank the corpus, not supplement it.
-    if let Some(entry) = ctx.overrides.and_then(|o| {
-        o.lookup(stem, ctx.source_folder)
-            .or_else(|| o.lookup(&cleaned, ctx.source_folder))
-    }) {
-        return Some(vec![corpus_suggestion(&entry.series, entry.volume, &entry.subtitle, None)]);
+    if let Some(found) = override_suggestion(stem, ctx) {
+        return Some(vec![found]);
     }
 
     let key = squash(&cleaned);

@@ -181,6 +181,9 @@ fn run_scan(
     // shortcut: shipped mappings only; the user's local file arrives with the
     // `map` command, which also owns where it lives.
     let mappings = Mappings::load(SHIPPED_MAPPINGS, None).map_err(|e| e.to_string())?;
+    // Rejected up front: a malformed embedded file is a bad commit, not a
+    // condition to degrade around.
+    let overrides = parse_overrides(OVERRIDES)?;
 
     let opts = ScanOpts {
         source_root: source,
@@ -204,7 +207,7 @@ fn run_scan(
     plan::write(&header, &rows, &destination).map_err(|e| e.to_string())?;
 
     summarise(&rows, &unmapped, header.required_bytes, header.download_bytes);
-    suggest_for(&unmapped, &marketplace, &folder, &guess_lang);
+    suggest_for(&unmapped, &marketplace, &folder, &guess_lang, &overrides);
     println!("\nplan written to {}", destination.display());
     println!("Nothing has been moved. Review it, then:");
     println!("  comic-renamer apply {}", destination.display());
@@ -214,7 +217,13 @@ fn run_scan(
 /// Guesses for the unmapped files, printed and never saved (D49). The corpus is
 /// fetched here and only here: a session with nothing unmapped never needs it,
 /// and a fetch that fails costs the guesses, not the scan.
-fn suggest_for(unmapped: &[PathBuf], marketplace: &str, folder: &str, lang: &str) {
+fn suggest_for(
+    unmapped: &[PathBuf],
+    marketplace: &str,
+    folder: &str,
+    lang: &str,
+    overrides: &Overrides,
+) {
     if unmapped.is_empty() {
         return;
     }
@@ -223,11 +232,10 @@ fn suggest_for(unmapped: &[PathBuf], marketplace: &str, folder: &str, lang: &str
     } else {
         None
     };
-    let overrides = Overrides::parse(OVERRIDES).ok();
     let ctx = Context {
         source_folder: folder,
         hint: corpus.as_ref().map_or(PublisherHint(None), |c| publisher_hint(folder, c)),
-        overrides: overrides.as_ref(),
+        overrides: Some(overrides),
         lang,
     };
     println!("
@@ -239,6 +247,10 @@ guesses for the unmapped files (nothing is saved):");
         let shown = if shown.is_empty() { "no guess".to_string() } else { shown.join(" | ") };
         println!("    {stem}  ->  {shown}");
     }
+}
+
+fn parse_overrides(text: &str) -> Result<Overrides, String> {
+    Overrides::parse(text).map_err(|e| format!("built-in overrides are malformed: {e}"))
 }
 
 fn open_corpus() -> Result<Corpus, String> {
@@ -730,6 +742,15 @@ mod tests {
             collisions: Vec::new(),
             edited: false,
         }
+    }
+
+    #[test]
+    fn a_malformed_overrides_file_is_an_error_not_a_silent_skip() {
+        // CLAUDE.md: this means a bad data/overrides.toml was committed, which
+        // is a build to reject rather than a run to degrade.
+        let err = parse_overrides("[not valid").unwrap_err();
+        assert!(err.contains("overrides"), "{err}");
+        assert!(parse_overrides(OVERRIDES).is_ok());
     }
 
     #[test]

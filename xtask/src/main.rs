@@ -67,7 +67,7 @@ fn measure() -> Result<(), String> {
     let mut rows = 0usize;
     let mut top_right = 0usize;
     let mut series_right = 0usize;
-    let mut buckets: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
+    let mut buckets: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     let mut wrong: Vec<(&str, String, &str)> = Vec::new();
     for line in GROUND_TRUTH.lines().skip(1) {
         let mut fields = line.split('\t');
@@ -88,10 +88,18 @@ fn measure() -> Result<(), String> {
             lang: LANG,
         };
         let found = suggest_with(stem, "Humble", Some(&corpus), &ctx);
-        let bucket = match found.len() {
-            0 => "no suggestion",
-            1 => "one suggestion",
-            _ => "several suggestions",
+        // Attributed to the strategy that produced the top suggestion. An empty
+        // list is split by cause, because the causes point at different fixes.
+        let bucket = match found.first() {
+            None if corpus_ladder(stem, &corpus, &ctx).is_some() => {
+                "none: corpus refused (language or volume)".to_string()
+            }
+            None => "none: empty filename guess".to_string(),
+            Some(top) => format!(
+                "{:?}: {}",
+                top.source,
+                if found.len() == 1 { "one suggestion" } else { "several suggestions" }
+            ),
         };
         let entry = buckets.entry(bucket).or_default();
         entry.0 += 1;
@@ -112,11 +120,7 @@ fn measure() -> Result<(), String> {
         }
     }
 
-    // Every wrong top suggestion, named. A bare percentage cannot be audited.
-    for (stem, answer, title) in &wrong {
-        println!("wrong top  {stem}\n    said {answer:?}\n    want {title:?}");
-    }
-    println!("\ngraded rows by suggestion count, {rows} total");
+    println!("graded rows by top suggestion's source, {rows} total");
     for (name, (n, right)) in &buckets {
         println!(
             "  {n:5}  {:5.1}%  {name}  (top is right: {right})",
@@ -136,6 +140,14 @@ fn measure() -> Result<(), String> {
         "suggestion accuracy  {:>5.1}%   (top suggestion vs verified title, {rows} rows)",
         percent(top_right, rows)
     );
+
+    // Named, not just counted: a bare percentage cannot be audited. Capped so
+    // the summary above stays on screen; `--all` prints every one.
+    let shown = if std::env::args().any(|a| a == "--all") { wrong.len() } else { 20 };
+    println!("\nwrong top suggestions (first {} of {}):", shown.min(wrong.len()), wrong.len());
+    for (stem, answer, title) in wrong.iter().take(shown) {
+        println!("  {stem}\n      said {answer:?}\n      want {title:?}");
+    }
     Ok(())
 }
 

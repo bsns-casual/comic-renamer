@@ -5,7 +5,7 @@
 mod common;
 
 use comic_renamer_core::overrides::Overrides;
-use comic_renamer_core::resolve::{corpus_ladder, publisher_hint, Context};
+use comic_renamer_core::resolve::{corpus_ladder, publisher_hint, suggest_with, Context};
 use comic_renamer_core::types::{PublisherHint, Suggestion, SuggestionSource};
 use common::corpus;
 use tempfile::TempDir;
@@ -359,4 +359,41 @@ fn a_volume_no_record_can_hold_is_still_infeasible() {
         resolve("someseries_vol13", "", &hint, &c, &no_ov(), "en"),
         Some(Vec::new())
     );
+}
+
+#[test]
+fn an_override_fires_with_no_corpus_at_all() {
+    // Layer B is embedded TOML and needs no corpus. A failed corpus fetch must
+    // not cost the one answer a human already verified.
+    let (_o, ov) = twd_overrides();
+    let ctx = Context {
+        source_folder: "HumbleImageComicsInThe10s",
+        overrides: Some(&ov),
+        ..Context::default()
+    };
+    let found = suggest_with("TWD_CompendiumOne", "Humble", None, &ctx);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].series, "The Walking Dead");
+    assert_eq!(found[0].source, SuggestionSource::Override);
+}
+
+#[test]
+fn an_override_says_it_is_an_override_not_a_corpus_guess() {
+    let (_d, c) = gcd_subset();
+    let (_o, ov) = twd_overrides();
+    let r = only(resolve("TWD_CompendiumOne", "HumbleImageComicsInThe10s", &no_hint(), &c, &ov, "en"));
+    assert_eq!(r.source, SuggestionSource::Override);
+}
+
+#[test]
+fn a_squashed_subtitle_is_identifiable_on_the_suggestion() {
+    // D15: the corpus path cannot split a squashed subtitle, so a hit that
+    // carries one must be told apart from a clean hit. A picker defaulting to
+    // Enter would otherwise commit `Hellboy Omnibus: seedofdestruction`.
+    let (_d, c) = gcd_subset();
+    let squashed = only(resolve("hellboyomnibusvolume1_seedofdestruction", NO_FOLDER, &no_hint(), &c, &no_ov(), "en"));
+    let clean = only(resolve("hellboyomnibusvolume1", NO_FOLDER, &no_hint(), &c, &no_ov(), "en"));
+    assert_eq!(squashed.source, SuggestionSource::Corpus);
+    assert_eq!(squashed.subtitle.as_deref(), Some("seedofdestruction"));
+    assert_eq!(clean.subtitle, None);
 }

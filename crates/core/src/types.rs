@@ -50,8 +50,10 @@ pub struct Suggestion {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SuggestionSource {
-    /// The GCD corpus (or a Layer B correction to it).
+    /// The GCD corpus.
     Corpus,
+    /// A Layer B override: the one answer a human already verified.
+    Override,
     /// The filename itself, title-cased and parsed.
     Filename,
 }
