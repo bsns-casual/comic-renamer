@@ -227,6 +227,7 @@ fn a_mapped_file_becomes_a_plan_row_and_an_unmapped_one_does_not() {
     let outcome = run(&opts(source.path(), dest.path()), &c).unwrap();
     assert_eq!(outcome.rows.len(), 1);
     assert_eq!(outcome.rows[0].status, Status::Mapped);
+    assert_eq!(outcome.header.unmapped, 1, "apply learns of left-behind files from the header");
     assert_eq!(outcome.rows[0].series, "Mazebook");
     assert_eq!(outcome.unmapped, vec![source.path().canonicalize().unwrap().join("totallyunknownthing.pdf")]);
 }

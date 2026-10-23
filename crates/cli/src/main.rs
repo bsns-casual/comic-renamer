@@ -265,6 +265,7 @@ fn run_apply(
         header.mode,
         &eligible,
         &rows,
+        header.unmapped,
         &dest_root,
         preset.as_ref(),
         edited,
@@ -352,6 +353,7 @@ impl Facts {
         mode: Mode,
         eligible: &[&PlanRow],
         rows: &[PlanRow],
+        unmapped: u64,
         dest_root: &Path,
         preset: &dyn Preset,
         edited: bool,
@@ -413,7 +415,8 @@ impl Facts {
                 .any(|row| row.mechanism == Mechanism::Stream),
             placeholders,
             placeholder_bytes,
-            not_ready: rows.len() - eligible.len(),
+            // Rows `apply` will not run, plus the files `scan` never planned.
+            not_ready: rows.len() - eligible.len() + unmapped as usize,
             // Only the ones that cost this run a row. `find_collisions`
             // scans every row, so two review rows wanting one name would
             // otherwise be reported as a refusal of work nobody asked for.
@@ -770,6 +773,24 @@ mod tests {
 
         // And says nothing when there is nothing to say.
         assert!(!disclose(&facts(Mode::Move, false)).contains("not ready"));
+    }
+
+    #[test]
+    fn files_scan_left_unmapped_reach_the_apply_disclosure() {
+        // Unmapped files never become plan rows, so counting rows cannot see
+        // them. The plan header carries the count, and `apply` is a separate
+        // invocation from `scan`, possibly against an old or foreign plan.
+        let dest = tempfile::tempdir().unwrap();
+        let preset = preset_by_id("komga").unwrap();
+        let f = Facts::gather(Mode::Move, &[], &[], 3, dest.path(), preset.as_ref(), false)
+            .unwrap();
+        assert_eq!(f.not_ready, 3);
+        assert!(nothing_to_do(&f).contains("Needs a human: 3 rows"));
+
+        let mut some = facts(Mode::Move, false);
+        some.files = 9;
+        some.not_ready = 3;
+        assert!(disclose(&some).contains("left where they are: 3 of 12 rows"));
     }
 
     #[test]

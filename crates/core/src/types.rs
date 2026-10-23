@@ -103,6 +103,9 @@ pub struct PlanHeader {
     pub required_bytes: u64,
     /// Bytes a dataless source would pull down, reported apart from disk (D23).
     pub download_bytes: u64,
+    /// Files `scan` found but the mapping did not know. They are not rows, so
+    /// `apply` could not otherwise tell the user they stay where they are.
+    pub unmapped: u64,
     /// Covers the header and every row, so `apply` can tell what a human edited.
     pub checksum: String,
 }

@@ -123,6 +123,7 @@ fn write_plan(
         lang: "en".into(),
         required_bytes: 0,
         download_bytes: 0,
+        unmapped: 0,
         checksum: String::new(),
     };
 

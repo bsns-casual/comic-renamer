@@ -18,6 +18,7 @@ fn header() -> PlanHeader {
         lang: "en".into(),
         required_bytes: 4096,
         download_bytes: 0,
+        unmapped: 0,
         checksum: String::new(),
     }
 }

@@ -149,6 +149,7 @@ pub fn scan(
         lang: opts.lang.clone(),
         required_bytes,
         download_bytes,
+        unmapped: unmapped.len() as u64,
         checksum: String::new(),
     };
     header.checksum = checksum(&header, &rows);
