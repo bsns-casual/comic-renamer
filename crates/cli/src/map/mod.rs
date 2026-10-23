@@ -327,6 +327,27 @@ fn guidance(c: &Contribution) -> Vec<String> {
     ]
 }
 
+/// The source folder's name as the bundle every approved row will carry.
+/// Asked *before* the session opens: `approved_rows` validates every row
+/// before writing any, so a folder name that cannot be a field used to fail
+/// after the work was done and discard every correction the user had typed —
+/// to an error that blamed a filename.
+///
+/// NFC is applied rather than refused, because the bundle is a value derived
+/// from the filesystem and HFS+ hands these back decomposed. Anything
+/// normalising cannot fix is the user's to fix, now, at no cost.
+fn bundle_for(folder: &str) -> Result<String, String> {
+    let bundle = comic_renamer_core::mapping::bundle_name(folder);
+    comic_renamer_core::mapping::validate_bundle(&bundle).map_err(|e| {
+        format!(
+            "the source folder's name cannot be recorded with these mappings: it {e}. \
+             Rename the folder, or move the files into one whose name is at most 120 bytes \
+             and does not start with =, +, - or @."
+        )
+    })?;
+    Ok(bundle)
+}
+
 fn clash_warning(a: &str, b: &str) -> String {
     format!(
         "warning: {a} and {b} give the same mapping key but you titled them differently, so neither was saved. Rename one of the files so the names differ in more than punctuation, case or spacing, then run `map` again."
@@ -361,7 +382,7 @@ pub fn run(
     marketplace: String,
     mode: Mode,
 ) -> Result<(), String> {
-    let folder = source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let folder = bundle_for(&source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())?;
     let overrides = parse_overrides(OVERRIDES)?;
     let preset_impl = comic_renamer_core::preset::preset_by_id(&preset).ok_or_else(|| format!("unknown preset {preset:?}"))?;
     let opts = ScanOpts { source_root: source, dest_root: dest, preset, mode: Some(mode), lang: lang.clone() };
@@ -496,6 +517,37 @@ mod tests {
             assert!(config_dir_from(None, Some(home.into())).is_err(), "HOME={home:?}");
         }
         assert!(config_dir_from(Some("".into()), Some("".into())).is_err());
+    }
+
+    /// `bundle` is `source.file_name()`, not user input, and
+    /// `MappingRow::validate` ends with it — so a folder name that cannot be a
+    /// field failed *after* the session, throwing away every correction the
+    /// user had just typed, with an error that blamed a filename. HFS+ stored
+    /// NFD and those names survive copies, so `Café Comics` is an ordinary
+    /// folder on macOS.
+    #[test]
+    fn an_nfd_folder_name_is_normalised_rather_than_refused() {
+        let nfd = "Cafe\u{301} Comics";
+        let bundle = bundle_for(nfd).unwrap();
+        assert_eq!(bundle, "Caf\u{e9} Comics");
+        let dir = tempfile::TempDir::new().unwrap();
+        let local = dir.path().join("mappings.tsv");
+        let done = commit_session(&[approved("a_vol1", "A", Some(1), None)], &local, &bundle, "en").unwrap();
+        assert_eq!(done.written, 1, "the session survives the folder's own name");
+        assert_eq!(read_rows(&local)[0].bundle, "Caf\u{e9} Comics");
+    }
+
+    /// A folder name normalising cannot fix is reported before the session
+    /// opens, where the user has typed nothing to lose.
+    #[test]
+    fn a_folder_name_that_cannot_be_a_bundle_is_refused_up_front() {
+        for bad in ["-Free Comics", "=Humble", "@bundle", "+extra", &"x".repeat(121)] {
+            let err = bundle_for(bad).unwrap_err();
+            assert!(err.contains("folder"), "{bad:?}: {err}");
+            assert!(err.contains("Rename"), "{bad:?} must say what to do: {err}");
+        }
+        assert!(bundle_for("Humble Comics Bundle: ElfQuest").is_ok());
+        assert!(bundle_for("").is_ok(), "no folder name at all is not an error");
     }
 
     #[test]

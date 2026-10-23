@@ -154,6 +154,28 @@ fn the_validator_and_the_preset_agree_on_what_is_invisible() {
     }
 }
 
+/// `volume_count` sets the zero-padding width (D44), so an unbounded one
+/// renders `Vol. 0000000005`, and a volume past the end of the run means
+/// `Vol. 100` sits beside `Vol. 05` and sorts wrongly. The resolver already
+/// treats volume feasibility as a hard constraint, so no corpus candidate can
+/// disagree; only a hand-typed one can.
+#[test]
+fn bounds_volume_count_and_refuses_a_volume_past_the_end_of_the_run() {
+    let with = |volume, count| {
+        let mut r = row("Series");
+        r.volume = volume;
+        r.volume_count = count;
+        r
+    };
+    assert!(with(Some(1), Some(9999)).validate().is_ok());
+    assert!(with(Some(1), Some(10_000)).validate().is_err(), "the ceiling is 9999");
+    assert!(with(Some(1), Some(4_000_000_000)).validate().is_err(), "renders Vol. 0000000001");
+    assert!(with(Some(5), Some(4)).validate().is_err(), "a volume the run cannot hold");
+    assert!(with(Some(4), Some(4)).validate().is_ok());
+    assert!(with(Some(900), None).validate().is_ok(), "no count means the two-digit floor");
+    assert!(with(None, Some(5)).validate().is_ok());
+}
+
 #[test]
 fn rejects_a_whitespace_only_series() {
     for s in ["   ", " ", "\u{200B}", "\u{00A0}", "\u{3000}"] {

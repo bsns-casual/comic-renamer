@@ -116,6 +116,27 @@ fn collisions_report_same_key_and_bundle_with_different_fields() {
     assert_eq!(find_key_collisions(&rows), vec![("k".to_string(), "a".to_string())]);
 }
 
+/// `find_key_collisions` existed and was run only by CI, so a file nobody
+/// checked loaded both rows and `lookup` returned the first — a user's later
+/// correction in their own file was ignored with no sign of it.
+#[test]
+fn a_layer_holding_two_disagreeing_rows_for_one_key_fails_to_load() {
+    let both = tsv(&[("alpha", "First", "humble"), ("alpha", "Second", "humble")]);
+    let msg = Mappings::load(&both, None).err().expect("two disagreeing rows").to_string();
+    assert!(msg.contains("alpha") && msg.contains("humble"), "{msg}");
+    assert!(msg.contains("line 3"), "the row that would be ignored: {msg}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("local.tsv");
+    std::fs::write(&path, &both).unwrap();
+    let msg = Mappings::load(&tsv(&[]), Some(&path)).err().expect("the local layer").to_string();
+    assert!(msg.contains("local mappings"), "{msg}");
+
+    // An exact repeat loses nothing, and two bundles are not a collision.
+    assert!(Mappings::load(&tsv(&[("alpha", "A", "h"), ("alpha", "A", "h")]), None).is_ok());
+    assert!(Mappings::load(&tsv(&[("alpha", "A", "h"), ("alpha", "B", "f")]), None).is_ok());
+}
+
 #[test]
 fn a_local_row_shadows_its_shipped_siblings() {
     // Deliberate cost of "local outranks shipped": a local row replaces EVERY shipped

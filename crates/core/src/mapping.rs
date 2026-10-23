@@ -129,6 +129,10 @@ pub fn to_tsv(rows: &[MappingRow]) -> String {
 const MAX_FIELD_BYTES: usize = 120;
 const MAX_COMPONENT_BYTES: usize = 255;
 const MAX_RENDERED_BYTES: usize = 1024;
+/// `volume_count` is the zero-padding width (D44), so an unbounded one renders
+/// `Vol. 0000000005`. Four digits covers every real run; the longest manga in
+/// the corpus is three.
+const MAX_VOLUME_COUNT: u32 = 9999;
 
 fn invalid(field: &'static str, reason: impl Into<String>) -> MappingError {
     MappingError::Invalid { field, reason: reason.into() }
@@ -201,8 +205,48 @@ impl MappingRow {
             validate_field("subtitle", sub)?;
         }
         validate_field("lang", &self.lang)?;
-        validate_field("bundle", &self.bundle)
+        validate_field("bundle", &self.bundle)?;
+        if let Some(count) = self.volume_count {
+            if count > MAX_VOLUME_COUNT {
+                return Err(invalid(
+                    "volume_count",
+                    format!("is {count}; the ceiling is {MAX_VOLUME_COUNT}"),
+                ));
+            }
+            // Two rows of one series with different counts pad differently
+            // inside one folder, and a volume past the end of the run means
+            // `Vol. 100` beside `Vol. 05`, which sorts wrongly everywhere but
+            // Komga. The resolver already treats feasibility as a hard
+            // constraint, so no corpus candidate disagrees with itself here.
+            if self.volume.is_some_and(|v| v > count) {
+                return Err(invalid(
+                    "volume",
+                    format!("is {}, past the end of a run of {count}", self.volume.unwrap_or(0)),
+                ));
+            }
+        }
+        Ok(())
     }
+}
+
+/// A source folder's name as the `bundle` field. NFC because HFS+ stored NFD
+/// and those names survive copies, so `Café Comics` arrives decomposed and
+/// `validate_field` would refuse it — and `bundle` is a value derived from the
+/// filesystem, not contributed data, so normalising it is right where
+/// rejecting it is not.
+///
+/// Shared by `scan`'s lookup and `map`'s recorded rows, so the two cannot
+/// disagree about which bundle a row belongs to.
+pub fn bundle_name(folder: &str) -> String {
+    folder.nfc().collect()
+}
+
+/// Whether `bundle_name`'s output can be stored, for a caller that must ask
+/// *before* opening a session: `validate` ends with the bundle and
+/// `approved_rows` validates every row before writing any, so a folder name
+/// that fails here after the work is done throws all of it away.
+pub fn validate_bundle(bundle: &str) -> Result<(), MappingError> {
+    validate_field("bundle", bundle)
 }
 
 /// Whether the destination the preset renders from this row fits 255 bytes
@@ -234,14 +278,33 @@ fn load_layer(text: &str, origin: &str) -> Result<Vec<MappingRow>, MappingError>
     })?;
     // parse_tsv keeps no line numbers; data rows are the non-empty lines after the header.
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    let lines = text
+    let lines: Vec<usize> = text
         .split('\n')
         .enumerate()
         .skip(1)
         .filter(|(_, l)| !l.strip_suffix('\r').unwrap_or(l).is_empty())
-        .map(|(i, _)| i + 1);
-    for (row, line) in rows.iter().zip(lines) {
-        row.validate().map_err(|e| at(line, e.to_string()))?;
+        .map(|(i, _)| i + 1)
+        .collect();
+    for (row, line) in rows.iter().zip(&lines) {
+        row.validate().map_err(|e| at(*line, e.to_string()))?;
+    }
+    // CI runs this over shipped data; running it at load is what makes it true
+    // of a file nobody checked. `lookup` returns the first row for a
+    // `(key, bundle)` pair, so a second, disagreeing one is ignored in silence
+    // — and in the user's own file that second row is their later correction.
+    if let Some((key, bundle)) = find_key_collisions(&rows).into_iter().next() {
+        // The row that would be ignored, so the user is sent to the one they
+        // most likely meant to keep.
+        let ignored = rows
+            .iter()
+            .zip(&lines)
+            .filter(|(r, _)| r.key == key && r.bundle == bundle)
+            .nth(1)
+            .map_or(0, |(_, line)| *line);
+        return Err(at(
+            ignored,
+            format!("a second row for key {key:?} in bundle {bundle:?} disagrees with the first, so it would be ignored"),
+        ));
     }
     Ok(rows)
 }

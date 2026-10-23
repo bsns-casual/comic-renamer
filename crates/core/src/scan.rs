@@ -63,11 +63,15 @@ pub fn scan(
     let mode = opts.mode.unwrap_or(Mode::Move);
 
     // The source folder's name is the bundle, which only breaks ties between
-    // rows sharing a key.
-    let folder = source_root
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    // rows sharing a key. NFC through the one function `map` records with, or
+    // an HFS+ folder name arrives decomposed on one side and composed on the
+    // other and the tie-break misses.
+    let folder = crate::mapping::bundle_name(
+        &source_root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    );
 
     let mut candidates: Vec<PathBuf> = std::fs::read_dir(&source_root)?
         .flatten()

@@ -189,7 +189,9 @@ fn does_not_execute_unmapped_rows() {
         ("birdking_vol1", "Birdking", Some(1), Some(3)),
         ("totallyunknownthing", "Unknown", None, None),
         ("hellboyomnibusvolume1_seedofdestruction", "Hellboy Omnibus", Some(1), None),
-        ("velvet_vol9", "Velvet", Some(9), Some(3)),
+        // A run that can hold volume 9: this row is here to be forced to
+        // Unmapped, and `validate` now refuses a volume past the run's end.
+        ("velvet_vol9", "Velvet", Some(9), Some(12)),
     ]);
     let f = Fixture::new(
         &[
