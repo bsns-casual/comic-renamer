@@ -55,15 +55,22 @@ pub fn read_allowing_edits(path: &Path) -> Result<(PlanHeader, Vec<PlanRow>, boo
     let mut lines = text.lines().filter(|l| !l.trim().is_empty());
 
     let header_line = lines.next().ok_or(PlanError::MissingHeader)?;
-    let header: PlanHeader = serde_json::from_str(header_line).map_err(parse_error(1))?;
-    // Before any row is parsed: an old row's status would fail with a message
-    // about an unknown variant, which hides the real reason.
-    if header.version != PLAN_VERSION {
+    // The version comes out of the raw JSON first. Deserialising the whole
+    // header would fail on a field an old plan lacks, and an old row's status
+    // would fail with an unknown-variant message: both hide the real reason,
+    // which is "scan again".
+    #[derive(serde::Deserialize)]
+    struct Versioned {
+        version: u32,
+    }
+    let Versioned { version } = serde_json::from_str(header_line).map_err(parse_error(1))?;
+    if version != PLAN_VERSION {
         return Err(PlanError::UnsupportedVersion {
-            found: header.version,
+            found: version,
             expected: PLAN_VERSION,
         });
     }
+    let header: PlanHeader = serde_json::from_str(header_line).map_err(parse_error(1))?;
 
     let mut rows: Vec<PlanRow> = Vec::new();
     for (offset, line) in lines.enumerate() {

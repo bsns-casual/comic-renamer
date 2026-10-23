@@ -416,7 +416,7 @@ impl Facts {
             placeholders,
             placeholder_bytes,
             // Rows `apply` will not run, plus the files `scan` never planned.
-            not_ready: rows.len() - eligible.len() + unmapped as usize,
+            not_ready: (rows.len() - eligible.len()).saturating_add(unmapped as usize),
             // Only the ones that cost this run a row. `find_collisions`
             // scans every row, so two review rows wanting one name would
             // otherwise be reported as a refusal of work nobody asked for.
@@ -539,7 +539,7 @@ fn disclose(f: &Facts) -> String {
             // the same defect as "1 files", and the count genuinely reaches 1.
             "\n  Not ready, so left where they are: {} of {} rows.\n",
             f.not_ready,
-            f.not_ready + f.files
+            f.not_ready.saturating_add(f.files)
         ));
     }
 
@@ -773,6 +773,38 @@ mod tests {
 
         // And says nothing when there is nothing to say.
         assert!(!disclose(&facts(Mode::Move, false)).contains("not ready"));
+    }
+
+    #[test]
+    fn a_forged_unmapped_count_cannot_panic_the_disclosure() {
+        // The plan file is untrusted (§6.11). u64::MAX must neither panic in
+        // debug nor wrap to a small believable number in release.
+        let dest = tempfile::tempdir().unwrap();
+        let preset = preset_by_id("komga").unwrap();
+        // One row that is not runnable, so the subtraction term is non-zero
+        // and a plain `+` would overflow.
+        let row = PlanRow {
+            id: "r1".into(),
+            source: PathBuf::from("/src/a.pdf"),
+            destination_preview: PathBuf::new(),
+            extension: "pdf".into(),
+            series: "S".into(),
+            volume: None,
+            subtitle: None,
+            run: 0,
+            status: Status::Unmapped,
+            mechanism: Mechanism::Rename,
+            source_stat: comic_renamer_core::types::SourceStat { size: 0, mtime_ns: 0, inode: 1 },
+            record: None,
+        };
+        let f = Facts::gather(Mode::Move, &[], &[row], u64::MAX, dest.path(), preset.as_ref(), false)
+            .unwrap();
+        assert_eq!(f.not_ready, usize::MAX);
+        let mut some = facts(Mode::Move, false);
+        some.not_ready = usize::MAX;
+        let out = disclose(&some);
+        assert!(out.contains("left where they are"), "{out}");
+        assert!(!nothing_to_do(&f).is_empty());
     }
 
     #[test]

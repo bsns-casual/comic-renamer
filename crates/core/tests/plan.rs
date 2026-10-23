@@ -189,3 +189,17 @@ fn a_row_rebuilds_its_resolver_result() {
     assert_eq!(resolved.run, r.run);
     assert_eq!(resolved.status, r.status);
 }
+
+#[test]
+fn a_v1_header_is_refused_for_its_version_not_for_a_missing_field() {
+    // A v1 header has no `unmapped`. The version has to be read before the
+    // header is deserialised, or the user sees a serde field error instead of
+    // being told to scan again.
+    let dir = TempDir::new().unwrap();
+    let v1 = r#"{"version":1,"preset":"komga","mode":"move","source_root":"/s","dest_root":"/d","lang":"en","required_bytes":0,"download_bytes":0,"checksum":""}"#;
+    let path = write_raw(&dir, &[v1.to_string()]);
+    assert!(matches!(
+        read(&path),
+        Err(PlanError::UnsupportedVersion { found: 1, .. })
+    ));
+}
