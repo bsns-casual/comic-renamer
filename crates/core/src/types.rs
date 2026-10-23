@@ -262,6 +262,8 @@ pub enum PlanError {
     ChecksumMismatch { expected: String, actual: String },
     #[error("line {line}: {message}")]
     Parse { line: usize, message: String },
+    #[error("plan is version {found}, this build reads version {expected}; run scan again")]
+    UnsupportedVersion { found: u32, expected: u32 },
     #[error("plan has no header")]
     MissingHeader,
     #[error("unknown preset {0:?}")]

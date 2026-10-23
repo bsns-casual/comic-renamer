@@ -3,14 +3,14 @@
 
 use comic_renamer_core::plan::{checksum, read, write};
 use comic_renamer_core::types::{
-    Basis, Mechanism, Mode, PlanError, PlanHeader, PlanRow, SeriesRecord, SourceStat, Status,
+    Mechanism, Mode, PlanError, PlanHeader, PlanRow, SeriesRecord, SourceStat, Status,
 };
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 fn header() -> PlanHeader {
     PlanHeader {
-        version: 1,
+        version: comic_renamer_core::plan::PLAN_VERSION,
         preset: "komga".into(),
         mode: Mode::Move,
         source_root: PathBuf::from("/src"),
@@ -32,7 +32,7 @@ fn row(id: &str, destination_preview: &str) -> PlanRow {
         volume: Some(1),
         subtitle: None,
         run: 4,
-        status: Status::Ready(Basis::ShortestRun),
+        status: Status::Mapped,
         mechanism: Mechanism::Rename,
         source_stat: SourceStat {
             size: 4096,
@@ -109,7 +109,8 @@ fn rejects_duplicate_ids_unknown_status_and_escaping_paths() {
 
     let dir = TempDir::new().unwrap();
     let mut l = written(&dir);
-    l[1] = l[1].replace(r#""status":{"ready""#, r#""status":{"definitely-ready""#);
+    l[1] = l[1].replace(r#""status":"mapped""#, r#""status":"definitely-mapped""#);
+    assert_ne!(l[1], written(&dir)[1], "the status was not rewritten");
     assert!(read(&write_raw(&dir, &l)).is_err());
 
     let dir = TempDir::new().unwrap();

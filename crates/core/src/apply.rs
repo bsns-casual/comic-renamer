@@ -112,7 +112,7 @@ fn apply_inner(
     // Whole-run refusals, before any row is considered individually.
     let eligible: Vec<&PlanRow> = rows
         .iter()
-        .filter(|row| matches!(row.status, Status::Ready(_)))
+        .filter(|row| row.status == Status::Mapped)
         .collect();
 
     for row in &eligible {
@@ -559,7 +559,7 @@ mod tests {
             volume: None,
             subtitle: None,
             run: 1,
-            status: Status::Ready(crate::types::Basis::Unambiguous),
+            status: Status::Mapped,
             mechanism,
             source_stat: crate::types::SourceStat {
                 size,

@@ -5,12 +5,10 @@
 //! for download cost, and `(size, mtime_ns, inode)` so `apply` can refuse a
 //! source that changed since the plan was written.
 
-use crate::corpus::Corpus;
 use crate::fsops::{is_dataless, select_mechanism};
-use crate::overrides::Overrides;
-use crate::plan::checksum;
+use crate::mapping::{key, Mappings};
+use crate::plan::{checksum, PLAN_VERSION};
 use crate::preset::preset_by_id;
-use crate::resolve::{publisher_hint, resolve};
 use crate::types::{Mode, PlanHeader, PlanRow, Progress, ScanError, ScanOpts, SourceStat};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -24,8 +22,13 @@ const ANCILLARY_PREFIXES: [&str; 7] = [
     "id", "readme", "license", "licence", "credits", "cover", "thumbs",
 ];
 
-/// The plan format this build writes.
-const PLAN_VERSION: u32 = 1;
+/// What a scan found: the plan, and the files the mapping does not know.
+/// Unmapped files are never planned, so they cannot reach `apply`.
+pub struct ScanOutcome {
+    pub header: PlanHeader,
+    pub rows: Vec<PlanRow>,
+    pub unmapped: Vec<PathBuf>,
+}
 
 /// `realpath` both roots and refuse if either contains the other; same-volume
 /// via `stat().dev`; sum **logical** sizes (`st_size`, never `du`); flag
@@ -36,17 +39,16 @@ const PLAN_VERSION: u32 = 1;
 /// `^(id|readme|licen[cs]e|credits|cover|thumbs)[-_.]`, and anything that is
 /// not a regular file — exploded bundles ship directories named `Hellboy.pdf`.
 ///
-/// The corpus and overrides are passed in rather than loaded here: loading
-/// means a network fetch on first run, and this function is the one the plan
-/// calls read-only by construction. The CLI owns the loading.
+/// A file is planned only if its stem's `key` is in `mappings`. A stem with no
+/// key (nothing alphanumeric) is unmapped like any other miss, never skipped.
+/// The mappings are passed in so the CLI owns where they come from.
 // shortcut: non-recursive; nested bundles need a decision on multi-format
 // duplicates (open question 11.4)
 pub fn scan(
     opts: &ScanOpts,
-    corpus: &Corpus,
-    overrides: &Overrides,
+    mappings: &Mappings,
     progress: &mut dyn FnMut(Progress),
-) -> Result<(PlanHeader, Vec<PlanRow>), ScanError> {
+) -> Result<ScanOutcome, ScanError> {
     let source_root = directory(&opts.source_root)?;
     let dest_root = directory(&opts.dest_root)?;
 
@@ -60,13 +62,12 @@ pub fn scan(
         preset_by_id(&opts.preset).ok_or_else(|| ScanError::UnknownPreset(opts.preset.clone()))?;
     let mode = opts.mode.unwrap_or(Mode::Move);
 
-    // §6.3: the hint is the source folder's own name, and it is absent for
-    // anyone running against ~/Downloads — which is the common case.
+    // The source folder's name is the bundle, which only breaks ties between
+    // rows sharing a key.
     let folder = source_root
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let hint = publisher_hint(&folder, corpus);
 
     let mut candidates: Vec<PathBuf> = std::fs::read_dir(&source_root)?
         .flatten()
@@ -78,6 +79,7 @@ pub fn scan(
 
     let total = candidates.len() as u64;
     let mut rows = Vec::with_capacity(candidates.len());
+    let mut unmapped = Vec::new();
     let mut required_bytes = 0u64;
     let mut download_bytes = 0u64;
 
@@ -89,17 +91,20 @@ pub fn scan(
             current: name.to_string(),
         });
 
-        let meta = std::fs::symlink_metadata(path)?;
         let stem = path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
+        let Some(row) = key(&stem).and_then(|k| mappings.lookup(&k, &folder)) else {
+            unmapped.push(path.clone());
+            continue;
+        };
+        let resolved = row.resolved();
         let extension = path
             .extension()
             .map(|e| e.to_string_lossy().to_lowercase())
             .unwrap_or_default();
-
-        let resolved = resolve(&stem, &folder, &hint, corpus, overrides, &opts.lang);
+        let meta = std::fs::symlink_metadata(path)?;
 
         // Logical, never `du`: it reports neither cloud-placeholder nor clone
         // reality (§6.10).
@@ -111,31 +116,22 @@ pub fn scan(
         }
 
         rows.push(PlanRow {
-            id: format!("r{:05}", index + 1),
+            id: format!("r{:05}", rows.len() + 1),
             source: path.clone(),
-            // A row that resolved to nothing gets no destination. The
-            // preset would otherwise emit `_/_.pdf` for every unresolved row
-            // in the run, which converges them all onto one path and shows
-            // the user a destination for a file that resolved to nothing.
-            // An unsplit subtitle still has a series, so it keeps its preview.
-            destination_preview: if resolved.series.is_empty() {
-                PathBuf::new()
-            } else {
-                preset.destination(&resolved, &extension)
-            },
+            destination_preview: preset.destination(&resolved, &extension),
             extension,
             series: resolved.series.clone(),
             volume: resolved.volume,
             subtitle: resolved.subtitle.clone(),
             run: resolved.run,
-            status: resolved.status.clone(),
+            status: resolved.status,
             mechanism: select_mechanism(path, &dest_root, mode)?,
             source_stat: SourceStat {
                 size: meta.len(),
                 mtime_ns: meta.mtime() * 1_000_000_000 + meta.mtime_nsec(),
                 inode: meta.ino(),
             },
-            record: resolved.record.clone(),
+            record: None,
         });
     }
     progress(Progress {
@@ -156,7 +152,11 @@ pub fn scan(
         checksum: String::new(),
     };
     header.checksum = checksum(&header, &rows);
-    Ok((header, rows))
+    Ok(ScanOutcome {
+        header,
+        rows,
+        unmapped,
+    })
 }
 
 /// `realpath`, and it has to be a directory. Resolving first is what makes the

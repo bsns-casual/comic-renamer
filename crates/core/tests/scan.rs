@@ -3,19 +3,18 @@
 
 mod common;
 
-use comic_renamer_core::scan::scan;
-use comic_renamer_core::types::{Mode, ScanError, ScanOpts, Status};
-use common::{corpus, sparse_truncate_only, tree_from_names, TreeGuard};
-use comic_renamer_core::corpus::Corpus;
-use comic_renamer_core::overrides::Overrides;
+use comic_renamer_core::mapping::Mappings;
+use comic_renamer_core::scan::{scan, ScanOutcome};
+use comic_renamer_core::types::{Mode, PlanRow, ScanError, ScanOpts, Status};
+use common::{mappings, sparse_truncate_only, tree_from_names, TreeGuard};
 use std::path::Path;
-use tempfile::{tempdir, TempDir};
+use tempfile::tempdir;
 
-fn gcd() -> (TempDir, Corpus) {
-    corpus(&[
-        ("Mazebook", "mazebook", "Dark Horse", "en", 2021, 5),
-        ("Hellboy Omnibus", "hellboyomnibus", "Dark Horse", "en", 2018, 4),
-        ("The Mask Omnibus", "maskomnibus", "Dark Horse", "en", 2008, 2),
+fn gcd() -> Mappings {
+    mappings(&[
+        ("mazebook", "Mazebook", None, Some(5)),
+        ("hellboyomnibus_vol1", "Hellboy Omnibus", Some(1), Some(4)),
+        ("maskomnibusvolume1secondedition", "The Mask Omnibus", Some(1), Some(2)),
     ])
 }
 
@@ -29,13 +28,18 @@ fn opts(source: &Path, dest: &Path) -> ScanOpts {
     }
 }
 
-fn run(o: &ScanOpts, c: &Corpus) -> Result<(comic_renamer_core::types::PlanHeader, Vec<comic_renamer_core::types::PlanRow>), ScanError> {
-    scan(o, c, &Overrides::default(), &mut |_| {})
+fn run(o: &ScanOpts, m: &Mappings) -> Result<ScanOutcome, ScanError> {
+    scan(o, m, &mut |_| {})
+}
+
+fn planned(o: &ScanOpts, m: &Mappings) -> (comic_renamer_core::types::PlanHeader, Vec<PlanRow>) {
+    let outcome = run(o, m).unwrap();
+    (outcome.header, outcome.rows)
 }
 
 #[test]
 fn refuses_overlapping_roots_in_both_directions() {
-    let (_g, c) = gcd();
+    let c = gcd();
     let d = tempdir().unwrap();
     let outer = d.path();
     let inner = outer.join("inner");
@@ -61,7 +65,7 @@ fn refuses_overlapping_roots_in_both_directions() {
 #[test]
 fn skips_non_comics_and_a_directory_named_pdf() {
     // Review Focus 1
-    let (_g, c) = gcd();
+    let c = gcd();
     let source = tempdir().unwrap();
     let dest = tempdir().unwrap();
     tree_from_names(
@@ -79,14 +83,14 @@ fn skips_non_comics_and_a_directory_named_pdf() {
     );
     std::fs::create_dir(source.path().join("Hellboy.pdf")).unwrap();
 
-    let (_h, rows) = run(&opts(source.path(), dest.path()), &c).unwrap();
+    let (_h, rows) = planned(&opts(source.path(), dest.path()), &c);
     assert_eq!(rows.len(), 1, "kept {:?}", rows.iter().map(|r| &r.source).collect::<Vec<_>>());
     assert_eq!(rows[0].series, "Mazebook");
 }
 
 #[test]
 fn scan_leaves_both_trees_byte_identical() {
-    let (_g, c) = gcd();
+    let c = gcd();
     let source = tempdir().unwrap();
     let dest = tempdir().unwrap();
     tree_from_names(source.path(), &["mazebook.pdf", "hellboyomnibus_vol1.pdf"]);
@@ -100,12 +104,12 @@ fn scan_leaves_both_trees_byte_identical() {
 fn records_logical_size_from_st_size_never_du() {
     // §6.10: `du` reports neither cloud-placeholder nor clone reality. A
     // sparse file is the cheap way to make the two disagree.
-    let (_g, c) = gcd();
+    let c = gcd();
     let source = tempdir().unwrap();
     let dest = tempdir().unwrap();
     sparse_truncate_only(source.path(), "mazebook.pdf", 5 << 30);
 
-    let (header, rows) = run(&opts(source.path(), dest.path()), &c).unwrap();
+    let (header, rows) = planned(&opts(source.path(), dest.path()), &c);
     assert_eq!(header.required_bytes, 5 << 30);
     assert_eq!(rows[0].source_stat.size, 5 << 30);
     // Nothing here is a cloud placeholder, so the download cost is nil and
@@ -116,40 +120,50 @@ fn records_logical_size_from_st_size_never_du() {
 #[test]
 fn a_zero_byte_source_is_a_row_not_a_fault() {
     // Invariant 3. An "empty means corrupt" guard would disable the suite.
-    let (_g, c) = gcd();
+    let c = gcd();
     let source = tempdir().unwrap();
     let dest = tempdir().unwrap();
     tree_from_names(source.path(), &["mazebook.pdf"]);
-    let (header, rows) = run(&opts(source.path(), dest.path()), &c).unwrap();
+    let (header, rows) = planned(&opts(source.path(), dest.path()), &c);
     assert_eq!(rows.len(), 1);
     assert_eq!(header.required_bytes, 0);
 }
 
 #[test]
-fn uses_the_source_folder_name_as_the_publisher_hint() {
-    // §6.3: the hint comes from the source folder's own name.
-    let (_g, c) = gcd();
+fn the_source_folder_name_is_the_bundle_that_breaks_a_tie() {
+    // Two rows share a key; only the bundle says which one this folder wants.
+    let tsv = "key\tseries\tvolume\tsubtitle\tlang\tvolume_count\tbundle\n\
+               maskomnibus\tThe Mask Omnibus\t\t\ten\t\tHumbleDarkHorseAnniversaryBundle\n\
+               maskomnibus\tThe Mask\t\t\ten\t\tSomeOtherBundle\n";
+    let m = Mappings::load(tsv, None).unwrap();
     let dest = tempdir().unwrap();
     let parent = tempdir().unwrap();
     let source = parent.path().join("HumbleDarkHorseAnniversaryBundle");
     std::fs::create_dir(&source).unwrap();
-    tree_from_names(&source, &["maskomnibusvolume1secondedition.pdf"]);
+    tree_from_names(&source, &["maskomnibus.pdf"]);
 
-    let (_h, rows) = run(&opts(&source, dest.path()), &c).unwrap();
+    let (_h, rows) = planned(&opts(&source, dest.path()), &m);
     assert_eq!(rows[0].series, "The Mask Omnibus");
-    assert_eq!(rows[0].record.as_ref().unwrap().publisher, "Dark Horse");
+
+    // A folder matching neither bundle gets no guess.
+    let other = parent.path().join("Downloads");
+    std::fs::create_dir(&other).unwrap();
+    tree_from_names(&other, &["maskomnibus.pdf"]);
+    let outcome = run(&opts(&other, dest.path()), &m).unwrap();
+    assert!(outcome.rows.is_empty());
+    assert_eq!(outcome.unmapped.len(), 1);
 }
 
 #[test]
 fn multi_format_duplicates_become_separate_rows() {
-    let (_g, c) = gcd();
+    let c = gcd();
     let source = tempdir().unwrap();
     let dest = tempdir().unwrap();
     tree_from_names(
         source.path(),
         &["mazebook.pdf", "mazebook.cbz", "mazebook.epub"],
     );
-    let (_h, rows) = run(&opts(source.path(), dest.path()), &c).unwrap();
+    let (_h, rows) = planned(&opts(source.path(), dest.path()), &c);
     assert_eq!(rows.len(), 3);
     let mut ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
     ids.sort_unstable();
@@ -161,11 +175,11 @@ fn multi_format_duplicates_become_separate_rows() {
 fn the_plan_it_produces_round_trips() {
     // scan's output is plan::write's input; if they disagree the first real
     // run fails at the last step.
-    let (_g, c) = gcd();
+    let c = gcd();
     let source = tempdir().unwrap();
     let dest = tempdir().unwrap();
     tree_from_names(source.path(), &["mazebook.pdf", "hellboyomnibus_vol1.pdf"]);
-    let (header, rows) = run(&opts(source.path(), dest.path()), &c).unwrap();
+    let (header, rows) = planned(&opts(source.path(), dest.path()), &c);
 
     let out = tempdir().unwrap();
     let path = out.path().join("plan.jsonl");
@@ -178,17 +192,17 @@ fn the_plan_it_produces_round_trips() {
 #[test]
 fn defaults_to_move_mode() {
     // D23: cloning a placeholder hydrates it, so move stays the default.
-    let (_g, c) = gcd();
+    let c = gcd();
     let source = tempdir().unwrap();
     let dest = tempdir().unwrap();
     tree_from_names(source.path(), &["mazebook.pdf"]);
-    let (header, _) = run(&opts(source.path(), dest.path()), &c).unwrap();
+    let (header, _) = planned(&opts(source.path(), dest.path()), &c);
     assert_eq!(header.mode, Mode::Move);
 }
 
 #[test]
 fn refuses_an_unknown_preset_and_a_source_that_is_not_a_directory() {
-    let (_g, c) = gcd();
+    let c = gcd();
     let source = tempdir().unwrap();
     let dest = tempdir().unwrap();
 
@@ -205,37 +219,79 @@ fn refuses_an_unknown_preset_and_a_source_that_is_not_a_directory() {
 }
 
 #[test]
-fn an_unresolved_file_is_still_a_row() {
-    // A failed row must reach the plan so the user can see it, rather than
-    // vanishing the way a skipped non-comic does.
-    let (_g, c) = gcd();
+fn a_mapped_file_becomes_a_plan_row_and_an_unmapped_one_does_not() {
+    let c = gcd();
     let source = tempdir().unwrap();
     let dest = tempdir().unwrap();
-    tree_from_names(source.path(), &["totallyunknownthing.pdf"]);
-    let (_h, rows) = run(&opts(source.path(), dest.path()), &c).unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].status, Status::Failed);
+    tree_from_names(source.path(), &["mazebook.pdf", "totallyunknownthing.pdf"]);
+    let outcome = run(&opts(source.path(), dest.path()), &c).unwrap();
+    assert_eq!(outcome.rows.len(), 1);
+    assert_eq!(outcome.rows[0].status, Status::Mapped);
+    assert_eq!(outcome.rows[0].series, "Mazebook");
+    assert_eq!(outcome.unmapped, vec![source.path().canonicalize().unwrap().join("totallyunknownthing.pdf")]);
 }
 
 #[test]
-fn a_row_that_resolved_to_nothing_gets_no_destination() {
-    // The preset emits `_/_.pdf` for an empty series, so every unresolved row
-    // in a run converged onto one path — and the plan showed the user a
-    // destination for a file that resolved to nothing.
-    let (_g, c) = gcd();
+fn a_stem_with_no_key_is_unmapped_not_skipped() {
+    // `key()` is None when nothing alphanumeric survives. Such a file must be
+    // reported, not vanish the way a non-comic does.
+    let c = gcd();
+    let source = tempdir().unwrap();
+    let dest = tempdir().unwrap();
+    tree_from_names(source.path(), &["___.pdf", "(1).pdf", "mazebook.pdf"]);
+    let outcome = run(&opts(source.path(), dest.path()), &c).unwrap();
+    assert_eq!(outcome.rows.len(), 1);
+    let mut names: Vec<_> = outcome
+        .unmapped
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["(1).pdf", "___.pdf"]);
+}
+
+#[test]
+fn unmapped_files_cost_no_bytes_and_get_no_row_id() {
+    // Row ids stay dense and the capacity figures cover only what will move.
+    let c = gcd();
+    let source = tempdir().unwrap();
+    let dest = tempdir().unwrap();
+    sparse_truncate_only(source.path(), "aaa_unknown.pdf", 7 << 30);
+    sparse_truncate_only(source.path(), "mazebook.pdf", 3);
+    let (header, rows) = planned(&opts(source.path(), dest.path()), &c);
+    assert_eq!(header.required_bytes, 3);
+    assert_eq!(rows[0].id, "r00001");
+}
+
+#[test]
+fn an_unmapped_file_gets_no_destination_to_converge_on() {
+    // The preset emits `_/_.pdf` for an empty series. Unmapped files never
+    // reach the preset, so a run of them cannot converge on one path.
+    let c = gcd();
     let source = tempdir().unwrap();
     let dest = tempdir().unwrap();
     tree_from_names(
         source.path(),
         &["totallyunknownthing.pdf", "anotherunknownthing.pdf", "mazebook.pdf"],
     );
-    let (_h, rows) = run(&opts(source.path(), dest.path()), &c).unwrap();
+    let (_h, rows) = planned(&opts(source.path(), dest.path()), &c);
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].destination_preview.starts_with("Mazebook"));
+}
 
-    let unresolved: Vec<_> = rows.iter().filter(|r| r.series.is_empty()).collect();
-    assert_eq!(unresolved.len(), 2);
-    for row in unresolved {
-        assert_eq!(row.destination_preview, Path::new(""), "{:?}", row.source);
-    }
-    let resolved = rows.iter().find(|r| !r.series.is_empty()).unwrap();
-    assert!(resolved.destination_preview.starts_with("Mazebook"));
+#[test]
+fn a_plan_at_the_old_version_is_refused() {
+    let c = gcd();
+    let source = tempdir().unwrap();
+    let dest = tempdir().unwrap();
+    tree_from_names(source.path(), &["mazebook.pdf"]);
+    let (mut header, rows) = planned(&opts(source.path(), dest.path()), &c);
+    header.version = comic_renamer_core::plan::PLAN_VERSION - 1;
+    let out = tempdir().unwrap();
+    let path = out.path().join("plan.jsonl");
+    comic_renamer_core::plan::write(&header, &rows, &path).unwrap();
+    assert!(matches!(
+        comic_renamer_core::plan::read(&path),
+        Err(comic_renamer_core::types::PlanError::UnsupportedVersion { .. })
+    ));
 }

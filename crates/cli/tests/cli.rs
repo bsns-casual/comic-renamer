@@ -1,14 +1,13 @@
 //! The command surface, end to end against the real binary.
 //!
-//! Plans are built here rather than scanned: `scan` needs the corpus, which
-//! means a network fetch, and none of what this file checks is about
-//! resolution. `apply` and `undo` are driven through the binary because the
+//! Plans are built here rather than scanned: `scan` needs a mapping, and
+//! none of what this file checks is about lookup. `apply` and `undo` are driven through the binary because the
 //! disclosure, the prompt and the exit code are the behaviour under test and
 //! none of them exist in the library.
 
 use comic_renamer_core::preset::preset_by_id;
 use comic_renamer_core::types::{
-    Basis, Mechanism, Mode, PlanHeader, PlanRow, Resolved, SourceStat, Status,
+    Mechanism, Mode, PlanHeader, PlanRow, Resolved, SourceStat, Status,
 };
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -54,7 +53,7 @@ fn fixture(mode: Mode) -> Fixture {
         volume: Some(1),
         subtitle: None,
         run: 10,
-        status: Status::Ready(Basis::Unambiguous),
+        status: Status::Mapped,
         record: None,
     };
     let relative = preset_by_id("komga").unwrap().destination(&resolved, "pdf");
@@ -91,7 +90,7 @@ fn write_plan(
         volume: Some(1),
         subtitle: None,
         run: 10,
-        status: Status::Ready(Basis::Unambiguous),
+        status: Status::Mapped,
         record: None,
     };
     let relative = preset_by_id("komga").unwrap().destination(&resolved, "pdf");
@@ -116,7 +115,7 @@ fn write_plan(
     };
 
     let header = PlanHeader {
-        version: 1,
+        version: comic_renamer_core::plan::PLAN_VERSION,
         preset: "komga".into(),
         mode,
         source_root: source_root.to_path_buf(),
@@ -485,8 +484,8 @@ fn a_plan_with_no_ready_row_says_so_and_does_not_exit_zero() {
         format!(
             "{header}\n{}\n",
             row.replace(
-                r#""status":{"ready":"unambiguous"}"#,
-                r#""status":{"review":"no-language-match"}"#
+                r#""status":"mapped""#,
+                r#""status":"unmapped""#
             )
         ),
     )

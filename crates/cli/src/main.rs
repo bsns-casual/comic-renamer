@@ -9,10 +9,9 @@
 //! the record of what happened; the plan is what anchors it.
 
 use clap::{Parser, Subcommand};
-use comic_renamer_core::corpus::{ensure_corpus, parse_manifest, Corpus};
 use comic_renamer_core::fsops::{find_collisions, is_dataless};
+use comic_renamer_core::mapping::Mappings;
 use comic_renamer_core::preset::{preset_by_id, Preset};
-use comic_renamer_core::overrides::Overrides;
 use comic_renamer_core::types::{
     human_bytes as size, Collision, Mechanism, Mode, PlanRow, Progress, ScanOpts, Status,
     UndoReport,
@@ -22,6 +21,14 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+/// The mappings that ship in the binary. Compiled in for the same reason as
+/// the manifest below: nothing the binary needs is read from the working
+/// directory.
+const SHIPPED_MAPPINGS: &str = include_str!("../../../data/mappings/shipped.tsv");
+
+// The corpus and overrides no longer feed `scan`; Task 6 returns them as the
+// suggestion layer behind an optional corpus, so they stay compiled in.
+#[allow(dead_code)]
 /// Pinned at build time (§6.5): the repository holds the manifest, the tool
 /// fetches and hash-verifies the corpus on first use, then caches it.
 const MANIFEST: &str = include_str!("../../../corpus/manifest.json");
@@ -31,6 +38,7 @@ const MANIFEST: &str = include_str!("../../../corpus/manifest.json");
 /// rely on. Layer B is first-party data that CI validates (§6.2.1); a
 /// user-supplied overrides file is Phase 3, when §6.11's caps on contributed
 /// rule data exist to make it safe.
+#[allow(dead_code)]
 const OVERRIDES: &str = include_str!("../../../data/overrides.toml");
 
 /// Enough to act on, not a wall of text. The rest are counted.
@@ -156,17 +164,9 @@ fn run_scan(
     lang: String,
     mode: Mode,
 ) -> Result<(), String> {
-    let manifest = parse_manifest(MANIFEST).map_err(|e| e.to_string())?;
-    let cache = cache_dir()?;
-    eprintln!("corpus: {} series, dump {}", manifest.series_count, manifest.dump_date);
-    let database = ensure_corpus(&manifest, &cache).map_err(|e| e.to_string())?;
-    let corpus = Corpus::open(&database, &manifest).map_err(|e| e.to_string())?;
-
-    // Not optional and not absent: it ships inside the binary. A failure here
-    // means a malformed `data/overrides.toml` was committed, which is a build
-    // to reject rather than a run to degrade.
-    let overrides =
-        Overrides::parse(OVERRIDES).map_err(|e| format!("built-in overrides are unusable: {e}"))?;
+    // shortcut: shipped mappings only; the user's local file arrives with the
+    // `map` command, which also owns where it lives.
+    let mappings = Mappings::load(SHIPPED_MAPPINGS, None).map_err(|e| e.to_string())?;
 
     let opts = ScanOpts {
         source_root: source,
@@ -177,7 +177,7 @@ fn run_scan(
     };
 
     let mut last = 0u64;
-    let (header, rows) = scan::scan(&opts, &corpus, &overrides, &mut |p| {
+    let scan::ScanOutcome { header, rows, unmapped } = scan::scan(&opts, &mappings, &mut |p| {
         if p.total > 0 && (p.done == p.total || p.done >= last + 100) {
             last = p.done;
             eprint!("\rscanning {}/{}", p.done, p.total);
@@ -189,35 +189,33 @@ fn run_scan(
     let destination = out.unwrap_or_else(|| PathBuf::from("comic-renamer-plan.jsonl"));
     plan::write(&header, &rows, &destination).map_err(|e| e.to_string())?;
 
-    summarise(&rows, header.required_bytes, header.download_bytes);
+    summarise(&rows, &unmapped, header.required_bytes, header.download_bytes);
     println!("\nplan written to {}", destination.display());
     println!("Nothing has been moved. Review it, then:");
     println!("  comic-renamer apply {}", destination.display());
     Ok(())
 }
 
-fn summarise(rows: &[PlanRow], required: u64, download: u64) {
-    let mut ready = 0usize;
-    let mut review = 0usize;
-    let mut failed = 0usize;
-    for row in rows {
-        match row.status {
-            Status::Ready(_) | Status::Mapped => ready += 1,
-            Status::Review(_) => review += 1,
-            Status::Failed | Status::Unmapped => failed += 1,
-        }
-    }
+fn summarise(rows: &[PlanRow], unmapped: &[PathBuf], required: u64, download: u64) {
+    let total = rows.len() + unmapped.len();
     let pct = |n: usize| {
-        if rows.is_empty() {
+        if total == 0 {
             0.0
         } else {
-            100.0 * n as f64 / rows.len() as f64
+            100.0 * n as f64 / total as f64
         }
     };
-    println!("\n{} files", rows.len());
-    println!("  ready   {ready:>5}  {:>5.1}%", pct(ready));
-    println!("  review  {review:>5}  {:>5.1}%", pct(review));
-    println!("  failed  {failed:>5}  {:>5.1}%", pct(failed));
+    println!("\n{total} files");
+    println!("  mapped    {:>5}  {:>5.1}%", rows.len(), pct(rows.len()));
+    println!("  unmapped  {:>5}  {:>5.1}%", unmapped.len(), pct(unmapped.len()));
+    // Named, not just counted: an unmapped file is left where it is, and the
+    // user needs to know which ones.
+    for path in unmapped.iter().take(COLLISIONS_SHOWN) {
+        println!("    {}", path.file_name().unwrap_or_default().to_string_lossy());
+    }
+    if unmapped.len() > COLLISIONS_SHOWN {
+        println!("    ...and {} more", unmapped.len() - COLLISIONS_SHOWN);
+    }
     println!("\n  {} logical", size(required));
     if download > 0 {
         println!("  {} would be downloaded first (cloud placeholders)", size(download));
@@ -254,7 +252,7 @@ fn run_apply(
 
     let eligible: Vec<&PlanRow> = rows
         .iter()
-        .filter(|row| matches!(row.status, Status::Ready(_)))
+        .filter(|row| row.status == Status::Mapped)
         .collect();
 
     // Canonical, like `apply`'s: an uncanonicalised root walks a different
@@ -650,6 +648,7 @@ fn plural(n: usize, noun: &str) -> String {
 }
 
 /// `$XDG_CACHE_HOME/comic-renamer`, or `~/Library/Caches/comic-renamer`.
+#[allow(dead_code)] // Task 6: the optional corpus is fetched into it
 fn cache_dir() -> Result<PathBuf, String> {
     if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
         return Ok(PathBuf::from(xdg).join("comic-renamer"));
@@ -663,6 +662,7 @@ fn cache_dir() -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use comic_renamer_core::overrides::Overrides;
 
     const GIB: u64 = 1 << 30;
 

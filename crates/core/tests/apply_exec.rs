@@ -5,24 +5,23 @@
 mod common;
 
 use comic_renamer_core::apply::{apply, undo, undo_path};
-use comic_renamer_core::corpus::Corpus;
-use comic_renamer_core::overrides::Overrides;
+use comic_renamer_core::mapping::Mappings;
 use comic_renamer_core::types::{Mechanism, Mode, ScanOpts};
 use comic_renamer_core::undo::{reverse, UndoWriter};
 
 
 use comic_renamer_core::{plan, scan};
-use common::{corpus, TreeGuard};
+use common::{mappings, TreeGuard};
 use std::io::ErrorKind;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use tempfile::{tempdir, TempDir};
 
-fn gcd() -> (TempDir, Corpus) {
-    corpus(&[
-        ("Mazebook", "mazebook", "Dark Horse", "en", 2021, 5),
-        ("Birdking", "birdking", "Dark Horse", "en", 2022, 3),
-        ("Hellboy Omnibus", "hellboyomnibus", "Dark Horse", "en", 2018, 4),
+fn gcd() -> Mappings {
+    mappings(&[
+        ("mazebook", "Mazebook", None, Some(5)),
+        ("birdking_vol1", "Birdking", Some(1), Some(3)),
+        ("hellboyomnibus_vol1", "Hellboy Omnibus", Some(1), Some(4)),
     ])
 }
 
@@ -36,7 +35,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new(names: &[&str], corpus: &Corpus, mode: Mode) -> Fixture {
+    fn new(names: &[&str], corpus: &Mappings, mode: Mode) -> Fixture {
         let source = tempdir().unwrap();
         let dest = tempdir().unwrap();
         let plans = tempdir().unwrap();
@@ -51,7 +50,8 @@ impl Fixture {
             mode: Some(mode),
             lang: "en".into(),
         };
-        let (header, rows) = scan::scan(&opts, corpus, &Overrides::default(), &mut |_| {}).unwrap();
+        let comic_renamer_core::scan::ScanOutcome { header, rows, .. } =
+            scan::scan(&opts, corpus, &mut |_| {}).unwrap();
         let plan_path = plans.path().join("plan.jsonl");
         plan::write(&header, &rows, &plan_path).unwrap();
         Fixture {
@@ -302,7 +302,7 @@ fn reverse_refuses_a_manifest_whose_roots_disagree_with_the_plan() {
 
 #[test]
 fn a_move_relocates_and_leaves_nothing_behind() {
-    let (_g, c) = gcd();
+    let c = gcd();
     let f = Fixture::new(&["mazebook.pdf"], &c, Mode::Move);
     let r = apply(&f.plan, false, &mut |_| {}).unwrap();
     assert_eq!(r.executed, 1);
@@ -316,7 +316,7 @@ fn a_move_relocates_and_leaves_nothing_behind() {
 
 #[test]
 fn a_copy_keeps_the_original() {
-    let (_g, c) = gcd();
+    let c = gcd();
     let f = Fixture::new(&["mazebook.pdf"], &c, Mode::Copy);
     apply(&f.plan, false, &mut |_| {}).unwrap();
     assert!(f.source.join("mazebook.pdf").exists(), "a copy must keep it");
@@ -327,7 +327,7 @@ fn a_copy_keeps_the_original() {
 fn a_plan_claiming_a_mechanism_the_volume_cannot_give_is_refused() {
     // The pre-flight re-derives the mechanism and never silently falls back.
     // This is also why the streamed path cannot be forced by editing a plan.
-    let (_g, c) = gcd();
+    let c = gcd();
     let f = Fixture::new(&["mazebook.pdf"], &c, Mode::Move);
     f.force_mechanism(Mechanism::Stream);
     let guard = TreeGuard::new(&[f.source.as_path(), f.dest.as_path()]);
@@ -351,7 +351,7 @@ fn a_streamed_move_verifies_before_it_unlinks() {
     let Ok(volume) = std::env::var("COMIC_RENAMER_TEST_VOLUME") else {
         panic!("set COMIC_RENAMER_TEST_VOLUME to a mount on another device");
     };
-    let (_g, c) = gcd();
+    let c = gcd();
 
     let source = tempdir().unwrap();
     std::fs::write(source.path().join("mazebook.pdf"), b"contents of mazebook.pdf").unwrap();
@@ -367,7 +367,8 @@ fn a_streamed_move_verifies_before_it_unlinks() {
         mode: Some(Mode::Move),
         lang: "en".into(),
     };
-    let (header, rows) = scan::scan(&opts, &c, &Overrides::default(), &mut |_| {}).unwrap();
+    let comic_renamer_core::scan::ScanOutcome { header, rows, .. } =
+            scan::scan(&opts, &c, &mut |_| {}).unwrap();
     assert_eq!(rows[0].mechanism, Mechanism::Stream, "not actually cross-volume");
     let plan_path = plans.path().join("plan.jsonl");
     plan::write(&header, &rows, &plan_path).unwrap();
@@ -394,7 +395,7 @@ fn a_streamed_move_verifies_before_it_unlinks() {
 
 #[test]
 fn an_occupied_destination_is_refused_not_overwritten() {
-    let (_g, c) = gcd();
+    let c = gcd();
     let f = Fixture::new(&["mazebook.pdf"], &c, Mode::Move);
     std::fs::create_dir(f.dest.join("Mazebook")).unwrap();
     std::fs::write(f.dest.join("Mazebook/Mazebook.pdf"), b"ALREADY HERE").unwrap();
@@ -415,7 +416,7 @@ fn an_occupied_destination_is_refused_not_overwritten() {
 
 #[test]
 fn scan_apply_undo_restores_the_tree() {
-    let (_g, c) = gcd();
+    let c = gcd();
     let f = Fixture::new(&["mazebook.pdf", "birdking_vol1.pdf"], &c, Mode::Move);
     let before = f.files_under(&f.source);
     apply(&f.plan, false, &mut |_| {}).unwrap();
@@ -428,7 +429,7 @@ fn scan_apply_undo_restores_the_tree() {
 
 #[test]
 fn reverse_of_a_copy_deletes_the_destination_only() {
-    let (_g, c) = gcd();
+    let c = gcd();
     let f = Fixture::new(&["mazebook.pdf"], &c, Mode::Copy);
     apply(&f.plan, false, &mut |_| {}).unwrap();
 
@@ -442,7 +443,7 @@ fn reverse_of_a_copy_deletes_the_destination_only() {
 
 #[test]
 fn reverse_is_idempotent_and_refuses_a_reoccupied_path() {
-    let (_g, c) = gcd();
+    let c = gcd();
     let f = Fixture::new(&["mazebook.pdf"], &c, Mode::Move);
     apply(&f.plan, false, &mut |_| {}).unwrap();
 
@@ -460,7 +461,7 @@ fn reverse_is_idempotent_and_refuses_a_reoccupied_path() {
 
 #[test]
 fn reverse_refuses_to_overwrite_a_squatter() {
-    let (_g, c) = gcd();
+    let c = gcd();
     let f = Fixture::new(&["mazebook.pdf"], &c, Mode::Move);
     apply(&f.plan, false, &mut |_| {}).unwrap();
     std::fs::write(f.source.join("mazebook.pdf"), b"squatter").unwrap();
@@ -479,7 +480,7 @@ fn reverse_refuses_to_overwrite_a_squatter() {
 
 #[test]
 fn a_re_run_cannot_truncate_the_previous_manifest() {
-    let (_g, c) = gcd();
+    let c = gcd();
     let f = Fixture::new(&["mazebook.pdf"], &c, Mode::Move);
     apply(&f.plan, false, &mut |_| {}).unwrap();
     let first = std::fs::read_to_string(f.manifest()).unwrap();
@@ -504,7 +505,7 @@ fn an_interrupted_apply_reverses_the_completed_rows() {
     let Ok(volume) = std::env::var("COMIC_RENAMER_TEST_VOLUME") else {
         panic!("set COMIC_RENAMER_TEST_VOLUME to a mount on another device");
     };
-    let (_g, c) = gcd();
+    let c = gcd();
 
     let source = tempdir().unwrap();
     for name in ["mazebook.pdf", "birdking_vol1.pdf"] {
@@ -522,7 +523,8 @@ fn an_interrupted_apply_reverses_the_completed_rows() {
         mode: Some(Mode::Move),
         lang: "en".into(),
     };
-    let (header, rows) = scan::scan(&opts, &c, &Overrides::default(), &mut |_| {}).unwrap();
+    let comic_renamer_core::scan::ScanOutcome { header, rows, .. } =
+            scan::scan(&opts, &c, &mut |_| {}).unwrap();
     assert_eq!(rows[0].mechanism, Mechanism::Stream, "not actually cross-volume");
     let plan_path = plans.path().join("plan.jsonl");
     plan::write(&header, &rows, &plan_path).unwrap();
@@ -678,7 +680,7 @@ fn reverse_does_not_hang_on_a_fifo_at_a_destination() {
 fn an_unreadable_destination_is_refused_not_mistaken_for_absent() {
     // A2's sibling: openat failed on a file the user cannot read, so the row
     // was refused for the wrong reason. fstatat answers through the parent.
-    let (_g, c) = gcd();
+    let c = gcd();
     let f = Fixture::new(&["mazebook.pdf"], &c, Mode::Move);
     apply(&f.plan, false, &mut |_| {}).unwrap();
     let book = f.dest.join("Mazebook/Mazebook.pdf");
@@ -697,7 +699,7 @@ fn an_unparseable_row_is_reported_not_dropped() {
     // A3. A short row and a mistyped mechanism both `continue`d, so the
     // report said the undo was clean while files stayed in the library —
     // the class the design's own preamble says the last rewrite missed.
-    let (_g, c) = gcd();
+    let c = gcd();
     let f = Fixture::new(&["mazebook.pdf", "birdking_vol1.pdf"], &c, Mode::Move);
     apply(&f.plan, false, &mut |_| {}).unwrap();
 
@@ -734,7 +736,7 @@ fn a_partial_undo_can_be_resumed() {
     // later resolve of a refused row then failed at the parent — which is
     // not a metadata NotFound, so "nothing to do" never applied, `refused`
     // was never empty, and O_EXCL killed the plan forever.
-    let (_g, c) = gcd();
+    let c = gcd();
     let f = Fixture::new(&["mazebook.pdf", "birdking_vol1.pdf"], &c, Mode::Move);
     apply(&f.plan, false, &mut |_| {}).unwrap();
 
@@ -761,7 +763,7 @@ fn an_unterminated_quote_does_not_silently_swallow_the_rest() {
     // after it became part of one open field — and the report called that
     // "one incomplete final record" while three valid rows stayed in the
     // library.
-    let (_g, c) = gcd();
+    let c = gcd();
     let f = Fixture::new(&["mazebook.pdf", "birdking_vol1.pdf"], &c, Mode::Move);
     apply(&f.plan, false, &mut |_| {}).unwrap();
 
@@ -882,7 +884,7 @@ fn a_pending_clone_row_is_refused_rather_than_matched_on_size() {
 fn apply_and_undo_share_one_lock() {
     // Obligation 7's other side. Task 11 required it and two separate lock
     // files silently defeated it; nothing tested that the fix joined them.
-    let (_g, c) = gcd();
+    let c = gcd();
     let f = Fixture::new(&["mazebook.pdf"], &c, Mode::Move);
     apply(&f.plan, false, &mut |_| {}).unwrap();
 

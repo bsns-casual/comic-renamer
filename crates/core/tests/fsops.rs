@@ -14,7 +14,7 @@ use comic_renamer_core::fsops::{
     clone_excl, find_collisions, is_dataless, rename_excl, select_mechanism, stream_verified,
 };
 use comic_renamer_core::preset::komga::Komga;
-use comic_renamer_core::types::{Basis, Mechanism, Mode, PlanRow, SourceStat, Status};
+use comic_renamer_core::types::{Mechanism, Mode, PlanRow, SourceStat, Status};
 use common::{sparse_truncate_only, zero_byte, TreeGuard};
 use std::io::ErrorKind;
 use std::os::unix::fs::MetadataExt;
@@ -54,7 +54,7 @@ fn row(id: &str, series: &str, volume: Option<u32>, run: u32, ino: u64) -> PlanR
         volume,
         subtitle: None,
         run,
-        status: Status::Ready(Basis::Unambiguous),
+        status: Status::Mapped,
         mechanism: Mechanism::Rename,
         source_stat: SourceStat {
             size: 1,

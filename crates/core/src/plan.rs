@@ -5,6 +5,11 @@ use crate::corpus::sha256_hex;
 use crate::types::{PlanError, PlanHeader, PlanRow};
 use std::path::{Component, Path};
 
+/// The plan format this build writes and reads. v2: statuses are
+/// `mapped`/`unmapped`; a v1 plan carries resolver statuses `apply` no longer
+/// understands.
+pub const PLAN_VERSION: u32 = 2;
+
 pub fn write(header: &PlanHeader, rows: &[PlanRow], path: &Path) -> Result<(), PlanError> {
     let stamped = PlanHeader {
         checksum: checksum(header, rows),
@@ -51,6 +56,14 @@ pub fn read_allowing_edits(path: &Path) -> Result<(PlanHeader, Vec<PlanRow>, boo
 
     let header_line = lines.next().ok_or(PlanError::MissingHeader)?;
     let header: PlanHeader = serde_json::from_str(header_line).map_err(parse_error(1))?;
+    // Before any row is parsed: an old row's status would fail with a message
+    // about an unknown variant, which hides the real reason.
+    if header.version != PLAN_VERSION {
+        return Err(PlanError::UnsupportedVersion {
+            found: header.version,
+            expected: PLAN_VERSION,
+        });
+    }
 
     let mut rows: Vec<PlanRow> = Vec::new();
     for (offset, line) in lines.enumerate() {

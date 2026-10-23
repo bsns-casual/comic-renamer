@@ -4,7 +4,7 @@
 use comic_renamer_core::normalize::nfc;
 use comic_renamer_core::preset::komga::{pad, Komga};
 use comic_renamer_core::preset::{preset_by_id, Preset};
-use comic_renamer_core::types::{Basis, Resolved, Status};
+use comic_renamer_core::types::{Resolved, Status};
 use comic_renamer_core::fsops::find_collisions;
 use comic_renamer_core::types::{Mechanism, PlanRow, SourceStat};
 use std::path::PathBuf;
@@ -16,7 +16,7 @@ fn res(series: &str, volume: Option<u32>, run: u32, subtitle: Option<&str>) -> R
         volume,
         subtitle: subtitle.map(str::to_string),
         run,
-        status: Status::Ready(Basis::Unambiguous),
+        status: Status::Mapped,
         record: None,
     }
 }
@@ -195,7 +195,7 @@ fn plan_row(id: &str, series: &str) -> PlanRow {
         volume: None,
         subtitle: None,
         run: 1,
-        status: Status::Ready(Basis::Unambiguous),
+        status: Status::Mapped,
         mechanism: Mechanism::Rename,
         source_stat: SourceStat {
             size: 1,
