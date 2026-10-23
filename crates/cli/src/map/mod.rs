@@ -410,6 +410,10 @@ fn confirmation(
 /// Shows the confirmation, then writes only on a yes. `ask` takes the text and
 /// returns the answer, so "present it, *then* write" is a property a test can
 /// hold rather than an ordering in one function nobody can call.
+///
+/// The contribution offer is the caller's, not this function's: it has a
+/// prompt of its own, and a test of the write path must not need a second
+/// answer on stdin to reach the end of it.
 fn save(
     entries: &[table::Entry],
     local: &Path,
@@ -433,10 +437,6 @@ fn save(
     debug_assert_eq!(done.clashes, clashes, "the confirmation and the write disagree");
     let n = done.written;
     println!("{n} {} saved to {}", if n == 1 { "mapping" } else { "mappings" }, local.display());
-    // The mappings are already saved; a failed offer must not make the run report failure.
-    if let Err(e) = offer_contribution(entries, bundle, lang) {
-        println!("warning: the contribution was not prepared: {e}");
-    }
     Ok(Outcome::Done)
 }
 
@@ -553,7 +553,17 @@ fn session(
         .collect();
     let mut t = table::Table::new(folder.to_string(), entries);
     match table::run(&mut t, preset).map_err(|e| e.to_string())? {
-        table::Action::Done => save(&t.entries, local, folder, lang, preset, ask_on_stdin),
+        table::Action::Done => {
+            let outcome = save(&t.entries, local, folder, lang, preset, ask_on_stdin)?;
+            if let Outcome::Done = outcome {
+                // The mappings are already saved; a failed offer must not make
+                // the run report failure.
+                if let Err(e) = offer_contribution(&t.entries, folder, lang) {
+                    println!("warning: the contribution was not prepared: {e}");
+                }
+            }
+            Ok(outcome)
+        }
         _ => Ok(Outcome::Quit),
     }
 }
