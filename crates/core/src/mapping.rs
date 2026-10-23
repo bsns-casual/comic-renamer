@@ -4,6 +4,7 @@
 //! (`Hack/Slash: Back to School` is a real name) and the preset sanitises them
 //! into path components; this module never treats a field as a path.
 
+use crate::preset::komga::is_invisible;
 use crate::preset::Preset;
 use crate::types::{MappingError, Resolved, Status};
 use unicode_normalization::UnicodeNormalization;
@@ -161,6 +162,11 @@ fn validate_field(field: &'static str, s: &str) -> Result<(), MappingError> {
     if s.chars().any(char::is_control) {
         return Err(invalid(field, "contains a control character"));
     }
+    // Invisible to a reviewer, so rejected rather than sanitised. Same set the
+    // preset strips (U+00AD, U+200B-200F, U+202A-202E, U+2066-2069, U+FEFF).
+    if s.chars().any(is_invisible) {
+        return Err(invalid(field, "contains an invisible character"));
+    }
     if !s.nfc().eq(s.chars()) {
         return Err(invalid(field, "is not NFC-normalised"));
     }
@@ -183,8 +189,8 @@ impl MappingRow {
             return Err(invalid("key", "is not what key() produces from itself"));
         }
         // `sanitize("")` is `_`, which would file the comic under a folder of that name.
-        if self.series.is_empty() {
-            return Err(invalid("series", "is empty"));
+        if self.series.trim().is_empty() {
+            return Err(invalid("series", "is empty or only whitespace"));
         }
         validate_field("series", &self.series)?;
         if let Some(sub) = &self.subtitle {

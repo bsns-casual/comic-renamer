@@ -87,6 +87,26 @@ fn rejects_cyrillic_mixed_with_greek() {
     assert!(row("\u{3053}\u{3093}\u{3068}Latin").validate().is_ok(), "kana + Latin stays allowed");
 }
 
+#[test]
+fn rejects_invisible_characters_in_every_text_field() {
+    for c in ['\u{200B}', '\u{200F}', '\u{FEFF}', '\u{00AD}', '\u{202A}', '\u{202E}', '\u{2066}', '\u{2069}'] {
+        assert!(row(&format!("Hell{c}boy")).validate().is_err(), "U+{:04X} in series", c as u32);
+        let mut r = row("Fine");
+        r.subtitle = Some(format!("a{c}b"));
+        assert!(r.validate().is_err(), "U+{:04X} in subtitle", c as u32);
+        let mut r = row("Fine");
+        r.bundle = format!("a{c}b");
+        assert!(r.validate().is_err(), "U+{:04X} in bundle", c as u32);
+    }
+}
+
+#[test]
+fn rejects_a_whitespace_only_series() {
+    for s in ["   ", " ", "\u{200B}", "\u{00A0}", "\u{3000}"] {
+        assert!(row(s).validate().is_err(), "{s:?} renders as `_`");
+    }
+}
+
 /// Renders the series verbatim in `.0` nested folders. Komga truncates every
 /// component at 255 bytes itself, so only a preset that does not can show the
 /// budget check doing work.
