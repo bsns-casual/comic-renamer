@@ -3,8 +3,10 @@
 use crate::{guesses_for, parse_overrides, OVERRIDES, SHIPPED_MAPPINGS};
 use comic_renamer_core::mapping::Mappings;
 use comic_renamer_core::overrides::Overrides;
+use comic_renamer_core::preset::Preset;
 use comic_renamer_core::types::{Mode, ScanOpts};
 use comic_renamer_core::{plan, scan};
+mod detail;
 mod table;
 
 use std::io::IsTerminal;
@@ -93,10 +95,11 @@ pub fn run(
 ) -> Result<(), String> {
     let folder = source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let overrides = parse_overrides(OVERRIDES)?;
+    let preset_impl = comic_renamer_core::preset::preset_by_id(&preset).ok_or_else(|| format!("unknown preset {preset:?}"))?;
     let opts = ScanOpts { source_root: source, dest_root: dest, preset, mode: Some(mode), lang: lang.clone() };
     let terminals = (std::io::stdout().is_terminal(), std::io::stdin().is_terminal());
     run_with(&opts, plan_path(out), &config_dir()?, terminals, |first| {
-        session(&first.unmapped, &marketplace, &folder, &lang, &overrides)
+        session(&first.unmapped, &marketplace, &folder, &lang, &overrides, preset_impl.as_ref())
     })
 }
 
@@ -140,19 +143,14 @@ fn session(
     folder: &str,
     lang: &str,
     overrides: &Overrides,
+    preset: &dyn Preset,
 ) -> Result<Outcome, String> {
     let entries = guesses_for(unmapped, marketplace, folder, lang, overrides)
         .into_iter()
-        .map(|(stem, found)| table::Entry {
-            stem,
-            guess: found.first().cloned(),
-            candidates: found,
-            final_fields: None,
-            approved: false,
-        })
+        .map(|(stem, found)| table::Entry::new(stem, found))
         .collect();
     let mut t = table::Table::new(folder.to_string(), entries);
-    match table::run(&mut t).map_err(|e| e.to_string())? {
+    match table::run(&mut t, preset).map_err(|e| e.to_string())? {
         table::Action::Done => Ok(Outcome::Done),
         _ => Ok(Outcome::Quit),
     }

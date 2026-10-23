@@ -3,6 +3,7 @@
 //! Nothing here persists anything. The table edits `Entry` values in memory;
 //! writing approved rows to the local mapping file is a separate step.
 
+use comic_renamer_core::preset::Preset;
 use comic_renamer_core::title::ParsedTitle;
 use comic_renamer_core::types::Suggestion;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -13,20 +14,43 @@ use ratatui::Frame;
 
 pub struct Entry {
     pub stem: String,
-    pub guess: Option<Suggestion>,
-    /// Every suggestion the resolver returned, `guess` first. More than one
+    /// Every suggestion the resolver returned, best first. More than one
     /// means the tool has not decided; the detail editor offers them as a menu.
-    pub candidates: Vec<Suggestion>,
+    /// Private so the guess cannot disagree with it: the guess *is* the first.
+    candidates: Vec<Suggestion>,
     /// What the user typed or accepted. `None` until one of those happens.
     pub final_fields: Option<ParsedTitle>,
     pub approved: bool,
 }
 
 impl Entry {
+    pub fn new(stem: String, candidates: Vec<Suggestion>) -> Self {
+        Entry { stem, candidates, final_fields: None, approved: false }
+    }
+
+    pub fn guess(&self) -> Option<&Suggestion> {
+        self.candidates.first()
+    }
+
+    pub fn candidates(&self) -> &[Suggestion] {
+        &self.candidates
+    }
+
+    /// The user's edited fields, approved. Goes through `approve`, so that
+    /// stays the only writer of `approved`. Refuses a blank series: a
+    /// destination with no series folder is not a title.
+    pub fn accept_edit(&mut self, fields: ParsedTitle) -> bool {
+        if fields.series.trim().is_empty() {
+            return false;
+        }
+        self.final_fields = Some(fields);
+        self.approve()
+    }
+
     /// The guess is not safe to accept unread. The discriminator is core's, the
     /// same expression `a_squashed_subtitle_is_identifiable_on_the_suggestion` pins.
     pub fn has_squashed_subtitle(&self) -> bool {
-        self.guess.as_ref().is_some_and(Suggestion::is_unsplit)
+        self.guess().is_some_and(Suggestion::is_unsplit)
     }
 
     pub fn is_ambiguous(&self) -> bool {
@@ -40,7 +64,7 @@ impl Entry {
 
     /// The guess as final fields, when it is safe to take without a human edit.
     fn clean_guess(&self) -> Option<ParsedTitle> {
-        let g = self.guess.as_ref().filter(|_| !self.needs_review())?;
+        let g = self.guess().filter(|_| !self.needs_review())?;
         Some(ParsedTitle { series: g.series.clone(), volume: g.volume, subtitle: g.subtitle.clone() })
     }
 
@@ -70,7 +94,7 @@ pub enum Action {
     Cancel,
 }
 
-fn show(series: &str, volume: Option<u32>, subtitle: Option<&str>) -> String {
+pub(super) fn show(series: &str, volume: Option<u32>, subtitle: Option<&str>) -> String {
     let mut s = series.to_string();
     if let Some(v) = volume {
         s.push_str(&format!(" Volume {v}"));
@@ -131,7 +155,7 @@ impl Table {
         frame.render_widget(format!(" {title}{}{count}", " ".repeat(pad)), head);
 
         let rows = self.entries.iter().map(|e| {
-            let guess = match &e.guess {
+            let guess = match e.guess() {
                 None => "(no guess)".to_string(),
                 Some(g) => {
                     let name = show(&g.series, g.volume, g.subtitle.as_deref());
@@ -163,12 +187,8 @@ impl Table {
     }
 }
 
-// seam: the detail editor (next task) edits `entry.final_fields` and may offer
-// `candidates` as a picker; until then `e` is inert.
-fn open_detail(_entry: &mut Entry, _candidates: &[Suggestion]) {}
-
 /// Runs the table until the user finishes or quits.
-pub fn run(table: &mut Table) -> std::io::Result<Action> {
+pub fn run(table: &mut Table, preset: &dyn Preset) -> std::io::Result<Action> {
     let mut terminal = ratatui::init();
     let result = (|| loop {
         terminal.draw(|f| table.render(f))?;
@@ -179,8 +199,9 @@ pub fn run(table: &mut Table) -> std::io::Result<Action> {
         match table.on_key(key) {
             Action::Continue => {}
             Action::OpenDetail(i) => {
-                let candidates = table.entries[i].candidates.clone();
-                open_detail(&mut table.entries[i], &candidates);
+                if super::detail::run(&mut terminal, &mut table.entries[i], preset)? == Action::Cancel {
+                    return Ok(Action::Cancel);
+                }
             }
             done => return Ok(done),
         }
@@ -207,7 +228,7 @@ mod tests {
     }
 
     fn entry(stem: &str, guess: Option<Suggestion>) -> Entry {
-        Entry { stem: stem.into(), guess, candidates: vec![], final_fields: None, approved: false }
+        Entry::new(stem.into(), guess.into_iter().collect())
     }
 
     fn clean(stem: &str, series: &str) -> Entry {
@@ -221,7 +242,7 @@ mod tests {
     fn ambiguous(stem: &str) -> Entry {
         let a = sug("Witch", Some(1), None, SuggestionSource::Corpus);
         let b = sug("Witcher", Some(1), None, SuggestionSource::Corpus);
-        Entry { guess: Some(a.clone()), candidates: vec![a, b], ..entry(stem, None) }
+        Entry::new(stem.into(), vec![a, b])
     }
 
     #[test]
