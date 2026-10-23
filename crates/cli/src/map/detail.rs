@@ -28,9 +28,12 @@ pub struct Detail {
     field: Option<Field>,
     /// The entry's guess is not safe to accept unread (squashed or ambiguous).
     flagged: bool,
-    /// The user has typed, edited a field or picked a candidate. A flagged
-    /// row's pre-filled value only counts as verified once this is set.
-    touched: bool,
+    /// What the box was filled with. A flagged row is accepted only when the
+    /// fields differ from this, so no key handler can vouch for the pre-fill.
+    prefill: ParsedTitle,
+    /// The fields of the last clean candidate the user moved to. Lets a user
+    /// confirm the top candidate by moving away and back.
+    confirmed: Option<ParsedTitle>,
     /// A field was edited directly. The sentence is then only a view of the
     /// fields: re-parsing it could move content between them (a series with a
     /// colon would split), so typing in the box is ignored until a pick resets.
@@ -46,7 +49,7 @@ enum Field {
 
 impl Detail {
     pub fn from_text(text: &str) -> Detail {
-        Detail { text: text.to_string(), parsed: parse_title(text), candidates: vec![], picked: None, ext: String::new(), field: None, flagged: false, touched: false, structured: false }
+        Detail { text: text.to_string(), parsed: parse_title(text), candidates: vec![], picked: None, ext: String::new(), field: None, flagged: false, prefill: parse_title(""), confirmed: None, structured: false }
     }
 
     /// Starts from what the user already typed, else the top candidate, else
@@ -62,6 +65,7 @@ impl Detail {
         let picked = (!candidates.is_empty()).then_some(0);
         Detail {
             text: show(&parsed.series, parsed.volume, parsed.subtitle.as_deref()),
+            prefill: parsed.clone(),
             parsed,
             picked,
             candidates,
@@ -73,7 +77,6 @@ impl Detail {
 
     fn reparse(&mut self) {
         self.parsed = parse_title(&self.text);
-        self.touched = true;
     }
 
     /// Tab: sentence box, then series, volume, subtitle, then back.
@@ -110,7 +113,6 @@ impl Detail {
             }
         }
         self.text = show(&p.series, p.volume, p.subtitle.as_deref());
-        self.touched = true;
         self.structured = true;
     }
 
@@ -147,9 +149,26 @@ impl Detail {
         self.picked = Some(at);
         self.field = None;
         self.structured = false;
-        self.parsed = as_parsed(&self.candidates[at]);
+        let c = &self.candidates[at];
+        self.parsed = as_parsed(c);
+        self.confirmed = (!c.is_unsplit()).then(|| self.parsed.clone());
         self.text = show(&self.parsed.series, self.parsed.volume, self.parsed.subtitle.as_deref());
-        self.touched = true;
+    }
+
+    /// Whether the fields may be accepted. A flagged row needs fields that
+    /// differ from the pre-fill and are not another garbled candidate, or a
+    /// clean candidate the user moved to.
+    fn acceptable(&self) -> bool {
+        if self.parsed.series.trim().is_empty() {
+            return false;
+        }
+        if !self.flagged {
+            return true;
+        }
+        if self.candidates.iter().any(|c| c.is_unsplit() && as_parsed(c) == self.parsed) {
+            return false;
+        }
+        self.parsed != self.prefill || self.confirmed.as_ref() == Some(&self.parsed)
     }
 
     /// The picked candidate's count pads the volume, but only for that series:
@@ -181,7 +200,7 @@ impl Detail {
         match k.code {
             KeyCode::Char('c') if ctrl => Step::Quit,
             KeyCode::Esc => Step::Back,
-            KeyCode::Enter if !self.parsed.series.trim().is_empty() && (self.touched || !self.flagged) => Step::Accept,
+            KeyCode::Enter if self.acceptable() => Step::Accept,
             KeyCode::Tab => {
                 self.next_field();
                 Step::Editing
@@ -220,7 +239,7 @@ impl Detail {
         frame.render_widget(format!(" {stem}"), head);
         let note = if self.structured && self.field.is_none() {
             "fields were edited directly; edit them with tab, or pick a candidate to start over"
-        } else if self.flagged && !self.touched {
+        } else if self.flagged && !self.acceptable() {
             "this guess needs a change or a pick before it can be accepted"
         } else {
             "type a title, or press tab to edit a field; check the path below"
@@ -613,5 +632,37 @@ mod tests {
         type_str(&mut d, "!");
         d.on_key(key(KeyCode::Up));
         assert_eq!(d.text, "Witch Volume 1!");
+    }
+
+    #[test]
+    fn up_then_enter_on_a_single_candidate_flagged_row_does_not_accept() {
+        let mut d = Detail::for_entry(&squashed_entry());
+        d.on_key(key(KeyCode::Up));
+        d.on_key(key(KeyCode::Down));
+        assert!(matches!(d.on_key(key(KeyCode::Enter)), Step::Editing));
+    }
+
+    #[test]
+    fn picking_another_unsplit_candidate_is_not_verification() {
+        let e = Entry::new(
+            "h".into(),
+            vec![
+                sug("Hellboy Omnibus", Some(1), Some("seedofdestruction"), None),
+                sug("Hellboy Omnibus", Some(2), Some("wakethedevil"), None),
+            ],
+        );
+        let mut d = Detail::for_entry(&e);
+        d.on_key(key(KeyCode::Down));
+        assert!(matches!(d.on_key(key(KeyCode::Enter)), Step::Editing), "a different garbled subtitle is still garbled");
+    }
+
+    #[test]
+    fn confirming_the_top_clean_candidate_takes_a_real_move_there_and_back() {
+        let e = Entry::new("w".into(), vec![sug("Witch", Some(1), None, None), sug("Witcher", Some(1), None, None)]);
+        let mut d = Detail::for_entry(&e);
+        d.on_key(key(KeyCode::Down));
+        d.on_key(key(KeyCode::Up));
+        assert_eq!(d.parsed.series, "Witch");
+        assert!(matches!(d.on_key(key(KeyCode::Enter)), Step::Accept));
     }
 }
