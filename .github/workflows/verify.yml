@@ -89,6 +89,28 @@ jobs:
             cargo xtask check-mappings
           fi
 
+  # Re-downloads the release the `corpus` job already checks, because that job
+  # runs on ubuntu and this code is macOS-only; sharing an artifact between
+  # jobs would cost more YAML than 33.7 MB costs time. The hash is verified,
+  # so a tampered or truncated download fails here rather than in a test.
+  rust-corpus:
+    name: corpus tests against the real release
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download and verify the pinned release
+        run: |
+          set -euo pipefail
+          URL=$(python3 -c 'import json;print(json.load(open("corpus/manifest.json"))["url"])')
+          WANT=$(python3 -c 'import json;print(json.load(open("corpus/manifest.json"))["sha256"])')
+          curl -sfL "$URL" -o "$RUNNER_TEMP/corpus.zip"
+          GOT=$(shasum -a 256 "$RUNNER_TEMP/corpus.zip" | cut -d' ' -f1)
+          test "$WANT" = "$GOT"
+      - name: Corpus tests
+        run: |
+          COMIC_RENAMER_TEST_ZIP="$RUNNER_TEMP/corpus.zip" \
+            cargo test -p comic-renamer-core --test corpus -- --ignored
+
   fixtures:
     name: held-out fixtures well-formed
     runs-on: ubuntu-latest
@@ -107,11 +129,8 @@ jobs:
           head -1 LICENSE | grep -q 'MIT License'
           echo "MIT confirmed"
 
-# Still missing: the held-out coverage measurement (Task 14), which needs
-# xtask's grader. The silent-false-positive rate remains unmeasured by this
-# workflow and must not be claimed by it or anything else.
-#
-# Also not run here: the four corpus tests behind COMIC_RENAMER_TEST_ZIP.
-# They need the 33.7 MB release, which the corpus job above already
-# downloads on ubuntu while the code is macOS-only. Worth wiring when the
-# gate job lands and the download is being paid for anyway.
+# What the `mappings` job guarantees: every mapping file is under 2 MiB, and a
+# pull request adds at most 2,500 rows. Key collisions and per-field
+# validation are ordinary `cargo test` assertions in the `rust` job. There is
+# no coverage or false-positive threshold: nothing is stored without approval
+# (D50), so `cargo xtask measure` reports and exits 0.
