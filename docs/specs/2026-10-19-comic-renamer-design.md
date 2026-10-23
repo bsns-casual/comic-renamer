@@ -953,14 +953,38 @@ that Layer B is the only place a wrong *title* can be corrected — so that
 version shipped anti-goal §4's "a corpus nobody can correct" by construction. It
 needs no interface, just a documented file format and a loader.
 
-**Backlog, with open questions attached.** PDF→CBZ conversion — load-bearing
-rather than cosmetic, because **Kavita files every file with no issue number as
-a "Special"** and the entire corpus has no issue numbers, so Phase 1 can succeed
-into an app that will not shelve its output correctly; open questions are
-double-page spreads, resolution and output size. Signed binaries and
-single-executable packaging (§6.12). Mylar, Calibre and Ampchor presets —
-Ampchor's rules exist and the owner can supply them, but it is in private beta.
-Folder watching.
+**Backlog, with open questions attached.**
+
+**Writing metadata into PDFs, as an option.** Deferred, not needed for Komga,
+and the most promising route to Kavita. `docs/research/2026-10-23-kavita-from-source.md`
+establishes from source that Kavita reads PDF document-information-dictionary
+and XMP keys through `PdfComicInfoExtractor` and patches them over anything
+parsed from the filename — including the custom keys `Series`, `Volume`,
+`TitleSort` and `ISBN`. A `Series` key carries `Hack/Slash` with its slash
+intact, which no filename can, and a `Volume` key fixes the 40% of rows that
+otherwise fragment (below). Open questions: which writer to use without adding
+a heavy dependency; whether writing into a bought file is acceptable by default
+or must be opt-in; whether the original is preserved; whether Komga's
+PDF-has-no-metadata-provider finding (§6.8.1) makes this Kavita-only; and how
+`undo` reverses a metadata write, which the current manifest does not model.
+
+**PDF→CBZ conversion.** *Justification withdrawn 2026-10-23 and needs
+rewriting.* This entry previously read "load-bearing rather than cosmetic,
+because Kavita files every file with no issue number as a Special, and the
+entire corpus has no issue numbers." Read from source, that is true only for
+`LibraryType.Book`: `PdfParser` gates the rule on library type, `IsSpecial` is
+a marker check with no keyword list, and `BasicParser`'s ungated rule never
+receives a PDF. **A PDF in a Comic or Manga library is never auto-Special from
+our output.** The real Kavita blocker is different and larger —
+`ComicSeriesRegex` ends in a catch-all, so a filename with no volume marker
+becomes its own series name, which is 40% of the Humble corpus (890 of 2,223
+rows) landing as one-book series. Conversion may still be worth doing; this
+was not the reason. Open questions remain double-page spreads, resolution and
+output size.
+
+Signed binaries and single-executable packaging (§6.12). Mylar, Calibre and
+Ampchor presets — Ampchor's rules exist and the owner can supply them, but it
+is in private beta. Folder watching.
 
 ---
 
