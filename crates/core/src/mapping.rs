@@ -4,7 +4,7 @@
 //! (`Hack/Slash: Back to School` is a real name) and the preset sanitises them
 //! into path components; this module never treats a field as a path.
 
-use crate::normalize::is_invisible;
+use crate::normalize::{collision_key, is_invisible};
 use crate::preset::Preset;
 use crate::types::{MappingError, Resolved, Status};
 use std::collections::{BTreeSet, HashMap};
@@ -298,7 +298,7 @@ fn load_layer(text: &str, origin: &str) -> Result<Vec<MappingRow>, MappingError>
         let ignored = rows
             .iter()
             .zip(&lines)
-            .filter(|(r, _)| r.key == key && r.bundle == bundle)
+            .filter(|(r, _)| r.key == key && same_bundle(&r.bundle, &bundle))
             .nth(1)
             .map_or(0, |(_, line)| *line);
         return Err(at(
@@ -345,7 +345,7 @@ impl Mappings {
     pub fn lookup(&self, key: &str, bundle: &str) -> Option<&MappingRow> {
         match self.by_key.get(key)?.as_slice() {
             [only] => Some(only),
-            many => many.iter().find(|r| r.bundle == bundle),
+            many => many.iter().find(|r| same_bundle(&r.bundle, bundle)),
         }
     }
 
@@ -358,13 +358,24 @@ impl Mappings {
     }
 }
 
+/// Whether two bundles name one bundle. Invariant 7: `Fanatical/` and
+/// `fanatical/` are one directory on APFS, so the stored capitalisation is
+/// display -- the shipped files hold `Fanatical`, `Global Comix` and
+/// `Sweet Shop` -- and never identity. Compared literally, a folder typed in
+/// the other case loses its tie-break, and two rows for one key differing only
+/// in bundle case read as two bundles and pass `find_key_collisions`, which
+/// exists to catch exactly that disagreement.
+pub fn same_bundle(a: &str, b: &str) -> bool {
+    collision_key(a) == collision_key(b)
+}
+
 /// `(key, bundle)` pairs held by rows that disagree. The same title under the
 /// same key in two bundles is not a collision, and neither is an exact repeat.
 pub fn find_key_collisions(rows: &[MappingRow]) -> Vec<(String, String)> {
-    let mut first: HashMap<(&str, &str), &MappingRow> = HashMap::new();
+    let mut first: HashMap<(&str, String), &MappingRow> = HashMap::new();
     let mut bad = BTreeSet::new();
     for r in rows {
-        let slot = first.entry((&r.key, &r.bundle)).or_insert(r);
+        let slot = first.entry((&r.key, collision_key(&r.bundle))).or_insert(r);
         if *slot != r {
             bad.insert((r.key.clone(), r.bundle.clone()));
         }

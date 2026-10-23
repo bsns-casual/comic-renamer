@@ -154,3 +154,30 @@ fn a_local_row_shadows_its_shipped_siblings() {
     // One local row left for the key, so it answers any bundle, B included.
     assert_eq!(m.lookup("alpha", "b").unwrap().series, "Fixed");
 }
+
+#[test]
+fn a_bundles_case_does_not_make_a_second_bundle() {
+    // One folder, two titles. The gate read these as two legitimate bundles
+    // and passed, and then `lookup` chose between them on the case the user
+    // happened to type.
+    let both = tsv(&[
+        ("alpha", "First", "Fanatical"),
+        ("alpha", "Second", "fanatical"),
+    ]);
+    let msg = Mappings::load(&both, None)
+        .err()
+        .expect("one folder, two titles")
+        .to_string();
+    assert!(msg.contains("alpha"), "{msg}");
+    assert!(msg.contains("line 3"), "and it still points at a line: {msg}");
+
+    // The tie-break folds the same way, so the stored capitalisation stays
+    // display -- the shipped files hold `Fanatical` and `Sweet Shop`.
+    let m = Mappings::load(
+        &tsv(&[("alpha", "A", "Fanatical"), ("alpha", "B", "Sweet Shop")]),
+        None,
+    )
+    .unwrap();
+    assert_eq!(m.lookup("alpha", "fanatical").unwrap().series, "A");
+    assert_eq!(m.lookup("alpha", "SWEET SHOP").unwrap().series, "B");
+}

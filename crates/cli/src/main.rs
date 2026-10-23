@@ -222,10 +222,16 @@ fn run_scan(
     marketplace: String,
     mode: Mode,
 ) -> Result<(), String> {
-    let folder = source
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    // NFC, as `map`'s `bundle_for` and `scan::scan` both do. Only the
+    // publisher hint reads it un-squashed, so this buys a better suggestion
+    // rather than correctness -- but one of three call sites left composed
+    // differently is the drift the folder-name finding punished.
+    let folder = comic_renamer_core::mapping::bundle_name(
+        &source
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    );
     let guess_lang = lang.clone();
     // shortcut: shipped mappings only; the user's local file arrives with the
     // `map` command, which also owns where it lives.

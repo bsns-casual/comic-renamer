@@ -3,6 +3,7 @@
 use crate::{guesses_for, parse_overrides, OVERRIDES};
 use comic_renamer_core::mapping::shipped_mappings;
 use comic_renamer_core::mapping::{key, parse_tsv, to_tsv, MappingRow, Mappings};
+use comic_renamer_core::mapping::same_bundle;
 use comic_renamer_core::normalize::collision_key;
 use comic_renamer_core::title::ParsedTitle;
 use comic_renamer_core::overrides::Overrides;
@@ -127,7 +128,7 @@ fn approved_rows(entries: &[table::Entry], bundle: &str, lang: &str) -> Result<(
         let row = row_for(&e.stem, fields, count, bundle, lang)
             .ok_or_else(|| format!("{:?} has no letters or digits to key a mapping on", e.stem))?;
         row.validate().map_err(|err| format!("{:?}: {err}", e.stem))?;
-        match groups.iter_mut().find(|g| g[0].1.key == row.key && g[0].1.bundle == row.bundle) {
+        match groups.iter_mut().find(|g| g[0].1.key == row.key && same_bundle(&g[0].1.bundle, &row.bundle)) {
             Some(g) => g.push((e.stem.as_str(), row)),
             None => groups.push(vec![(e.stem.as_str(), row)]),
         }
@@ -176,7 +177,7 @@ pub fn commit_session(entries: &[table::Entry], local: &Path, bundle: &str, lang
     };
     let written = fresh.len();
     for row in fresh {
-        match rows.iter_mut().find(|r| r.key == row.key && r.bundle == row.bundle) {
+        match rows.iter_mut().find(|r| r.key == row.key && same_bundle(&r.bundle, &row.bundle)) {
             Some(slot) => *slot = row,
             None => rows.push(row),
         }
@@ -616,6 +617,33 @@ mod tests {
     /// user had just typed, with an error that blamed a filename. HFS+ stored
     /// NFD and those names survive copies, so `Café Comics` is an ordinary
     /// folder on macOS.
+    /// The same folder, typed in a different case. On APFS that is one
+    /// directory, so the second session must correct the row the first wrote
+    /// rather than add a second one -- a pair the loader now refuses, which
+    /// would stop the user's own file from loading at all.
+    #[test]
+    fn retyping_the_folders_case_corrects_the_row_instead_of_adding_one() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let local = dir.path().join("mappings.tsv");
+        commit_session(&[approved("a_vol1", "A", Some(1), None)], &local, "Fanatical", "en").unwrap();
+        let done =
+            commit_session(&[approved("a_vol1", "Corrected", Some(1), None)], &local, "fanatical", "en")
+                .unwrap();
+        assert_eq!(done.written, 1);
+
+        let rows = read_rows(&local);
+        assert_eq!(rows.len(), 1, "one folder is one row, not two: {rows:?}");
+        assert_eq!(rows[0].series, "Corrected");
+        assert!(
+            comic_renamer_core::mapping::Mappings::load(
+                &comic_renamer_core::mapping::shipped_mappings(),
+                Some(&local)
+            )
+            .is_ok(),
+            "and the file the session wrote still loads"
+        );
+    }
+
     #[test]
     fn an_nfd_folder_name_is_normalised_rather_than_refused() {
         let nfd = "Cafe\u{301} Comics";
