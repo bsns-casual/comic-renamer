@@ -26,6 +26,11 @@ pub struct Detail {
     pub ext: String,
     /// `None` is the sentence box; otherwise one field is being edited directly.
     field: Option<Field>,
+    /// The entry's guess is not safe to accept unread (squashed or ambiguous).
+    flagged: bool,
+    /// The user has typed, edited a field or picked a candidate. A flagged
+    /// row's pre-filled value only counts as verified once this is set.
+    touched: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -37,24 +42,34 @@ enum Field {
 
 impl Detail {
     pub fn from_text(text: &str) -> Detail {
-        Detail { text: text.to_string(), parsed: parse_title(text), candidates: vec![], picked: None, ext: String::new(), field: None }
+        Detail { text: text.to_string(), parsed: parse_title(text), candidates: vec![], picked: None, ext: String::new(), field: None, flagged: false, touched: false }
     }
 
     /// Starts from what the user already typed, else the top candidate, else
-    /// an empty box.
+    /// an empty box. Fields come straight from the structure, never through
+    /// the parser: that is for text the user typed.
     fn for_entry(entry: &Entry) -> Detail {
-        let text = match (&entry.final_fields, entry.guess()) {
-            (Some(f), _) => show(&f.series, f.volume, f.subtitle.as_deref()),
-            (None, Some(g)) => show(&g.series, g.volume, g.subtitle.as_deref()),
-            (None, None) => String::new(),
+        let parsed = match (&entry.final_fields, entry.guess()) {
+            (Some(f), _) => f.clone(),
+            (None, Some(g)) => as_parsed(g),
+            (None, None) => parse_title(""),
         };
         let candidates = entry.candidates().to_vec();
         let picked = (!candidates.is_empty()).then_some(0);
-        Detail { picked, candidates, ext: entry.extension.clone(), ..Detail::from_text(&text) }
+        Detail {
+            text: show(&parsed.series, parsed.volume, parsed.subtitle.as_deref()),
+            parsed,
+            picked,
+            candidates,
+            ext: entry.extension.clone(),
+            flagged: entry.needs_review(),
+            ..Detail::from_text("")
+        }
     }
 
     fn reparse(&mut self) {
         self.parsed = parse_title(&self.text);
+        self.touched = true;
     }
 
     /// Tab: sentence box, then series, volume, subtitle, then back.
@@ -91,6 +106,7 @@ impl Detail {
             }
         }
         self.text = show(&p.series, p.volume, p.subtitle.as_deref());
+        self.touched = true;
     }
 
     pub fn on_input(&mut self, c: char) {
@@ -116,9 +132,9 @@ impl Detail {
         let at = (self.picked.unwrap_or(0) as isize + delta).clamp(0, last as isize) as usize;
         self.picked = Some(at);
         self.field = None;
-        let c = &self.candidates[at];
-        self.text = show(&c.series, c.volume, c.subtitle.as_deref());
-        self.reparse();
+        self.parsed = as_parsed(&self.candidates[at]);
+        self.text = show(&self.parsed.series, self.parsed.volume, self.parsed.subtitle.as_deref());
+        self.touched = true;
     }
 
     /// The picked candidate's count pads the volume, but only for that series:
@@ -150,7 +166,7 @@ impl Detail {
         match k.code {
             KeyCode::Char('c') if ctrl => Step::Quit,
             KeyCode::Esc => Step::Back,
-            KeyCode::Enter if !self.parsed.series.trim().is_empty() => Step::Accept,
+            KeyCode::Enter if !self.parsed.series.trim().is_empty() && (self.touched || !self.flagged) => Step::Accept,
             KeyCode::Tab => {
                 self.next_field();
                 Step::Editing
@@ -181,13 +197,18 @@ impl Detail {
             Constraint::Length(2),
             Constraint::Length(3),
             Constraint::Length(5),
-            Constraint::Length(2),
+            Constraint::Length(4),
             Constraint::Min(0),
             Constraint::Length(1),
         ])
         .areas(frame.area());
         frame.render_widget(format!(" {stem}"), head);
-        frame.render_widget("\n type a title, or press tab to edit a field; check the path below", hint);
+        let note = if self.flagged && !self.touched {
+            "this guess needs a change or a pick before it can be accepted"
+        } else {
+            "type a title, or press tab to edit a field; check the path below"
+        };
+        frame.render_widget(format!("\n {note}"), hint);
         let boxed = ratatui::widgets::Block::bordered();
         frame.render_widget(ratatui::widgets::Paragraph::new(format!("{}▏", self.text)).block(boxed), input);
         let p = &self.parsed;
@@ -204,8 +225,10 @@ impl Detail {
             ),
             parsed,
         );
+        // Wrapped: a long path must not clip the extension off the end.
         frame.render_widget(
-            format!("\n files to   {}", self.destination_line(preset, &self.ext)),
+            ratatui::widgets::Paragraph::new(format!("\n files to   {}", self.destination_line(preset, &self.ext)))
+                .wrap(ratatui::widgets::Wrap { trim: false }),
             dest,
         );
         if self.candidates.len() > 1 {
@@ -223,6 +246,10 @@ impl Detail {
             foot,
         );
     }
+}
+
+fn as_parsed(s: &Suggestion) -> ParsedTitle {
+    ParsedTitle { series: s.series.clone(), volume: s.volume, subtitle: s.subtitle.clone() }
 }
 
 enum Step {
@@ -278,7 +305,11 @@ mod tests {
     }
 
     fn screen(d: &Detail, stem: &str) -> String {
-        let mut term = Terminal::new(TestBackend::new(100, 16)).unwrap();
+        screen_at(d, stem, 100)
+    }
+
+    fn screen_at(d: &Detail, stem: &str, width: u16) -> String {
+        let mut term = Terminal::new(TestBackend::new(width, 20)).unwrap();
         term.draw(|f| d.render(f, stem, &Komga)).unwrap();
         let buf = term.backend().buffer();
         (0..buf.area.height)
@@ -475,5 +506,59 @@ mod tests {
         type_str(&mut d, "!");
         assert_eq!(d.text, "A Volume 2!");
         assert!(screen(&d, "x").contains("tab"), "the footer advertises a key that works");
+    }
+
+    fn squashed_entry() -> Entry {
+        Entry::new("x".into(), vec![sug("Hellboy Omnibus", Some(1), Some("seedofdestruction"), None)])
+    }
+
+    #[test]
+    fn a_flagged_row_cannot_be_accepted_unchanged() {
+        let mut d = Detail::for_entry(&squashed_entry());
+        assert!(matches!(d.on_key(key(KeyCode::Enter)), Step::Editing), "the unsplit guess is pre-filled, not verified");
+        d.on_input('!');
+        assert!(matches!(d.on_key(key(KeyCode::Enter)), Step::Accept), "a change is the user saying so");
+    }
+
+    #[test]
+    fn an_explicit_pick_lets_an_ambiguous_row_through() {
+        let e = Entry::new("w".into(), vec![sug("Witch", Some(1), None, None), sug("Witcher", Some(1), None, None)]);
+        let mut d = Detail::for_entry(&e);
+        assert!(matches!(d.on_key(key(KeyCode::Enter)), Step::Editing));
+        d.on_key(key(KeyCode::Down));
+        assert!(matches!(d.on_key(key(KeyCode::Enter)), Step::Accept));
+    }
+
+    #[test]
+    fn a_clean_row_is_accepted_as_it_stands() {
+        let mut d = Detail::for_entry(&Entry::new("c".into(), vec![sug("Fine", Some(1), None, None)]));
+        assert!(matches!(d.on_key(key(KeyCode::Enter)), Step::Accept));
+    }
+
+    #[test]
+    fn a_candidate_is_applied_as_listed_not_re_parsed() {
+        let e = Entry::new(
+            "b".into(),
+            vec![sug("Other", Some(1), None, None), sug("Batman: Year One", Some(2), None, Some(100))],
+        );
+        let mut d = Detail::for_entry(&e);
+        d.pick(1);
+        assert_eq!(d.parsed.series, "Batman: Year One");
+        assert_eq!(d.parsed.subtitle, None);
+        let line = d.destination_line(&Komga, "cbz");
+        assert!(line.contains("Vol. 002"), "volume_count survives the pick: {line}");
+        let first = Detail::for_entry(&Entry::new("b".into(), vec![sug("Batman: Year One", Some(1), None, None)]));
+        assert_eq!(first.parsed.series, "Batman: Year One", "the initial fill is not re-parsed either");
+    }
+
+    #[test]
+    fn the_destination_keeps_its_extension_at_80_columns() {
+        let e = Entry::new(
+            "thecompleteelfquest_vol1".into(),
+            vec![sug("The Complete ElfQuest", Some(1), Some("The Original Quest TPB"), None)],
+        )
+        .with_extension("pdf");
+        let s = screen_at(&Detail::for_entry(&e), &e.stem, 80);
+        assert!(s.contains("TPB.pdf"), "{s}");
     }
 }

@@ -64,7 +64,7 @@ impl Entry {
     }
 
     /// Rows `^A` and a bare Enter must leave for the user.
-    fn needs_review(&self) -> bool {
+    pub(super) fn needs_review(&self) -> bool {
         self.has_squashed_subtitle() || self.is_ambiguous()
     }
 
