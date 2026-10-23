@@ -135,22 +135,21 @@ fn invalid(field: &'static str, reason: impl Into<String>) -> MappingError {
 // look-alike attack §6.11 names; Han/Kana/Hangul/Arabic/Hebrew/Thai mix with
 // Latin legitimately. Widen with a script table if another pair is abused.
 fn mixes_confusable_scripts(s: &str) -> bool {
-    let (mut latin, mut other) = (false, false);
+    let mut seen = [false; 3]; // Latin, Greek, Cyrillic
     for c in s.chars() {
         match c {
             'A'..='Z' | 'a'..='z' | '\u{C0}'..='\u{24F}' | '\u{1E00}'..='\u{1EFF}'
                 if c != '\u{D7}' && c != '\u{F7}' =>
             {
-                latin = true
+                seen[0] = true
             }
-            '\u{370}'..='\u{3FF}' | '\u{1F00}'..='\u{1FFF}' | '\u{400}'..='\u{52F}'
-            | '\u{1C80}'..='\u{1C8F}' | '\u{2DE0}'..='\u{2DFF}' | '\u{A640}'..='\u{A69F}' => {
-                other = true
-            }
+            '\u{370}'..='\u{3FF}' | '\u{1F00}'..='\u{1FFF}' => seen[1] = true,
+            '\u{400}'..='\u{52F}' | '\u{1C80}'..='\u{1C8F}' | '\u{2DE0}'..='\u{2DFF}'
+            | '\u{A640}'..='\u{A69F}' => seen[2] = true,
             _ => {}
         }
     }
-    latin && other
+    seen.iter().filter(|&&b| b).count() > 1
 }
 
 /// Rejects only what the preset's sanitiser cannot repair. `: / \ | " < > ? *`
@@ -172,13 +171,21 @@ fn validate_field(field: &'static str, s: &str) -> Result<(), MappingError> {
         return Err(invalid(field, "is only dots"));
     }
     if mixes_confusable_scripts(s) {
-        return Err(invalid(field, "mixes Latin with Cyrillic or Greek"));
+        return Err(invalid(field, "mixes more than one of Latin, Cyrillic and Greek"));
     }
     Ok(())
 }
 
 impl MappingRow {
     pub fn validate(&self) -> Result<(), MappingError> {
+        // A key `key()` would not produce never matches a stem: a dead row.
+        if key(&self.key).as_deref() != Some(self.key.as_str()) {
+            return Err(invalid("key", "is not what key() produces from itself"));
+        }
+        // `sanitize("")` is `_`, which would file the comic under a folder of that name.
+        if self.series.is_empty() {
+            return Err(invalid("series", "is empty"));
+        }
         validate_field("series", &self.series)?;
         if let Some(sub) = &self.subtitle {
             validate_field("subtitle", sub)?;
@@ -191,6 +198,12 @@ impl MappingRow {
 /// Whether the destination the preset renders from this row fits 255 bytes
 /// per component and 1024 total. Measures the row-controlled part only: CI
 /// cannot know `dest_root`.
+///
+/// Currently unreachable for Komga: `sanitize` truncates every component at
+/// 255 bytes, so a validated row cannot exceed either cap. Keep it anyway
+/// (§7.4): Phase 2 presets have other path shapes (Kavita repeats the series
+/// inside the filename), and the tests exercise it with presets that don't
+/// truncate. Not dead code.
 pub fn rendered_budget_ok(row: &MappingRow, preset: &dyn Preset) -> bool {
     let dest = preset.destination(&row.resolved(), "cbz");
     let parts: Vec<usize> = dest.components().map(|c| c.as_os_str().len()).collect();

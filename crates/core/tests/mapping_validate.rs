@@ -64,6 +64,29 @@ fn validates_subtitle_and_bundle_too() {
     assert!(r.validate().is_err());
 }
 
+#[test]
+fn rejects_an_empty_series() {
+    assert!(row("").validate().is_err(), "sanitize would file it under `_`");
+}
+
+#[test]
+fn rejects_a_key_that_key_would_never_produce() {
+    for bad in ["Hellboy", "hell-boy", "", "hell boy"] {
+        let mut r = row("Hellboy");
+        r.key = bad.into();
+        assert!(r.validate().is_err(), "{bad:?} can never match key(stem)");
+    }
+    let mut r = row("Hellboy");
+    r.key = "hellboy1".into();
+    assert!(r.validate().is_ok());
+}
+
+#[test]
+fn rejects_cyrillic_mixed_with_greek() {
+    assert!(row("\u{0435}\u{03BF}").validate().is_err());
+    assert!(row("\u{3053}\u{3093}\u{3068}Latin").validate().is_ok(), "kana + Latin stays allowed");
+}
+
 /// Renders the series verbatim in `.0` nested folders. Komga truncates every
 /// component at 255 bytes itself, so only a preset that does not can show the
 /// budget check doing work.
