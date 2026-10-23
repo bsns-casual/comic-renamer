@@ -48,6 +48,16 @@ pub struct Suggestion {
     pub source: SuggestionSource,
 }
 
+impl Suggestion {
+    /// A corpus hit that carries a subtitle is raw stem text the resolver could
+    /// not split (`seedofdestruction`, D15): the series is right and the
+    /// subtitle is garbled. The one definition; the picker's guard and the
+    /// resolver's pin both call it.
+    pub fn is_unsplit(&self) -> bool {
+        self.source == SuggestionSource::Corpus && self.subtitle.is_some()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SuggestionSource {
     /// The GCD corpus.

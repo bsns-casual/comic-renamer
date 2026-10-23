@@ -4,7 +4,7 @@
 //! writing approved rows to the local mapping file is a separate step.
 
 use comic_renamer_core::title::ParsedTitle;
-use comic_renamer_core::types::{Suggestion, SuggestionSource};
+use comic_renamer_core::types::Suggestion;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Modifier, Style};
@@ -23,14 +23,10 @@ pub struct Entry {
 }
 
 impl Entry {
-    /// A corpus hit that carries a subtitle is raw stem text the resolver could
-    /// not split (`seedofdestruction`). The series is right and the subtitle is
-    /// garbled, so the guess is not safe to accept unread. Same discriminator
-    /// as `a_squashed_subtitle_is_identifiable_on_the_suggestion`.
+    /// The guess is not safe to accept unread. The discriminator is core's, the
+    /// same expression `a_squashed_subtitle_is_identifiable_on_the_suggestion` pins.
     pub fn has_squashed_subtitle(&self) -> bool {
-        self.guess
-            .as_ref()
-            .is_some_and(|g| g.source == SuggestionSource::Corpus && g.subtitle.is_some())
+        self.guess.as_ref().is_some_and(Suggestion::is_unsplit)
     }
 
     pub fn is_ambiguous(&self) -> bool {
@@ -107,7 +103,7 @@ impl Table {
         match (k.code, k.modifiers.contains(KeyModifiers::CONTROL)) {
             (KeyCode::Char('a'), true) => self.approve_all_remaining(),
             (KeyCode::Char('s'), true) => return Action::Done,
-            (KeyCode::Esc | KeyCode::Char('q'), false) => return Action::Cancel,
+            (KeyCode::Esc | KeyCode::Char('q'), false) | (KeyCode::Char('c'), true) => return Action::Cancel,
             (KeyCode::Up, _) => self.cursor = self.cursor.saturating_sub(1),
             (KeyCode::Down, _) => self.cursor = (self.cursor + 1).min(last),
             (KeyCode::Char('e'), false) if !self.entries.is_empty() => return Action::OpenDetail(self.cursor),
@@ -196,6 +192,7 @@ pub fn run(table: &mut Table) -> std::io::Result<Action> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use comic_renamer_core::types::SuggestionSource;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -387,6 +384,8 @@ mod tests {
         assert_eq!(t.on_key(key(KeyCode::Char('e'))), Action::OpenDetail(1));
         assert_eq!(t.on_key(ctrl('s')), Action::Done);
         assert_eq!(t.on_key(key(KeyCode::Esc)), Action::Cancel);
+        // Raw mode turns ^C into a key event, not a signal.
+        assert_eq!(t.on_key(ctrl('c')), Action::Cancel);
     }
 
     #[test]

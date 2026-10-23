@@ -395,6 +395,8 @@ fn a_squashed_subtitle_is_identifiable_on_the_suggestion() {
     let clean = only(resolve("hellboyomnibusvolume1", NO_FOLDER, &no_hint(), &c, &no_ov(), "en"));
     assert_eq!(squashed.source, SuggestionSource::Corpus);
     assert_eq!(squashed.subtitle.as_deref(), Some("seedofdestruction"));
+    assert!(squashed.is_unsplit());
+    assert!(!clean.is_unsplit());
     assert_eq!(clean.subtitle, None);
 }
 
