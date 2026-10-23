@@ -149,7 +149,10 @@ pub fn commit_session(entries: &[table::Entry], local: &Path, bundle: &str, lang
         if g.iter().all(|(_, r)| *r == g[0].1) {
             fresh.push(g.into_iter().next().unwrap().1);
         } else {
-            clashes.extend(g[1..].iter().map(|(s, _)| (g[0].0.to_string(), s.to_string())));
+            // Only pairs that really differ: files given identical titles did not clash.
+            for (i, (a, ra)) in g.iter().enumerate() {
+                clashes.extend(g[i + 1..].iter().filter(|(_, rb)| rb != ra).map(|(b, _)| (a.to_string(), b.to_string())));
+            }
         }
     }
     if fresh.is_empty() {
@@ -575,6 +578,50 @@ mod tests {
         assert!(e.accept_edit(ParsedTitle { series: "Black Is the Color".into(), volume: Some(1), subtitle: None }));
         commit_session(&[e], &local, "B", "en").unwrap();
         assert_eq!(read_rows(&local)[0].volume_count, Some(128));
+    }
+
+    #[test]
+    fn earlier_corrections_are_kept_and_a_repeat_replaces_its_own_row() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let local = dir.path().join("mappings.tsv");
+        commit_session(&[approved("old_vol1", "Old", Some(1), None)], &local, "B", "en").unwrap();
+        commit_session(
+            &[approved("new_vol1", "New", Some(1), None), approved("old_vol1", "Older", Some(1), None)],
+            &local,
+            "B",
+            "en",
+        )
+        .unwrap();
+        let rows = read_rows(&local);
+        let series: Vec<_> = rows.iter().map(|r| r.series.as_str()).collect();
+        assert_eq!(series, ["Older", "New"]);
+    }
+
+    #[test]
+    fn an_unreadable_existing_file_aborts_rather_than_being_overwritten() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let local = dir.path().join("mappings.tsv");
+        std::fs::write(&local, "not a mapping file").unwrap();
+        assert!(commit_session(&[approved("a", "A", Some(1), None)], &local, "B", "en").is_err());
+        assert_eq!(std::fs::read_to_string(&local).unwrap(), "not a mapping file");
+        assert!(!dir.path().join("mappings.tsv.tmp").exists());
+    }
+
+    #[test]
+    fn only_pairs_that_differ_are_reported_as_clashes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let local = dir.path().join("mappings.tsv");
+        let entries = vec![
+            approved("hellboy-1", "Hellboy", Some(1), None),
+            approved("hellboy_1", "Hellboy", Some(1), None),
+            approved("hellboy1", "Other", Some(1), None),
+        ];
+        let done = commit_session(&entries, &local, "B", "en").unwrap();
+        assert_eq!(done.written, 0);
+        assert_eq!(
+            done.clashes,
+            vec![("hellboy-1".into(), "hellboy1".into()), ("hellboy_1".into(), "hellboy1".into())]
+        );
     }
 
     #[test]
