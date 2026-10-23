@@ -14,9 +14,9 @@ use comic_renamer_core::corpus::{ensure_corpus, parse_manifest, Corpus};
 use comic_renamer_core::mapping::Mappings;
 use comic_renamer_core::overrides::Overrides;
 use comic_renamer_core::preset::{preset_by_id, Preset};
-use comic_renamer_core::resolve::{publisher_hint, suggest_with, Context};
+use comic_renamer_core::resolve::{context_for, suggest_with};
 use comic_renamer_core::types::{
-    human_bytes as size, Collision, Mechanism, Mode, PlanRow, Progress, PublisherHint, ScanOpts,
+    human_bytes as size, Collision, Mechanism, Mode, PlanRow, Progress, ScanOpts,
     Status,
     UndoReport,
 };
@@ -281,12 +281,9 @@ fn guesses_for(
     } else {
         None
     };
-    let ctx = Context {
-        source_folder: folder,
-        hint: corpus.as_ref().map_or(PublisherHint(None), |c| publisher_hint(folder, c)),
-        overrides: Some(overrides),
-        lang,
-    };
+    // §6.3's folder-name wiring lives in core, where a test with a corpus can
+    // hold it: both the Layer B key and the publisher hint come from `folder`.
+    let ctx = context_for(folder, lang, overrides, corpus.as_ref());
     unmapped
         .iter()
         .map(|path| {
@@ -830,6 +827,31 @@ mod tests {
         );
     }
 
+    /// `guesses_for` had no test at all, so the folder name could have stopped
+    /// reaching the resolver entirely. Proven through Layer B, which keys on
+    /// the folder: no corpus is needed, and none is fetched for a marketplace
+    /// that is not Humble.
+    #[test]
+    fn guesses_for_hands_the_source_folder_name_to_the_resolver() {
+        let overrides = Overrides::parse(
+            "[\"TWD_CompendiumOne\"]\nseries = \"The Walking Dead\"\nbundle = \"Image Comics Bundle 2\"\n",
+        )
+        .unwrap();
+        let files = [PathBuf::from("/bundle/TWD_CompendiumOne.pdf")];
+
+        let found = guesses_for(&files, "fanatical", "Humble Image Comics Bundle 2", "en", &overrides);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, "TWD_CompendiumOne");
+        assert_eq!(found[0].1[0].series, "The Walking Dead", "the override fired");
+
+        // The same file from a folder the override does not name: Layer B is
+        // keyed on the folder, so a lost folder name loses the answer.
+        let other = guesses_for(&files, "fanatical", "Some Other Bundle", "en", &overrides);
+        assert_ne!(other[0].1.first().map(|s| s.series.as_str()), Some("The Walking Dead"));
+
+        assert!(guesses_for(&[], "fanatical", "x", "en", &overrides).is_empty());
+    }
+
     #[test]
     fn disclosure_separates_disk_from_download() {
         let mut f = facts(Mode::Move, false);
@@ -936,6 +958,43 @@ mod tests {
         let out = disclose(&some);
         assert!(out.contains("left where they are"), "{out}");
         assert!(!nothing_to_do(&f).is_empty());
+    }
+
+    /// scan → header was proven, and `Facts::gather` was proven with an
+    /// injected count. header → file → disclosure was not: every plan in the
+    /// suite set `unmapped: 0`, so replacing `header.unmapped` with a literal
+    /// zero at the one place `apply` reads it broke nothing.
+    #[test]
+    fn a_plans_unmapped_count_reaches_the_disclosure_through_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("library");
+        std::fs::create_dir(&dest).unwrap();
+        let path = dir.path().join("plan.jsonl");
+        let header = comic_renamer_core::types::PlanHeader {
+            version: comic_renamer_core::plan::PLAN_VERSION,
+            preset: "komga".into(),
+            mode: Mode::Move,
+            source_root: dir.path().join("bundle"),
+            dest_root: dest.clone(),
+            lang: "en".into(),
+            required_bytes: 0,
+            download_bytes: 0,
+            unmapped: 7,
+            checksum: String::new(),
+        };
+        comic_renamer_core::plan::write(&header, &[], &path).unwrap();
+
+        // From the file, as `apply` reads it — a separate invocation from
+        // `scan`, possibly against an old or foreign plan.
+        let (read_back, rows) = comic_renamer_core::plan::read(&path).unwrap();
+        assert_eq!(read_back.unmapped, 7);
+        let preset = preset_by_id(&read_back.preset).unwrap();
+        let mut f = Facts::gather(read_back.mode, &[], &rows, read_back.unmapped, &dest, preset.as_ref(), false)
+            .unwrap();
+        assert_eq!(f.not_ready, 7);
+        assert!(nothing_to_do(&f).contains("Needs a human: 7 rows"));
+        f.files = 2;
+        assert!(disclose(&f).contains("left where they are: 7 of 9 rows"), "{}", disclose(&f));
     }
 
     #[test]

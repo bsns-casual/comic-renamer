@@ -696,6 +696,41 @@ mod tests {
         assert!(plan.exists());
     }
 
+    /// `run_with` scans twice precisely so the plan carries the rows the user
+    /// just approved. Nothing inspected those rows: the stub session above
+    /// writes no mapping file, so `first` and `finished` were identical and
+    /// `plan::write(&first.…)` passed the suite — a plan holding none of the
+    /// user's work, with the whole chain green.
+    ///
+    /// This is also the only test of the round trip itself: approve → commit →
+    /// re-scan → the plan carries it. Every link was tested alone.
+    #[test]
+    fn the_plan_carries_the_rows_the_session_just_approved() {
+        let (_dir, opts, plan, config) = unmapped_bundle();
+        let local = config.join("mappings.tsv");
+        let bundle = bundle_for(&opts.source_root.file_name().unwrap().to_string_lossy()).unwrap();
+        run_with(
+            &opts,
+            plan.clone(),
+            &config,
+            (true, true),
+            |first| {
+                assert_eq!(first.rows.len(), 0, "the file starts unmapped");
+                assert_eq!(first.unmapped.len(), 1);
+                let stem = first.unmapped[0].file_stem().unwrap().to_string_lossy().into_owned();
+                let e = approved(&stem, "Nothing At All", Some(1), None);
+                assert_eq!(commit_session(&[e], &local, &bundle, "en").unwrap().written, 1);
+                Ok(Outcome::Done)
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
+        let (header, rows) = comic_renamer_core::plan::read(&plan).unwrap();
+        assert_eq!(rows.len(), 1, "the approved row is in the plan");
+        assert_eq!(rows[0].series, "Nothing At All");
+        assert_eq!(header.unmapped, 0, "and is no longer counted as unmapped");
+    }
+
     #[test]
     fn no_session_is_opened_without_a_terminal() {
         let (_dir, opts, plan, config) = unmapped_bundle();
@@ -1016,12 +1051,25 @@ mod tests {
         contribution_tsv(&[approved("alpha_vol1", "Alpha", Some(1), None)], "Humble Manga", "en").unwrap()
     }
 
+    /// Re-scoped. It used to feed a clean stem and a clean series and assert
+    /// `!tsv.contains('/')`, which proved nothing and was wrong in general:
+    /// D47 stores `Hack/Slash` verbatim, so that assertion would fail on a
+    /// legitimate row. What it can prove is the opposite pairing — a series
+    /// whose own name holds a slash survives intact, while the row still
+    /// carries nothing from the filesystem. The path-shaped *stem* case is
+    /// `a_path_like_stem_cannot_put_a_path_in_the_contribution` below.
     #[test]
-    fn a_contribution_carries_no_filesystem_path() {
-        let tsv = one_row_tsv();
-        assert!(!tsv.contains('/') && !tsv.contains('\\'), "{tsv}");
+    fn a_slash_in_a_series_is_stored_verbatim_and_is_not_a_path() {
+        let tsv = contribution_tsv(
+            &[approved("hackslash_vol1", "Hack/Slash", Some(1), None)],
+            "Humble Manga",
+            "en",
+        )
+        .unwrap();
+        assert!(tsv.contains("Hack/Slash"), "D47: the real title is stored as published: {tsv}");
+        assert_eq!(tsv.matches('/').count(), 1, "and nothing else carries one: {tsv}");
         if let Ok(home) = std::env::var("HOME") {
-            assert!(!tsv.contains(&home));
+            assert!(!tsv.contains(&home), "{tsv}");
         }
     }
 

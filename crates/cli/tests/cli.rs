@@ -365,6 +365,22 @@ fn the_disclosure_prints_before_the_prompt() {
     assert!(disclosure < prompt, "the prompt came first:\n{out}");
 }
 
+/// The count of files `scan` could not map has no row to carry it, so it rides
+/// in the header — and `apply` is a separate invocation, possibly against an
+/// old plan. Every plan in this file set it to 0, so the one place `apply`
+/// reads it could be replaced by a literal zero with the whole suite green.
+#[test]
+fn the_plans_unmapped_count_is_disclosed_by_the_binary() {
+    let f = fixture(Mode::Move);
+    // Through the real reader and writer, as a user editing a plan would be.
+    let (mut header, rows) = comic_renamer_core::plan::read(&f.plan).unwrap();
+    header.unmapped = 7;
+    comic_renamer_core::plan::write(&header, &rows, &f.plan).unwrap();
+
+    let out = stdout(&run(&["apply", f.plan.to_str().unwrap()], "no\n"));
+    assert!(out.contains("left where they are: 7 of 8 rows"), "{out}");
+}
+
 // ---------------------------------------------------------------------------
 // The round trip
 // ---------------------------------------------------------------------------

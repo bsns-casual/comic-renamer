@@ -34,6 +34,27 @@ pub fn suggest(stem: &str, marketplace: &str, corpus: Option<&Corpus>) -> Vec<Su
     suggest_with(stem, marketplace, corpus, &Context::default())
 }
 
+/// The context for one bundle, built from the source folder's name. §6.3's
+/// folder-name wiring in one place: both the Layer B key and the publisher
+/// hint come from `folder`, and a caller cannot supply one without the other.
+///
+/// It lives here rather than in the CLI so that a test with a corpus can hold
+/// the wiring. Without a corpus there is no hint to derive, which is §6.3's
+/// "the no-publisher case is the common case" and not an error.
+pub fn context_for<'a>(
+    folder: &'a str,
+    lang: &'a str,
+    overrides: &'a Overrides,
+    corpus: Option<&Corpus>,
+) -> Context<'a> {
+    Context {
+        source_folder: folder,
+        hint: corpus.map_or(PublisherHint(None), |c| publisher_hint(folder, c)),
+        overrides: Some(overrides),
+        lang,
+    }
+}
+
 pub fn suggest_with(
     stem: &str,
     marketplace: &str,

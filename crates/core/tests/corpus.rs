@@ -439,10 +439,17 @@ fn the_publisher_hint_does_not_make_titles_worse() {
     assert_eq!(worse, 0, "the hint asserted {worse} wrong titles");
 }
 
-/// Reports located and ready rates over the held-out set. Ignored: needs the
-/// corpus. Task 14 owns the real gate; this is instrumentation, and it claims
-/// no silent-false-positive number — §7 and D26 reserve that for the graded
-/// ground-truth run.
+/// Reports located and ready rates over the held-out set, and fails if
+/// `located` falls off a cliff. Ignored: needs the corpus — but CI's
+/// `rust-corpus` job runs it, and a green job reporting a number nobody checks
+/// is not a test.
+///
+/// The floor is not a gate in §7's sense: the three thresholds dissolved (D50)
+/// and a wrong suggestion now costs the user some typing, not a misfiled file.
+/// It is set well below today's 91.6% so it answers a regression and not noise.
+/// Do not raise it to meet a measurement.
+const LOCATED_FLOOR: f64 = 85.0;
+
 #[test]
 #[ignore]
 fn report_coverage_over_the_heldout_set() {
@@ -497,4 +504,10 @@ fn report_coverage_over_the_heldout_set() {
     for (bucket, count) in &buckets {
         println!("  {bucket:<18} {:>5.1}%  ({count})", pct(*count));
     }
+    assert!(total > 2000, "the held-out fixture did not load: {total} names");
+    assert!(
+        pct(located) >= LOCATED_FLOOR,
+        "located fell to {:.1}%, under the {LOCATED_FLOOR}% floor (91.6% when this was written)",
+        pct(located)
+    );
 }

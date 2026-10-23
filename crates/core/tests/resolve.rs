@@ -177,6 +177,31 @@ fn publisher_hint_breaks_a_tie() {
     assert_eq!(r.volume_count, Some(2));
 }
 
+/// The wiring, not the hint. `uses_the_source_folder_name_as_the_publisher_hint`
+/// was replaced during the rebuild by a test of `Mappings::lookup`'s bundle
+/// tie-break — a different property — and §6.3's folder-name wiring was left
+/// with no end-to-end proof: setting `source_folder: ""` and
+/// `hint: PublisherHint(None)` at the one call site broke nothing.
+#[test]
+fn both_the_layer_b_key_and_the_publisher_hint_come_from_the_folder_name() {
+    let (_d, c) = two_masks();
+    let folder = "HumbleDarkHorseAnniversaryBundle";
+    let ov = no_ov();
+    let ctx = comic_renamer_core::resolve::context_for(folder, "en", &ov, Some(&c));
+    assert_eq!(ctx.source_folder, folder, "Layer B keys on it");
+    assert_eq!(ctx.hint.0.as_deref(), Some("Dark Horse"), "and so does the hint");
+    assert_eq!(ctx.lang, "en");
+
+    // It is the hint that decides here: Dark Horse's record has a run of 2.
+    let r = only(corpus_ladder("maskomnibusvolume1secondedition", &c, &ctx));
+    assert_eq!((r.series.as_str(), r.volume_count), ("The Mask Omnibus", Some(2)));
+
+    // No corpus means no hint to derive, which is §6.3's common case.
+    let bare = comic_renamer_core::resolve::context_for(folder, "en", &ov, None);
+    assert_eq!(bare.hint.0, None);
+    assert_eq!(bare.source_folder, folder);
+}
+
 #[test]
 fn no_publisher_signal_is_the_common_case_not_an_error() {
     // §6.3: a user running against ~/Downloads yields no publisher at all.

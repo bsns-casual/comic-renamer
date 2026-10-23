@@ -18,7 +18,10 @@ fn header() -> PlanHeader {
         lang: "en".into(),
         required_bytes: 4096,
         download_bytes: 0,
-        unmapped: 0,
+        // Non-zero on purpose: with 0 here, `round_trips_every_field` passed
+        // against a `write` that hard-coded the field, and the count is the
+        // only way `apply` learns about files `scan` never planned.
+        unmapped: 3,
         checksum: String::new(),
     }
 }
@@ -95,6 +98,19 @@ fn round_trips_every_field() {
     write(&h, &rows, &path).unwrap();
     h.checksum = checksum(&h, &rows);
     assert_eq!(read(&path).unwrap(), (h, rows));
+}
+
+/// Named separately because it is the one field with no row to carry it: an
+/// unmapped file never becomes a plan row, so a header that lost the count
+/// would leave `apply` unable to say anything about those files at all.
+#[test]
+fn the_unmapped_count_survives_the_file() {
+    let dir = TempDir::new().unwrap();
+    let (h, rows) = sample_plan();
+    assert_ne!(h.unmapped, 0, "a zero here would prove nothing");
+    let path = in_dir(&dir);
+    write(&h, &rows, &path).unwrap();
+    assert_eq!(read(&path).unwrap().0.unmapped, h.unmapped);
 }
 
 #[test]
