@@ -43,6 +43,17 @@ without changing the spec first.**
 7. **Collision comparison is NFC-normalised and case-folded**, never a literal
    path string — `Hellboy/` and `hellboy/` are one directory on APFS and two
    series on a Linux server. Emitted paths are always NFC. (§6.10, D2)
+   **This covers the `bundle` field too**, through `mapping::same_bundle`, and
+   it was broken there until 2026-10-23: every comparison of a bundle was
+   literal, so two rows for one key whose bundles differed only in case passed
+   `find_key_collisions` as two bundles and `lookup` then chose between them on
+   the case the user typed. Five call sites route through `same_bundle` now, and
+   the one that matters least obviously is `commit_session`'s merge — folding
+   the gate without folding that would make a second session on the same folder
+   append a row pair the gate refuses, so the user's own corrections file would
+   stop loading. `xtask seed`'s de-duplication tuple is deliberately still
+   literal: no fixture pair exists to fold, and a generator that produced one
+   now fails at the gate.
 8. **Dataless detection reads `SF_DATALESS`.** Not `st_blocks == 0`, which
    misclassifies legitimate sparse files. (§6.10, D25)
 9. **Evaluation input is distributor bundles only.** Not scene releases, not
@@ -187,7 +198,8 @@ agreed. The other 14.7% are known-bad decompositions, such as
 subtitle "Before the Fall Vol. 9" and no volume. Review them in a `map` session
 before any of this is committed.
 
-**Tests:** `cargo test --workspace` runs 380 and ignores 7 (counted 2026-10-23),
+**Tests:** `cargo test --workspace` runs 406 and ignores 7 (counted 2026-10-23,
+after the rebuild's final review and its fix wave; 380 before them),
 with no compiler warnings. The seven `#[ignore]`d tests need real hardware or the
 real corpus release, and **CI runs all seven**. That claim was false until the
 rebuild's Task 13: the workflow ran the three volume-gated tests, and its own
@@ -349,9 +361,51 @@ disclosure and asserts some command accepts it, and `scan` takes `--move` and
 writes `undo <undo-manifest.csv>`; D38 reversed that and the plan document was
 never updated.
 
+### The rebuild's final review, and what it found
+
+Five adversarial seats read the 44-commit branch, one fix wave closed 16
+findings, and a mutation re-review of that wave established which of its new
+tests can actually fail. Worth knowing before trusting anything below.
+
+**The flagged-row guard was bypassable five different ways**, found one at a
+time across the review rounds: a whitespace-only edit; parser round-trip drift
+via `^R`; a trailing space the preset later strips, making the stored name
+byte-identical to the squashed one; a no-op `pick`; and finally the *ambiguous*
+class, where `acceptable`'s prefill clause was deletable with the whole suite
+green. Each is now pinned by a test that fails when its clause goes. The
+pattern is worth remembering: every one of the five was a guard that compared
+the wrong representation — raw fields where it needed the rendered path, or the
+rendered path where it also needed to know the user had typed something.
+
+**`report_coverage_over_the_heldout_set` had zero assertions and CI ran it.**
+It now holds a floor of 85.0% with a `total > 2000` guard so a fixture that
+fails to load cannot pass vacuously. The floor **has been executed**: 91.6%
+located over 2,717 held-out names, 6.6 points of headroom, and raising the
+floor to 95.0 fails with the real number. It is not a gate in §7's sense. Do
+not raise it to meet a measurement.
+
+**Two findings are pre-existing and were deliberately not fixed here**, in
+`docs/research/2026-10-23-two-pre-existing-data-safety-findings.md`: `undo` can
+delete a library file no run ever placed and report success, and `apply`'s typed
+confirmation gates a plan it re-reads afterwards. `undo.rs` is untouched by the
+rebuild, so both are reachable on `main` today. The first was reproduced and
+executed. See "Pick up here".
+
 ### Pick up here
 
-Two things are open and gate a release. Neither blocks development.
+**0. Two pre-existing data-safety findings.** Read
+`docs/research/2026-10-23-two-pre-existing-data-safety-findings.md`. The first
+is a data-loss path: a hand-written manifest beside a forged plan makes `undo`
+delete a library file no run placed, because both of `reverse_one`'s defences
+read from attacker-supplied data — the destination is recomputed from the plan,
+which invariant 2 already treats as untrusted, and the identity comes from the
+manifest, which arrives by naming convention in the same directory. Fixing it
+changes D38's manifest contract, which is why it waits for the owner rather
+than for a subagent. The second needs no adversary: a second terminal running
+`scan` substitutes a plan under a confirmation already given, because nothing
+holds the lock across the prompt.
+
+Then, two things that gate a release but block no development.
 
 **1. The licence for publishing Humble-derived titles.** `data/LICENSE` ties
 rule data to the Grand Comics Database under CC BY-SA 4.0. The Humble titles came
@@ -364,7 +418,9 @@ does not wait on it; publishing it does. (D51, rebuild §10)
 **2. The Humble table review.** See "What ships" above. The generator's output
 sits in `target/seed/humble.tsv`, and the 14.7% in known-bad decomposition
 classes need correcting by hand before anything is committed. A `map` session is
-the intended tool for it.
+the intended tool for it. **Invariant 7's bundle half matters here**: 158 of the
+table's 2,036 keys appear under more than one bundle, so this is the table where
+a literal bundle comparison would have started costing titles.
 
 Then, in rough priority:
 
