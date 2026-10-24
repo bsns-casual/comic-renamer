@@ -314,7 +314,7 @@ pub enum ApplyError {
     Records(String),
     /// The lock held is some other library's, so this one is not locked at
     /// all. A caller bug, caught before the first row rather than trusted.
-    #[error("the lock held is for {locked}, but this plan writes to {planned}")]
+    #[error("the lock held is for {locked}, but this run writes to {planned}")]
     WrongLibrary { locked: PathBuf, planned: PathBuf },
     #[error("source {0} changed since the scan")]
     SourceChanged(PathBuf),

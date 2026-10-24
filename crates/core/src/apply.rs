@@ -464,11 +464,23 @@ fn placed(
 /// `&Lock` is the obligation, not an input: the caller holds the library lock
 /// for as long as this runs, which is the same lock `apply` runs under.
 pub fn reverse_run(lock: &Lock, record: &Path) -> Result<UndoReport, ApplyError> {
-    let _ = lock;
     // Absent means there is nothing to undo, not an error: never written, or
     // already reversed and deleted. `undo` is run twice more often than once.
     if !record.exists() {
         return Ok(UndoReport::default());
+    }
+    // The lock has to be *this record's* library, for the same reason `apply`
+    // checks it above: a `Lock` for somewhere else leaves this library
+    // unlocked while the type says otherwise, and a reverse mutates a library
+    // exactly as a run does. Both sides are canonical — `apply_inner` resolves
+    // the roots before writing them, and `Lock::library` resolves its own — so
+    // a library reached through a symlink still matches itself.
+    let recorded = crate::undo::summarise(record)?.dest_root;
+    if lock.dest_root != recorded {
+        return Err(ApplyError::WrongLibrary {
+            locked: lock.dest_root.clone(),
+            planned: recorded,
+        });
     }
     let report = crate::undo::reverse(record)?;
 

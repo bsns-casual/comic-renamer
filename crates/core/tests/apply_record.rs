@@ -376,6 +376,38 @@ fn a_lock_for_another_library_is_refused() {
     assert_eq!(run(&mine, &right).unwrap().executed, 1);
 }
 
+/// And the same on the way back. `reverse_run` took `&Lock` and never looked
+/// at it, so the obligation the type carries was a convention on that path:
+/// a reverse of this library could run under a lock for somewhere else, which
+/// is the state the check above exists to refuse.
+///
+/// The other library is a **sibling** of this one, so the comparison has to be
+/// the whole path. Two libraries in separate temporary directories differ in
+/// their parents too, and a check that only compared those would pass.
+#[test]
+fn a_reverse_under_another_librarys_lock_is_refused() {
+    let mine = fixture();
+    let right = Lock::library(&mine.records, &mine.dest_root).unwrap();
+    let record = run(&mine, &right).unwrap().record.unwrap();
+    drop(right);
+
+    let sibling = mine.dir.path().join("library-b");
+    std::fs::create_dir_all(&sibling).unwrap();
+    assert_eq!(sibling.parent(), mine.dest_root.parent(), "not actually siblings");
+    let wrong = Lock::library(&mine.records, &sibling).unwrap();
+    let err = {
+        let _guard = TreeGuard::new(&[&mine.source_root, &mine.dest_root]);
+        reverse_run(&wrong, &record).unwrap_err()
+    };
+    assert!(matches!(err, ApplyError::WrongLibrary { .. }), "{err:?}");
+    assert!(record.exists(), "a refused reverse must not delete the record");
+
+    // And the record's own library reverses it, so the refusal is identity and
+    // not an unreversible fixture.
+    let right = Lock::library(&mine.records, &mine.dest_root).unwrap();
+    assert_eq!(reverse_run(&right, &record).unwrap().restored, 1);
+}
+
 /// The same library reached by another name is the same library: both sides
 /// of the comparison are canonical, so a plan naming a symlink still runs
 /// under a lock taken on the real directory.

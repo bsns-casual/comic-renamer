@@ -514,11 +514,25 @@ fn reverse_one(
                     // reversed by streaming. `rename` fails EXDEV on exactly
                     // the runs where the move was most expensive.
                     Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
-                        // shortcut: stream_verified re-opens the source by
-                        // path, so the intermediate components are resolved
-                        // a second time. Closing that needs an fd-taking
-                        // variant; the destination is re-checked below
-                        // instead, which is the half that could lose data.
+                        // shortcut: `stream_verified` re-opens the library
+                        // file by path, so this row's intermediate components
+                        // are resolved a second time rather than through the
+                        // descriptor `resolve_at` already returned. Closing
+                        // that needs an fd-taking variant.
+                        //
+                        // State the limit exactly, because the unlink below is
+                        // deliberately ungated and this is its whole defence.
+                        // The re-check establishes that the file this unlink
+                        // removes is still the one the row recorded, so the
+                        // *removal* is of the right file. It does not
+                        // establish that the bytes now at the source came from
+                        // that file: a component swapped inside the library
+                        // between `resolve_at` and the open above would have
+                        // the copy read a stranger, and the recorded file
+                        // would still be removed, leaving the source holding
+                        // foreign bytes. That needs a same-user process racing
+                        // a directory swap inside the library during a
+                        // cross-volume undo.
                         let from = dest_root.join(&row.dest_relative);
                         stream_verified(&from, source_root, Path::new(source_name))
                             .map_err(|e| e.to_string())?;
@@ -538,14 +552,14 @@ fn reverse_one(
                         // `remove_with_a_copy_at_the_source`. The copy at the
                         // source is one this run streamed back a moment ago,
                         // not one the record claims was always there, and
-                        // `stream_verified` compared its SHA-256 on the way —
-                        // then the identity above re-checked the destination
-                        // through the held descriptor. Hashing the source
-                        // again would re-read the payload for a comparison
-                        // that has already been made against the same bytes.
-                        // The asymmetry is the point: the gate exists for
-                        // sources a record vouches for, and this one the tool
-                        // wrote itself.
+                        // `stream_verified` compared its SHA-256 against the
+                        // bytes it read. Hashing the source again would
+                        // re-read the payload for a comparison already made
+                        // against those same bytes — see the limit stated
+                        // above for what "those same bytes" does and does not
+                        // cover. The asymmetry is the point: the gate exists
+                        // for sources a record vouches for, and this one the
+                        // tool wrote itself.
                         match entry.remove() {
                             Ok(()) => {
                                 prune_empty_dirs(dest_root, &row.dest_relative)
