@@ -756,6 +756,13 @@ fn confirm(mode: Mode) -> Result<(), String> {
         Mode::Move => "MOVE",
         Mode::Copy => "COPY",
     };
+    // The disclosure is printed by the caller into a buffered stdout, so it
+    // is pushed out *first* and the typeahead discarded *after* — anything
+    // typed from here on was typed by someone looking at the disclosure.
+    // Flushing in the other order leaves the window the discard exists to
+    // close. See `fsops::discard_typeahead`.
+    std::io::stdout().flush().map_err(|e| e.to_string())?;
+    comic_renamer_core::fsops::discard_typeahead();
     print!("  Type {word} to continue: ");
     std::io::stdout().flush().map_err(|e| e.to_string())?;
 
@@ -786,9 +793,20 @@ fn run_undo(run: Option<&str>, list: bool) -> Result<(), String> {
         return list_runs(&records);
     }
     let Some(record) = pick_record(&records, run)? else {
+        // "Nothing to undo" and "a run is writing right now" are different
+        // answers, and the second arrives at exactly the moment someone
+        // changes their mind: 156 of 600 files already moved, and this
+        // printed `0 restored · 0 skipped · 0 refused` and exited 0.
+        if record::any_live(&records).unwrap_or(false) {
+            return Err(
+                "a run is in progress; it holds the library, so wait for it to finish \
+                 and then undo"
+                    .into(),
+            );
+        }
         // Nothing to reverse: never applied, or already reversed. Idempotent,
         // not an error.
-        return print_report(&UndoReport::default());
+        return print_report(&UndoReport::default(), None);
     };
     // The record names its own library. The same lock `apply` runs under, so
     // a record being written by a live run is not reversed under it.
@@ -800,7 +818,13 @@ fn reverse_path(records: &Path, record: &Path) -> Result<(), String> {
     let summary = undo::summarise(record).map_err(|e| e.to_string())?;
     let lock = apply::Lock::library(records, &summary.dest_root).map_err(|e| e.to_string())?;
     let report = apply::reverse_run(&lock, record).map_err(|e| e.to_string())?;
-    print_report(&report)
+    // Where the files went. A record naming a `source_root` of its own
+    // relocates the file it names — D54's accepted residual — but the report
+    // printed counts and no path and `--list` showed only `dest_root`, so
+    // nothing on the system said where. It is the user's own folder, not a
+    // record path, so printing it leaks nothing the record store protects.
+    let into = (report.restored > 0).then_some(summary.source_root.as_path());
+    print_report(&report, into)
 }
 
 fn no_such_run(id: &str) -> String {
@@ -860,10 +884,14 @@ fn list_runs(records: &Path) -> Result<(), String> {
         } else {
             "finished"
         };
+        // Both roots. A run is a direction, and the bundle folder is the
+        // half an undo puts files *back* into — the one a forged record can
+        // choose, and the one nothing on the system named afterwards.
         println!(
-            "{id}  {state}  {} of {} reversible  {}",
+            "{id}  {state}  {} of {} reversible  {} -> {}",
             summary.reversible,
             summary.planned,
+            summary.source_root.display(),
             summary.dest_root.display()
         );
         shown += 1;
@@ -874,13 +902,19 @@ fn list_runs(records: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn print_report(report: &UndoReport) -> Result<(), String> {
+/// `into` is the folder the restored files went back to, when any did. The
+/// counts alone could not say where, which is what made a relocation
+/// untraceable.
+fn print_report(report: &UndoReport, into: Option<&Path>) -> Result<(), String> {
     let UndoReport {
         restored,
         skipped,
         refused,
     } = report;
     println!("{restored} restored · {skipped} skipped · {} refused", refused.len());
+    if let Some(root) = into {
+        println!("  put back into {}", root.display());
+    }
     if refused.is_empty() {
         return Ok(());
     }

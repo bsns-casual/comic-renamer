@@ -1174,6 +1174,87 @@ fn undo_with_no_argument_skips_a_run_that_is_still_going() {
     assert!(newest.exists());
 }
 
+/// The other half of the same filter, and the half that was silent. With a
+/// live run and *nothing else* to reverse, `undo` printed
+/// `0 restored · 0 skipped · 0 refused` and exited 0 — told, with a success
+/// code, that there was nothing to undo at the moment 156 of 600 files had
+/// moved. "Never applied" and "a run is writing right now" are different
+/// answers and only `undo --list` had the second.
+#[test]
+fn undo_says_a_run_is_in_progress_rather_than_that_there_is_nothing_to_do() {
+    let f = fixture(Mode::Move);
+    assert!(run_in(&f, &["apply", f.plan.to_str().unwrap(), "--yes"], "")
+        .status
+        .success());
+    let only = runs_dir(&f).join(record_files(&f).remove(0));
+    // What a live `apply` holds on its own record.
+    let _held = comic_renamer_core::record::hold(&only).unwrap();
+
+    let out = run_in(&f, &["undo"], "");
+    let said = stdout(&out) + &stderr(&out);
+    assert!(!out.status.success(), "a silent success: {said}");
+    assert!(said.contains("a run is in progress"), "{said}");
+    assert!(
+        !said.contains("0 restored"),
+        "the counts say nothing was there to undo: {said}"
+    );
+    // And it is still a report about runs, not about files: no record path.
+    for leak in [".record", "/runs", f.config.to_str().unwrap()] {
+        assert!(!said.contains(leak), "undo names {leak:?}:\n{said}");
+    }
+    assert!(f.placed.exists(), "nothing was touched");
+}
+
+/// Where the files went back to. A record that names a `source_root` of its
+/// own relocates the file it names — D54's accepted residual — but the report
+/// printed counts and no path, `--list` showed only the library, and the
+/// record is deleted when nothing is refused: after the fact nothing on the
+/// system said where.
+#[test]
+fn undo_names_the_folder_it_put_the_files_back_into() {
+    let f = fixture(Mode::Move);
+    assert!(run_in(&f, &["apply", f.plan.to_str().unwrap(), "--yes"], "")
+        .status
+        .success());
+
+    let listed = run_in(&f, &["undo", "--list"], "");
+    assert!(
+        stdout(&listed).contains(f.source.to_str().unwrap()),
+        "--list never said which bundle a run came from: {}",
+        stdout(&listed)
+    );
+
+    let out = run_in(&f, &["undo"], "");
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains(f.source.to_str().unwrap()),
+        "the report named no destination for the restored file: {}",
+        stdout(&out)
+    );
+    assert!(f.source.join("hellboy_vol1.pdf").exists());
+}
+
+/// And it says it only when something moved. A reverse that refused its only
+/// row restored nothing, so naming the bundle folder would claim a file had
+/// gone back into it — which is the opposite of what happened, and the row is
+/// still in the library.
+#[test]
+fn a_reverse_that_restored_nothing_names_no_folder() {
+    let f = fixture(Mode::Move);
+    assert!(run_in(&f, &["apply", f.plan.to_str().unwrap(), "--yes"], "")
+        .status
+        .success());
+    // Something else holds the original name, so the row cannot go back.
+    std::fs::write(f.source.join("hellboy_vol1.pdf"), b"squatter").unwrap();
+
+    let out = run_in(&f, &["undo"], "");
+    assert!(!out.status.success(), "a refused row is not a clean reverse");
+    let said = stdout(&out);
+    assert!(said.contains("0 restored"), "{said}");
+    assert!(!said.contains("put back into"), "{said}");
+    assert!(f.placed.exists(), "the refused row is still in the library");
+}
+
 #[test]
 fn undo_with_no_argument_steps_over_a_record_it_cannot_read() {
     let f = fixture(Mode::Move);

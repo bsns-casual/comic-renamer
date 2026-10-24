@@ -104,8 +104,16 @@ fn first_completed(waiting: &[(PathBuf, Summary)]) -> Option<&(PathBuf, Summary)
 
 /// The screen. Offers the newest record of each kind; older ones stay
 /// reachable through `undo --list`.
-pub fn render(waiting: &[(PathBuf, Summary)], session_run: bool) -> String {
+///
+/// `running` says another run holds a record right now. Such a record is
+/// filtered out of `waiting` — offering to reverse what an `apply` is still
+/// writing is the worse error — so without this line the screen was silent at
+/// the one moment a library is being changed underneath it.
+pub fn render(waiting: &[(PathBuf, Summary)], session_run: bool, running: bool) -> String {
     let mut out = String::from("comic-renamer\n\n");
+    if running {
+        out += "A run is in progress. Nothing here can undo it until it finishes.\n\n";
+    }
     if let Some((_, s)) = first_interrupted(waiting) {
         out += &format!(
             "A run on {} was interrupted ({} of {} rows placed). \
@@ -241,7 +249,8 @@ pub fn run(records: &Path) -> Result<(), String> {
     loop {
         let (waiting, mine) =
             offers(waiting(records).map_err(|e| e.to_string())?, session.as_deref());
-        print!("\n{}", render(&waiting, mine));
+        let running = record::any_live(records).unwrap_or(false);
+        print!("\n{}", render(&waiting, mine, running));
         let choice = ask("choose", None)?;
         let Some(typed) = choice.chars().next() else { continue };
         let Some(key) = dispatch(typed, &waiting) else {
@@ -352,25 +361,42 @@ mod tests {
     #[test]
     fn the_two_offers_are_worded_differently_and_interrupted_comes_first() {
         let w = vec![(p("a"), interrupted(312, 400)), (p("b"), completed(400))];
-        let screen = render(&w, false);
+        let screen = render(&w, false, false);
         assert!(screen.contains("interrupted (312 of 400 rows placed)"), "{screen}");
         assert!(screen.contains("placed 400 files on 2026-10-23"), "{screen}");
         assert!(screen.find("interrupted").unwrap() < screen.find("placed 400").unwrap());
         // The completed offer must never be called a crash, nor the crash a
         // finished run: that is the defect the split exists to prevent.
-        let completed_only = render(&[(p("b"), completed(400))], false);
+        let completed_only = render(&[(p("b"), completed(400))], false, false);
         assert!(!completed_only.contains("interrupted"), "{completed_only}");
         assert!(!completed_only.contains("partly migrated"), "{completed_only}");
-        let interrupted_only = render(&[(p("a"), interrupted(3, 4))], false);
+        let interrupted_only = render(&[(p("a"), interrupted(3, 4))], false, false);
         assert!(!interrupted_only.contains("placed 3 files"), "{interrupted_only}");
         assert!(interrupted_only.contains("r  "));
         assert!(!interrupted_only.contains("u  undo"));
     }
 
+    /// A record a live `apply` is writing is filtered out of `waiting` — and
+    /// rightly, since offering to reverse it is the worse error — so the
+    /// screen said nothing at all at the one moment a library is being
+    /// changed underneath it. Only `undo --list` had the word `running`.
+    #[test]
+    fn the_screen_says_when_a_run_is_in_progress() {
+        let screen = render(&[], false, true);
+        assert!(screen.contains("A run is in progress"), "{screen}");
+        // And it is not said when nothing is running, or it would read as a
+        // permanent notice about the tool rather than about right now.
+        assert!(!render(&[], false, false).contains("in progress"));
+        // Still a report about runs: no record path, same as every other line.
+        for leak in [".record", "/runs"] {
+            assert!(!screen.contains(leak), "{leak}: {screen}");
+        }
+    }
+
     #[test]
     fn item_four_appears_only_with_a_run_from_this_session() {
-        assert!(!render(&[], false).contains("  4  "));
-        assert!(render(&[], true).contains("  4  "));
+        assert!(!render(&[], false, false).contains("  4  "));
+        assert!(render(&[], true, false).contains("  4  "));
     }
 
     #[test]
@@ -381,7 +407,7 @@ mod tests {
             (p(&format!("{store}/.r2.record")), completed(2)),
         ];
         for session in [false, true] {
-            let screen = render(&w, session);
+            let screen = render(&w, session, false);
             for leak in ["Application Support", ".record", "/runs"] {
                 assert!(!screen.contains(leak), "{leak}: {screen}");
             }
@@ -418,9 +444,17 @@ mod tests {
         assert_eq!(dispatch('x', &[]), None);
     }
 
-    /// A real record with `placed` rows done and, when `pending`, one more
-    /// that never finished.
-    fn record_with(dir: &Path, planned: u32, placed: u32, pending: bool) -> PathBuf {
+    /// A real record with `placed` rows done, plus a `tail` row that did not
+    /// finish: `"pending"` for a process that died mid-operation, `"failed"`
+    /// for a row refused at the syscall, `""` for neither.
+    ///
+    /// The two tails are not interchangeable, which is finding 1. These rows
+    /// are renames, and a rename moves the inode, so a `pending` rename is
+    /// still identifiable at the destination and `reversible` counts it; a
+    /// `failed` row created nothing and is the only tail that leaves a record
+    /// with nothing to put back — which is what `apply` writes when the very
+    /// first row is refused.
+    fn record_with(dir: &Path, planned: u32, placed: u32, tail: &str) -> PathBuf {
         let path = dir.join(record::basename(SystemTime::now()));
         let src = dir.join("a.cbz");
         std::fs::write(&src, b"").unwrap();
@@ -436,8 +470,16 @@ mod tests {
             let seq = row(&mut w);
             w.record_done(seq).unwrap();
         }
-        if pending {
-            row(&mut w);
+        match tail {
+            "pending" => {
+                row(&mut w);
+            }
+            "failed" => {
+                let seq = row(&mut w);
+                w.record_failed(seq).unwrap();
+            }
+            "" => {}
+            other => panic!("no such tail {other:?}"),
         }
         path
     }
@@ -445,9 +487,9 @@ mod tests {
     #[test]
     fn a_live_or_empty_record_is_not_offered() {
         let dir = tempfile::tempdir().unwrap();
-        let live = record_with(dir.path(), 2, 1, false);
-        let empty = record_with(dir.path(), 2, 0, true);
-        let good = record_with(dir.path(), 2, 2, false);
+        let live = record_with(dir.path(), 2, 1, "");
+        let empty = record_with(dir.path(), 2, 0, "failed");
+        let good = record_with(dir.path(), 2, 2, "");
         std::fs::write(dir.path().join(record::basename(SystemTime::now())), "not a record").unwrap();
         let _held = record::hold(&live).unwrap();
 
@@ -455,11 +497,30 @@ mod tests {
         assert_eq!(offered, vec![good.clone()], "live={live:?} empty={empty:?}");
     }
 
+    /// Finding 1's consequence at the menu. A run killed inside move mode's
+    /// one-syscall window leaves a single `pending` rename, whose file is in
+    /// the library and whose identity the record carries — so `r` has to be
+    /// drawn for it. The count said 0 and the screen offered nothing at the
+    /// one moment a library is half-migrated.
+    #[test]
+    fn a_run_killed_mid_rename_is_offered_even_though_no_row_finished() {
+        let dir = tempfile::tempdir().unwrap();
+        let crashed = record_with(dir.path(), 2, 0, "pending");
+        let offered = waiting(dir.path()).unwrap();
+        assert_eq!(
+            offered.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(),
+            vec![crashed]
+        );
+        let screen = render(&offered, false, false);
+        assert!(screen.contains("was interrupted (1 of 2 rows placed)"), "{screen}");
+        assert!(matches!(dispatch('r', &offered), Some(Key::Reverse(_))), "{screen}");
+    }
+
     #[test]
     fn waiting_puts_the_interrupted_record_first_even_when_it_is_older() {
         let dir = tempfile::tempdir().unwrap();
-        let crashed = record_with(dir.path(), 3, 1, true);
-        let newer = record_with(dir.path(), 2, 2, false);
+        let crashed = record_with(dir.path(), 3, 1, "pending");
+        let newer = record_with(dir.path(), 2, 2, "");
         let order: Vec<PathBuf> = waiting(dir.path()).unwrap().into_iter().map(|(p, _)| p).collect();
         assert_eq!(order, vec![crashed, newer]);
     }
@@ -572,7 +633,7 @@ mod tests {
         // and `4` is the only way to reach the run.
         let (alone, item_four) = offers(vec![(mine.clone(), completed(2))], Some(&mine));
         assert!(alone.is_empty());
-        let screen = render(&alone, item_four);
+        let screen = render(&alone, item_four, false);
         assert!(!screen.contains("An earlier run"), "{screen}");
         assert!(screen.contains("  4  "), "{screen}");
         assert_eq!(dispatch('k', &alone), None);

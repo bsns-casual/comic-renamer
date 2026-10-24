@@ -32,9 +32,20 @@ pub struct Summary {
     pub dest_root: PathBuf,
     pub preset: String,
     pub planned: u32,
-    /// Rows whose terminal state is `placed` or `done`. A same-volume move is
-    /// a rename, which records `done` and never `placed`, so counting only
-    /// `placed` would read 0 for every run in the default mode.
+    /// Rows the reverse can identify at the destination, which is the only
+    /// thing that makes a row reversible: `Row::expected` is the authority on
+    /// that, and this counts what it answers for.
+    ///
+    /// Derived rather than paralleled, because a second list of statuses
+    /// disagreed with the first. It counted `placed` and `done` and so missed
+    /// `pending` + `rename` — a crash inside move mode's one-syscall window,
+    /// the default mode — which `expected` identifies exactly, since a rename
+    /// moves the inode and the recorded source identity still describes the
+    /// destination. Three gates read this number (`pick_record`,
+    /// `menu::waiting`, and D57's interrupted exception in
+    /// `record::supersede`), so one wrong count meant `undo` said nothing was
+    /// restored, the menu drew no offer, and the next `apply` of the same
+    /// bundle deleted the record — while `undo <run-id>` put the file back.
     pub reversible: u32,
     /// This record does not account for everything its run planned, so the
     /// library it names may be inconsistent right now. `done` is the only
@@ -277,11 +288,9 @@ pub fn summarise(manifest: &Path) -> Result<Summary, UndoError> {
             meta.created().or_else(|_| meta.modified())?
         }
     };
-    let reversible = m
-        .rows
-        .iter()
-        .filter(|r| matches!(r.status, Status::Placed | Status::Done))
-        .count() as u32;
+    // From `expected()`, not from a list of statuses beside it: see
+    // `Summary::reversible`.
+    let reversible = m.rows.iter().filter(|r| r.expected().is_some()).count() as u32;
     // `interrupted` means "this record does not account for everything it
     // planned", which is not the same as "some row is `pending`". `apply`
     // abandons the run on the first row that fails, and that row is written

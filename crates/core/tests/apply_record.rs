@@ -244,6 +244,136 @@ fn a_second_real_run_supersedes_the_first_and_says_so() {
     );
 }
 
+/// A row whose source is gone by its turn says so, and names which row.
+///
+/// Two concurrent runs on one library under two `XDG_CONFIG_HOME`s are not
+/// serialised — the lock lives in the record store, so two stores give one
+/// library two locks and both runs proceed. `RENAME_EXCL` kept the library
+/// consistent and nothing was lost, but the loser's refusal was
+/// `applying 0/600error: No such file or directory (os error 2)`: no row, no
+/// path, and nothing saying another run had taken the file.
+///
+/// `progress` is the interposition point `apply` already has — it is called
+/// with this row's index immediately before the row runs — so the window is
+/// entered deterministically rather than raced. Two rows over one file cannot
+/// reach it: `find_collisions` groups them by inode and refuses both.
+#[test]
+fn a_row_whose_source_vanished_names_the_row_and_the_file() {
+    let f = fixture();
+    let source = f.rows[0].source.clone();
+    let id = f.rows[0].id.clone();
+    let lock = Lock::library(&f.records, &f.dest_root).unwrap();
+
+    let err = apply(&lock, &f.header, &f.rows, &f.records, false, &mut |p| {
+        // Past the pre-flight, before the row: exactly where the other run's
+        // rename lands.
+        if p.total > 0 && p.done == 0 {
+            std::fs::remove_file(&source).unwrap();
+        }
+    })
+    .unwrap_err();
+
+    match &err {
+        ApplyError::SourceGone(row, path) => {
+            assert_eq!(row, &id);
+            assert_eq!(path, &source);
+        }
+        other => panic!("a bare errno naming nothing: {other}"),
+    }
+}
+
+/// And a `NotFound` that is *not* the source keeps its own message: this one
+/// would send the user looking for a file that is sitting right there.
+#[test]
+fn a_not_found_that_is_not_the_source_is_not_blamed_on_the_source() {
+    let f = fixture();
+    let dest_root = f.dest_root.clone();
+    let lock = Lock::library(&f.records, &f.dest_root).unwrap();
+
+    let err = apply(&lock, &f.header, &f.rows, &f.records, false, &mut |p| {
+        // The library itself, taken out from under the row. `ensure_parent`
+        // opens `dest_root` with `O_DIRECTORY` and gets the same `ENOENT` a
+        // missing source produces.
+        if p.total > 0 && p.done == 0 {
+            std::fs::remove_dir_all(&dest_root).unwrap();
+        }
+    })
+    .unwrap_err();
+
+    assert!(
+        !matches!(err, ApplyError::SourceGone(..)),
+        "a missing library was reported as a missing source: {err}"
+    );
+    assert!(
+        f.source_root.join("mazebook.pdf").exists(),
+        "the source this refusal did not name is still there"
+    );
+}
+
+/// A sweep that fails must not take the run with it.
+///
+/// `supersede` runs after every row has executed, and the caller prints
+/// `N placed` from the result — so returning `Err` from here threw away the
+/// only statement of how many files had moved. Measured by removing the record
+/// store mid-run: all 600 rows landed (the record's descriptor still pointed
+/// at an unlinked inode, so every write kept succeeding), and the one line of
+/// output was "the record store is unusable".
+///
+/// The flag is the deterministic version of that window: `UF_IMMUTABLE`
+/// refuses the `unlink` with `EPERM` while leaving the directory writable and
+/// the file readable, so the run reaches the sweep exactly as it did and the
+/// sweep is the only thing that fails.
+#[test]
+fn a_sweep_that_cannot_delete_still_reports_what_the_run_placed() {
+    let f = two_plans_one_root_pair();
+    let lock = Lock::library(&f.records, &f.dest_root).unwrap();
+    let a = apply(&lock, &f.header_a, &f.rows_a, &f.records, false, &mut |_| {})
+        .unwrap()
+        .record
+        .unwrap();
+    let _sealed = Immutable::set(&a);
+
+    let mut said: Vec<String> = Vec::new();
+    let b = apply(&lock, &f.header_b, &f.rows_b, &f.records, false, &mut |p| {
+        if p.total == 0 {
+            said.push(p.current.clone());
+        }
+    })
+    .expect("a failed sweep discarded a run that had placed every row");
+
+    assert_eq!(b.executed, 1, "the row did run: {b:?}");
+    assert!(b.record.is_some(), "and it was recorded");
+    assert!(
+        said.iter().any(|m| m.contains("could not be tidied")),
+        "the sweep failed in silence: {said:?}"
+    );
+    assert!(a.exists(), "the record that could not be deleted is still there");
+}
+
+/// Clears `UF_IMMUTABLE` on drop, so a panicking assertion cannot leave a file
+/// the `TempDir` is then unable to remove.
+struct Immutable(PathBuf);
+
+impl Immutable {
+    fn set(path: &Path) -> Immutable {
+        Immutable::chflags(path, libc::UF_IMMUTABLE);
+        Immutable(path.to_path_buf())
+    }
+
+    fn chflags(path: &Path, flags: libc::c_uint) {
+        let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a valid NUL-terminated path for the call.
+        let rc = unsafe { libc::chflags(name.as_ptr(), flags) };
+        assert_eq!(rc, 0, "chflags {flags:#x} on {}", path.display());
+    }
+}
+
+impl Drop for Immutable {
+    fn drop(&mut self) {
+        Immutable::chflags(&self.0, 0);
+    }
+}
+
 /// A record for another library is not this run's to delete, whatever order
 /// the two runs happened in.
 #[test]
@@ -433,6 +563,78 @@ fn two_libraries_in_one_store_do_not_block_each_other() {
     let theirs = fixture();
     let _held = Lock::library(&mine.records, &mine.dest_root).unwrap();
     Lock::library(&mine.records, &theirs.dest_root).expect("a different library was blocked");
+}
+
+/// The lock file on disk and the library the lock reports are one answer.
+///
+/// `Lock::library` used to canonicalise `dest_root` twice — once inside
+/// `lock_name` to choose the file, once for the field `apply` then compares
+/// against the plan. Nothing checked that the two agreed, so a root whose
+/// resolution changed in between locked one library while naming another and
+/// returned `Ok`: the library actually written was unlocked for the whole run.
+/// Measured at 65 of 300 attempts against a symlink being repointed.
+///
+/// A race cannot be made deterministic, so this asserts the invariant on every
+/// attempt instead of waiting for one to land. Correct code cannot fail it at
+/// any iteration count; the two-resolution version fails as soon as the flip
+/// lands between the two calls.
+#[test]
+fn the_lock_file_is_always_the_one_for_the_library_the_lock_names() {
+    let dir = tempdir().unwrap();
+    let records = dir.path().join("runs");
+    std::fs::create_dir_all(&records).unwrap();
+    let (a, b) = (dir.path().join("lib-a"), dir.path().join("lib-b"));
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    // The root a run is given: a symlink, which is how a `current`-style
+    // library root behaves when something repoints it.
+    let root = dir.path().join("current");
+    std::os::unix::fs::symlink(&a, &root).unwrap();
+
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flipper = {
+        let (stop, dir, a, b) = (stop.clone(), dir.path().to_path_buf(), a.clone(), b.clone());
+        std::thread::spawn(move || {
+            let mut to_b = true;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                // `rename` over a symlink is atomic, so the root always
+                // resolves to one library or the other, never to nothing.
+                let next = dir.join("next");
+                let _ = std::fs::remove_file(&next);
+                let target = if to_b { &b } else { &a };
+                if std::os::unix::fs::symlink(target, &next).is_ok() {
+                    let _ = std::fs::rename(&next, dir.join("current"));
+                }
+                to_b = !to_b;
+            }
+        })
+    };
+
+    let mut taken = 0;
+    for _ in 0..4_000 {
+        // Clear the store so the file that appears is this attempt's own.
+        for entry in std::fs::read_dir(&records).unwrap() {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+        let Ok(lock) = Lock::library(&records, &root) else {
+            continue;
+        };
+        taken += 1;
+        let want = comic_renamer_core::record::lock_name_of(lock.dest_root());
+        let got: Vec<String> = std::fs::read_dir(&records)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            got,
+            vec![want],
+            "the lock names {} but that is not the file it locked",
+            lock.dest_root().display()
+        );
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    flipper.join().unwrap();
+    assert!(taken > 0, "no lock was ever acquired, so nothing was checked");
 }
 
 #[test]

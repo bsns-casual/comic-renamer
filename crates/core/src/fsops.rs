@@ -521,6 +521,22 @@ pub fn flock_nb(file: &std::fs::File) -> io::Result<bool> {
     }
 }
 
+/// Discards anything typed at the terminal before now.
+///
+/// A typed confirmation that can be answered before its disclosure has
+/// printed is not a confirmation of what the disclosure said. One paste of
+/// `3\n<plan>\nMOVE\n` into the startup menu moved five files, with the mode
+/// block and the prompt both appearing *after* the consent had been supplied.
+///
+/// Terminals only, and that is the whole scope: on a pipe there is no
+/// typeahead, and `tcflush` answers `ENOTTY`, which is not a failure of
+/// anything — a piped `MOVE` is the caller's answer to a prompt it cannot see
+/// in any order, and `--yes` is the supported way to give it.
+pub fn discard_typeahead() {
+    // SAFETY: a plain call naming this process's own stdin descriptor.
+    unsafe { libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH) };
+}
+
 /// A temp file this code created, unlinked on drop unless it was renamed away.
 ///
 /// Everything goes through the parent descriptor. An earlier version derived

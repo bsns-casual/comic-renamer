@@ -194,7 +194,11 @@ fn apply_inner(
                 record.as_mut().expect("just created")
             }
         };
-        execute(row, &header, preset.as_ref(), &mut open.writer, progress)?;
+        // Named here rather than inside `execute`, because the first thing
+        // that notices a vanished source is `record_pending`'s own `stat` —
+        // before the operation this was wrapped around.
+        execute(row, &header, preset.as_ref(), &mut open.writer, progress)
+            .map_err(|e| named_if_source_gone(row, e))?;
         executed += 1;
     }
     progress(Progress {
@@ -212,22 +216,44 @@ fn apply_inner(
     // something other than check-then-act on exactly that file.
     let written = match &record {
         Some(open) => {
-            let swept = crate::record::supersede(
+            match crate::record::supersede(
                 records,
                 &open.path,
                 &header.source_root,
                 &header.dest_root,
-            )
-            .map_err(|e| ApplyError::Records(format!("{}: {e}", records.display())))?;
-            // Said, not discarded. A re-import takes the earlier run's only
-            // way back, and the user would otherwise learn that by running
-            // `undo` and being told there was nothing to do.
-            if swept > 0 {
-                progress(Progress {
+            ) {
+                // Said, not discarded. A re-import takes the earlier run's
+                // only way back, and the user would otherwise learn that by
+                // running `undo` and being told there was nothing to do.
+                Ok(swept) if swept > 0 => progress(Progress {
                     done: 0,
                     total: 0,
-                    current: format!("{swept} earlier run(s) of this bundle can no longer be undone"),
-                });
+                    current: format!(
+                        "{swept} earlier run(s) of this bundle can no longer be undone"
+                    ),
+                }),
+                Ok(_) => {}
+                // Also said, and for the same reason, but it must not throw
+                // the run away with it. Every row has already executed by
+                // here, and the caller prints `N placed` from the result — so
+                // returning `Err` meant a run that moved all 600 files never
+                // told anyone it had. Removing the record store mid-run did
+                // exactly that: the record's descriptor still pointed at an
+                // unlinked inode, every row landed, and the only output was
+                // "the record store is unusable".
+                //
+                // What is lost is tidying. Earlier records that survive the
+                // sweep cost an extra offer, not data — and they are the
+                // *older* runs' records, which is the safe direction.
+                Err(e) => progress(Progress {
+                    done: 0,
+                    total: 0,
+                    current: format!(
+                        "the record store could not be tidied ({}: {e}); this run may not \
+                         be reversible — `comic-renamer undo --list` shows what is there",
+                        records.display()
+                    ),
+                }),
             }
             Some(open.path.clone())
         }
@@ -358,6 +384,27 @@ fn execute(
 
     undo.record_done(seq)?;
     Ok(())
+}
+
+/// Names a row whose source vanished between the pre-flight and its turn.
+///
+/// The source is the one thing that can be missing here without a caller bug,
+/// so it is *looked at* rather than assumed: a `NotFound` from somewhere else
+/// in the row — a series directory someone removed after `ensure_parent` made
+/// it — must not be reported as the source being gone. This runs only after a
+/// failure, and only reads, so it is a diagnostic and not a check before an
+/// action.
+fn named_if_source_gone(row: &PlanRow, e: ApplyError) -> ApplyError {
+    if !matches!(&e, ApplyError::Io(io) if io.kind() == std::io::ErrorKind::NotFound) {
+        return e;
+    }
+    let gone = std::fs::symlink_metadata(&row.source)
+        .err()
+        .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+    if gone {
+        return ApplyError::SourceGone(row.id.clone(), row.source.clone());
+    }
+    e
 }
 
 fn perform(
@@ -497,8 +544,13 @@ pub fn reverse_run(lock: &Lock, record: &Path) -> Result<UndoReport, ApplyError>
     // outlives its reverse is the one the next `undo` picks up, and it would
     // restore nothing every time while saying so in a report nobody reads as
     // a problem.
+    //
+    // A record that is already gone is the end state this wanted, so it is not
+    // a failure: `menu::decline` deletes records without the lock, and a
+    // reverse that restored every file used to exit non-zero with
+    // `No such file or directory` if the record went first.
     if report.refused.is_empty() {
-        std::fs::remove_file(record)?;
+        crate::record::forget(record)?;
     }
     Ok(report)
 }
@@ -741,10 +793,18 @@ impl Lock {
     pub fn library(records: &Path, dest_root: &Path) -> Result<Lock, ApplyError> {
         let fail = |e: std::io::Error| ApplyError::Records(format!("{}: {e}", records.display()));
         crate::fsops::ensure_root(records).map_err(fail)?;
-        // Canonicalises `dest_root` and hashes it, so every spelling of one
-        // library is one lock and a long or odd root is still one filename.
-        let name = crate::record::lock_name(dest_root)
-            .map_err(|e| ApplyError::Records(format!("{}: {e}", dest_root.display())))?;
+        // **One** resolution, and both the lock's filename and the root this
+        // reports are taken from it. Two calls — one inside `lock_name`, one
+        // for the field — let a root whose resolution changed in between lock
+        // one library and name another: 65 of 300 attempts against a
+        // repointed symlink ran to completion holding the *other* library's
+        // lock, so the library actually written was unlocked throughout while
+        // `apply_inner`'s identity check, which compares only the field, saw
+        // nothing wrong.
+        let canonical = canonical_dir(dest_root)?;
+        // Hashed, so every spelling of one library is one lock and a long or
+        // odd root is still one filename.
+        let name = crate::record::lock_name_of(&canonical);
         let file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -758,7 +818,14 @@ impl Lock {
         }
         Ok(Lock {
             _file: file,
-            dest_root: canonical_dir(dest_root)?,
+            dest_root: canonical,
         })
+    }
+
+    /// The library this lock is for, canonical. `apply` and `reverse_run`
+    /// compare it against the root they are about to write; a test needs it to
+    /// check that the lock *file* on disk is the one for this root.
+    pub fn dest_root(&self) -> &Path {
+        &self.dest_root
     }
 }

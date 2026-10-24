@@ -103,6 +103,58 @@ fn a_move_run_is_reversible_even_though_no_row_is_placed() {
     assert!(!text.contains(",placed,"), "and it really has no placed row");
 }
 
+/// The same trap one step earlier, and the one that mattered. A crash inside
+/// move mode's single-syscall window leaves a bare `pending` `rename` row —
+/// and `expected()` identifies exactly that row, because a rename moves the
+/// inode, so the source identity the record already carries still describes
+/// the destination. `reversible` counted `placed` and `done` instead, so the
+/// record read "0 of 1 reversible": the bare `undo` said nothing was restored,
+/// the menu drew no offer, and the next `apply` of the same pair swept the
+/// record away — while `undo <run-id>` restored the file, which is what proves
+/// the count wrong rather than the reverse.
+#[test]
+fn a_pending_rename_row_is_reversible_because_the_reverse_can_identify_it() {
+    let (dir, record) = written(true, false);
+    // `written` has already renamed the file into the library, so dropping the
+    // `done` line is precisely the state that window leaves behind.
+    let text = std::fs::read_to_string(&record).unwrap();
+    let cut: Vec<_> = text.lines().filter(|l| !l.contains(",done,")).collect();
+    std::fs::write(&record, cut.join("\n") + "\n").unwrap();
+    assert!(
+        std::fs::read_to_string(&record).unwrap().contains(",pending,"),
+        "the fixture has to be a pending row for this to mean anything"
+    );
+
+    let s = summarise(&record).unwrap();
+    assert_eq!(s.reversible, 1, "a pending rename is a row `expected()` identifies");
+    assert!(s.interrupted, "and the run did not finish");
+
+    // Not a count taken on trust: the reverse the count gates really restores it.
+    let report = reverse(&record).unwrap();
+    assert_eq!((report.restored, report.refused.len()), (1, 0), "{report:?}");
+    assert!(dir.path().join("source").join("Hellboy_v01.pdf").exists());
+}
+
+/// The other direction, and why the count cannot simply be widened to "not
+/// failed": a finished row whose mechanism made a new inode is only
+/// identifiable through the identity its `placed` line carries, so a record
+/// that lost that line has nothing to match the destination against.
+#[test]
+fn a_done_row_whose_placed_identity_is_missing_is_not_counted() {
+    let (_dir, record) = a_written_record();
+    let text = std::fs::read_to_string(&record).unwrap();
+    let cut: Vec<_> = text.lines().filter(|l| !l.contains(",placed,")).collect();
+    std::fs::write(&record, cut.join("\n") + "\n").unwrap();
+
+    let s = summarise(&record).unwrap();
+    assert_eq!(s.reversible, 0, "a clone row with no recorded inode cannot be matched");
+    // And the reverse agrees, which is the whole point of deriving one from
+    // the other: the count never promises a row the reverse then refuses.
+    let report = reverse(&record).unwrap();
+    assert_eq!(report.restored, 0);
+    assert_eq!(report.refused.len(), 1, "{report:?}");
+}
+
 #[test]
 fn every_status_row_has_the_full_column_count() {
     let (_dir, record) = a_written_record();
@@ -273,10 +325,22 @@ fn run_of(planned: u32, statuses: &[&str]) -> (TempDir, PathBuf) {
                 "Hellboy", Some(1), None, 3, "pdf",
             )
             .unwrap();
+        // A `Stream` row that finished was `placed` first: streaming makes a
+        // new inode, so `done` with no identity ahead of it is a shape nothing
+        // writes, and a row the reverse could never identify. `reversible`
+        // reads `expected()` now, so a fixture that skipped `placed` was
+        // claiming a finished row the reverse would refuse.
+        let identity = |p: &Path| {
+            let m = std::fs::symlink_metadata(p).unwrap();
+            (m.len(), m.ino(), m.mtime() * 1_000_000_000 + m.mtime_nsec())
+        };
         match *status {
-            "done" => w.record_done(seq).unwrap(),
+            "done" => {
+                w.record_placed(seq, identity(&file)).unwrap();
+                w.record_done(seq).unwrap();
+            }
             "failed" => w.record_failed(seq).unwrap(),
-            "placed" => w.record_placed(seq, (5, 42, 1)).unwrap(),
+            "placed" => w.record_placed(seq, identity(&file)).unwrap(),
             "pending" => {}
             other => panic!("no such status {other:?}"),
         }

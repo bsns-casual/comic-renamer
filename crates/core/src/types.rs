@@ -318,6 +318,14 @@ pub enum ApplyError {
     WrongLibrary { locked: PathBuf, planned: PathBuf },
     #[error("source {0} changed since the scan")]
     SourceChanged(PathBuf),
+    /// A row's source was there at the pre-flight and is gone by the time the
+    /// row runs. Reachable without any race: a hand-edited plan can name one
+    /// file twice, and two runs on one library under two `XDG_CONFIG_HOME`s
+    /// are not serialised, because the lock lives in the record store. Both
+    /// used to arrive as a bare `No such file or directory` naming neither the
+    /// row nor the path.
+    #[error("row {0}: source {1} is gone; it was there at the pre-flight, so something else took it")]
+    SourceGone(String, PathBuf),
     #[error("need {}, only {} available after the reserve", human_bytes(*required), human_bytes(*available))]
     InsufficientSpace { required: u64, available: u64 },
     #[error("row {0}: stored destination does not match the recomputed one")]

@@ -31,22 +31,67 @@ pub fn lock_name(dest_root: &Path) -> Result<String, io::Error> {
     // form, so every spelling of one directory (case, NFC/NFD, symlinks)
     // collapses to one string. Case is deliberately not folded: on a
     // case-sensitive volume `Hellboy` and `hellboy` are two real libraries.
-    let canonical = dest_root.canonicalize()?;
-    Ok(format!(
+    Ok(lock_name_of(&dest_root.canonicalize()?))
+}
+
+/// As `lock_name`, for a root that is **already canonical**.
+///
+/// `apply::Lock::library` needs the name of the file it locks and the root it
+/// then reports to come from one resolution. Taking them from two
+/// `canonicalize` calls let a root whose resolution changed between them lock
+/// one library while naming another, with no error: measured at 65 of 300
+/// attempts against a symlinked root being repointed, each of which ran to
+/// completion with the library it wrote left unlocked throughout.
+pub fn lock_name_of(canonical: &Path) -> String {
+    format!(
         "{}.lock",
         crate::corpus::sha256_hex(canonical.to_string_lossy().as_bytes())
-    ))
+    )
 }
 
 /// Whether some process still holds `path`'s write lock. Opens read-only, so
 /// a read-only record answers "not live" instead of failing; only a genuine
 /// `EWOULDBLOCK` means live.
+///
+/// A record that is **gone** is held by nobody, so that is `false` and not an
+/// error. `menu::decline` deletes records with no library lock, so one can
+/// vanish between any listing and this call — and the callers that then
+/// propagated the `NotFound` turned someone else's tidy-up into a failed run.
 pub fn is_live(path: &Path) -> io::Result<bool> {
     // When not held, this briefly takes the lock itself, so a `hold` starting
     // at that instant gets `WouldBlock`: a narrow window, and the failure is a
     // refused run, not data loss.
-    let file = File::open(path)?;
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
     Ok(!crate::fsops::flock_nb(&file)?)
+}
+
+/// Whether some run is writing a record in `dir` right now.
+///
+/// An unanswerable liveness question counts as live, the same way
+/// `menu::waiting` reads it: this is what distinguishes "nothing to undo" from
+/// "a run is mid-flight", and the second must not be reported as the first.
+pub fn any_live(dir: &Path) -> io::Result<bool> {
+    Ok(list(dir)?.iter().any(|path| is_live(path).unwrap_or(true)))
+}
+
+/// `remove_file`, where a record that is already gone is success.
+///
+/// `true` when this call removed it. Every deletion of a record goes through
+/// here because the end state all of them want is "that record is not there",
+/// and `menu::decline` deletes without the library lock — so a `NotFound` is
+/// another process having reached the same end state first, not a failure.
+/// Propagating it made a run that had placed every row exit non-zero and skip
+/// its own `N placed` line.
+pub fn forget(path: &Path) -> io::Result<bool> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 /// Open `path` for writing and hold its lock until the returned file drops.
@@ -142,8 +187,9 @@ pub fn supersede(
         if is_live(&path)? {
             continue;
         }
-        std::fs::remove_file(&path)?;
-        removed += 1;
+        if forget(&path)? {
+            removed += 1;
+        }
     }
     Ok(removed)
 }

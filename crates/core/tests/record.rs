@@ -1,6 +1,9 @@
-use comic_renamer_core::record::{basename, hold, is_live, list, lock_name, supersede};
+use comic_renamer_core::record::{
+    any_live, basename, forget, hold, is_live, list, lock_name, supersede,
+};
 use comic_renamer_core::types::{Mechanism, Mode};
 use comic_renamer_core::undo::UndoWriter;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -75,6 +78,55 @@ fn a_held_record_is_live_and_a_released_one_is_not() {
     assert!(is_live(&path).unwrap());
     drop(held);
     assert!(!is_live(&path).unwrap());
+}
+
+/// A record nobody can find is held by nobody.
+///
+/// `menu::decline` deletes records with no library lock, so one can vanish
+/// between a listing and the question. `is_live` propagated the `NotFound`,
+/// and `supersede` — which `apply` calls after every row has executed — passed
+/// it on: a run that had placed all 600 rows exited non-zero and never printed
+/// its own `N placed` line.
+#[test]
+fn a_record_that_is_gone_is_not_live_rather_than_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(!is_live(&dir.path().join("never-existed.record")).unwrap());
+}
+
+/// The one deletion path. Already gone is the end state every caller wanted,
+/// so it succeeds and is not counted; anything else is still an error, because
+/// a record that survives a sweep it was supposed to lose is the one the next
+/// `undo` picks up.
+#[test]
+fn forgetting_a_record_that_is_already_gone_is_success_but_not_a_deletion() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("r.record");
+    std::fs::write(&path, b"x").unwrap();
+    assert!(forget(&path).unwrap(), "it was there, so this removed it");
+    assert!(!path.exists());
+    assert!(!forget(&path).unwrap(), "gone already, so nothing was removed");
+
+    // And a removal that genuinely cannot happen is not swallowed.
+    let locked = dir.path().join("sealed");
+    std::fs::create_dir(&locked).unwrap();
+    let inside = locked.join("s.record");
+    std::fs::write(&inside, b"x").unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let kind = forget(&inside).map(|_| ()).unwrap_err().kind();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_ne!(kind, std::io::ErrorKind::NotFound, "an unremovable record was reported gone");
+}
+
+/// What tells "nothing to undo" from "a run is writing right now". Without it
+/// `undo` reported the first while 156 of 600 files had already moved.
+#[test]
+fn any_live_sees_a_held_record_and_nothing_else() {
+    let f = two_records_for_one_root_pair();
+    assert!(!any_live(&f.dir).unwrap(), "no run holds either record");
+    let held = hold(&f.older).unwrap();
+    assert!(any_live(&f.dir).unwrap());
+    drop(held);
+    assert!(!any_live(&f.dir).unwrap());
 }
 
 /// A record that cannot be opened for write must not make the whole sweep
