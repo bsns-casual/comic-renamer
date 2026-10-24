@@ -6,7 +6,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A record's basename: `.comic-renamer.<unix-secs>.<pid>.<seq>.record`. The
@@ -58,4 +58,75 @@ pub fn hold(path: &Path) -> io::Result<File> {
         ));
     }
     Ok(file)
+}
+
+/// `(secs, pid, seq)` from a name `basename` produced, or `None` for anything
+/// else. Numeric, because a lexical sort puts `.9.` after `.10.`.
+fn parse_name(name: &str) -> Option<(u64, u32, u64)> {
+    let rest = name.strip_prefix(".comic-renamer.")?.strip_suffix(".record")?;
+    let mut parts = rest.split('.');
+    let key = (
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+    );
+    parts.next().is_none().then_some(key)
+}
+
+/// Every record in `dir`, newest first. Only names `basename` could have made
+/// count; the content is never read, so a record `summarise` refuses is still
+/// listed and a stray file cannot abort a sweep.
+pub fn list(dir: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if let Some(key) = entry.file_name().to_str().and_then(parse_name) {
+            found.push((key, entry.path()));
+        }
+    }
+    found.sort_by_key(|(key, _)| std::cmp::Reverse(*key));
+    Ok(found.into_iter().map(|(_, path)| path).collect())
+}
+
+/// Delete every record in `dir` other than `keep` that was made for exactly
+/// this `source_root` and `dest_root` and that no run holds. Returns how many.
+///
+/// **The caller must hold the library lock for `dest_root`**, and must call this
+/// only after it has created `keep`. Both matter because this deletes the only
+/// record of where a user's files went.
+///
+/// - With the lock held, no other run for this library can be writing a
+///   record, so `is_live` can only be answering about one abandoned by a
+///   crashed run, whose `flock` the kernel has already released. Without the
+///   lock, `is_live` then `remove_file` is check-then-act (invariant 6's
+///   forbidden shape) aimed at the file that can undo a whole run.
+/// - A `keep` that was never created matches nothing, so every record for the
+///   pair would go. A run that wrote no record must not call this at all.
+///
+/// A record `summarise` cannot read is left alone: this cannot tell whose it
+/// is.
+pub fn supersede(
+    dir: &Path,
+    keep: &Path,
+    source_root: &Path,
+    dest_root: &Path,
+) -> io::Result<usize> {
+    let mut removed = 0;
+    for path in list(dir)? {
+        if path.file_name() == keep.file_name() {
+            continue;
+        }
+        let Ok(summary) = crate::undo::summarise(&path) else {
+            continue;
+        };
+        if summary.source_root != source_root || summary.dest_root != dest_root {
+            continue;
+        }
+        if is_live(&path)? {
+            continue;
+        }
+        std::fs::remove_file(&path)?;
+        removed += 1;
+    }
+    Ok(removed)
 }
