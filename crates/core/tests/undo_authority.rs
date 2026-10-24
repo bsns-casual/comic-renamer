@@ -8,9 +8,12 @@
 //! filesystem decides — a library file is removed only when a regular file
 //! still sits at the recorded source and holds the same bytes.
 
+mod common;
+
 use comic_renamer_core::preset::preset_by_id;
 use comic_renamer_core::types::{Mechanism, Mode, Resolved, Status};
 use comic_renamer_core::undo::{reverse_from, UndoWriter};
+use common::{reverse_before, DEADLINE};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use tempfile::{tempdir, TempDir};
@@ -259,7 +262,7 @@ fn a_same_size_stranger_with_the_recorded_identity_refuses_the_delete() {
 /// check and into the gate; swapping a FIFO in *after* a real run instead is
 /// refused one layer earlier and never reaches it.
 ///
-/// If this test hangs rather than fails, that is the bug.
+/// Bounded by `reverse_before`: without `O_NONBLOCK` this never returns.
 #[test]
 fn a_fifo_at_the_source_is_refused_rather_than_blocking() {
     let (dir, source, library) = roots();
@@ -287,7 +290,8 @@ fn a_fifo_at_the_source_is_refused_rather_than_blocking() {
     w.record_placed(seq, identity_of(&library_file)).unwrap();
     w.record_done(seq).unwrap();
 
-    let report = reverse_from(&record).unwrap();
+    let _kept = dir.keep();
+    let report = reverse_before(&record, DEADLINE);
     assert_eq!(report.restored, 0);
     assert!(!report.refused.is_empty(), "{:?}", report.refused);
     assert!(library_file.exists());
@@ -303,7 +307,8 @@ fn a_fifo_at_the_source_is_refused_rather_than_blocking() {
 /// anything that is not a regular file is what stops it, and this is the only
 /// test that says so — a FIFO is refused anyway by the seek that fails.
 ///
-/// If this test hangs rather than fails, that is the bug.
+/// Bounded by `reverse_before`: without the refusal this reads `/dev/zero` at
+/// a full core until something kills the process.
 #[test]
 fn a_character_device_at_the_source_is_refused_rather_than_read_forever() {
     let (dir, _source, library) = roots();
@@ -338,7 +343,8 @@ fn a_character_device_at_the_source_is_refused_rather_than_read_forever() {
         recorded,
         "the recorded source identity still holds, so the gate is what has to refuse"
     );
-    let report = reverse_from(&record).unwrap();
+    let _kept = dir.keep();
+    let report = reverse_before(&record, DEADLINE);
     assert_eq!(report.restored, 0);
     assert!(!report.refused.is_empty(), "{:?}", report.refused);
     assert!(library_file.exists());
@@ -346,6 +352,8 @@ fn a_character_device_at_the_source_is_refused_rather_than_read_forever() {
 
 /// A FIFO at the *destination* is refused for the same reason, and it can get
 /// there the same way: a record that carries the FIFO's own identity.
+///
+/// Bounded by `reverse_before`, for the reason the source case is.
 #[test]
 fn a_fifo_at_the_destination_is_refused_rather_than_blocking() {
     let (dir, source, library) = roots();
@@ -373,7 +381,8 @@ fn a_fifo_at_the_destination_is_refused_rather_than_blocking() {
     w.record_placed(seq, identity_of(&library_file)).unwrap();
     w.record_done(seq).unwrap();
 
-    let report = reverse_from(&record).unwrap();
+    let _kept = dir.keep();
+    let report = reverse_before(&record, DEADLINE);
     assert_eq!(report.restored, 0);
     assert!(!report.refused.is_empty(), "{:?}", report.refused);
     assert!(std::fs::symlink_metadata(&library_file).is_ok());

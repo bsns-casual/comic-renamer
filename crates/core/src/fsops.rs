@@ -246,7 +246,8 @@ impl Entry {
         if raw < 0 {
             return Err(io::Error::last_os_error());
         }
-        sha256_of_fd(unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) })
+        let mut file = refuse_non_regular(unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) })?;
+        hash_open_file(&mut file).map(|(_, hash)| hash)
     }
 
     /// Renames out of this entry's own directory, no-clobber.
@@ -368,7 +369,7 @@ pub fn clone_excl(src: &Path, dest_root: &Path, relative: &Path) -> io::Result<(
     // CLONE_NOFOLLOW_ANY then trips on `/var`, which is a symlink on macOS.
     // `fclonefileat` takes a source descriptor, so the flag constrains only
     // the destination — which is a single leaf under a verified directory.
-    let source = open_nofollow(src, 0)?;
+    let source = open_nofollow(src)?;
     // SAFETY: `source` is an open descriptor we own, `parent` likewise, and
     // `leaf` outlives the call.
     let rc = unsafe {
@@ -389,11 +390,16 @@ pub fn clone_excl(src: &Path, dest_root: &Path, relative: &Path) -> io::Result<(
 /// Opens a file refusing to follow a final symlink. Paired with
 /// `refuse_symlink_source` so the check and the open cannot disagree.
 ///
-/// `extra` carries flags only one caller wants: `sha256_of` passes
-/// `O_NONBLOCK`, because a path it is handed may be a FIFO and `open` on one
-/// blocks until a writer appears. Left at `0` the flag is not added for
-/// callers that have already established their source is a regular file.
-fn open_nofollow(path: &Path, extra: libc::c_int) -> io::Result<std::os::fd::OwnedFd> {
+/// `O_NONBLOCK` on every caller, not just the one that noticed it needed it.
+/// The flag is inert on a regular file, and it is the only thing that keeps
+/// `open` on a FIFO from waiting for a writer that never comes — with, in
+/// `undo`'s case, the library's lock held while it waits. **No caller here can
+/// promise its path is a regular file:** `undo` reaches both `sha256_of` and
+/// `stream_verified` with a library path vetted only by `Entry::identity`,
+/// which is an `fstatat` and says nothing about file type. Refusing the
+/// non-regular cases is `refuse_non_regular`'s job, once the descriptor is in
+/// hand and can be `fstat`ted.
+fn open_nofollow(path: &Path) -> io::Result<std::os::fd::OwnedFd> {
     use std::os::fd::FromRawFd;
     let name = cstring(path)?;
     // SAFETY: `name` is a valid NUL-terminated path for the call; the
@@ -401,7 +407,7 @@ fn open_nofollow(path: &Path, extra: libc::c_int) -> io::Result<std::os::fd::Own
     let raw = unsafe {
         libc::open(
             name.as_ptr(),
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | extra,
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
         )
     };
     if raw < 0 {
@@ -429,11 +435,17 @@ pub fn stream_verified(src: &Path, dest_root: &Path, relative: &Path) -> io::Res
 
     let (temp, mut file) = Temp::create(&destination)?;
 
-    // `open_nofollow`, not `File::open`, which follows a final symlink: the
+    // `open_regular`, not `File::open`, which follows a final symlink: the
     // stat above and the open have to agree about which file this is, which is
     // what that helper's doc comment claims and what `clone_excl` already did.
     // Losing the race here reads the wrong bytes into the library.
-    let mut input = std::fs::File::from(open_nofollow(src, 0)?);
+    //
+    // Regular, because `refuse_symlink_source` above refuses only a symlink.
+    // Reversing a cross-volume move streams *out of* the library, and `undo`
+    // got here on an `Entry::identity` match, which is an `fstatat` and says
+    // nothing about file type — so a record naming a FIFO at a destination the
+    // preset produces used to block this open with the library's lock held.
+    let mut input = open_regular(src)?;
     io::copy(&mut input, &mut file)?;
     file.sync_all()?;
 
@@ -589,27 +601,32 @@ fn hash_open_file(file: &mut std::fs::File) -> io::Result<(u64, String)> {
 }
 
 /// SHA-256 of a **regular** file, hex, without following a final symlink.
-///
-/// Refuses anything that is not a regular file. A FIFO at a path a record
-/// names would otherwise block in `open` until a writer appeared, and `undo`
-/// holds the library's lock while it waits — so the one command that could
-/// recover the library would be the thing the record took away. `O_NONBLOCK`
-/// is what makes the open return; the `fstat` behind it is what refuses.
 pub fn sha256_of(path: &Path) -> io::Result<String> {
-    sha256_of_fd(open_nofollow(path, libc::O_NONBLOCK)?)
+    hash_open_file(&mut open_regular(path)?).map(|(_, hash)| hash)
 }
 
-/// The half `sha256_of` and `Entry::sha256` share: refuse a non-regular file,
-/// then hash what the descriptor holds.
-fn sha256_of_fd(fd: std::os::fd::OwnedFd) -> io::Result<String> {
-    let mut file = std::fs::File::from(fd);
+/// `open_nofollow` plus the refusal, for callers that want a path read as a
+/// file and nothing else.
+fn open_regular(path: &Path) -> io::Result<std::fs::File> {
+    refuse_non_regular(open_nofollow(path)?)
+}
+
+/// Refuses a descriptor that is not a regular file.
+///
+/// A FIFO at a path a record names is refused here rather than waited on; a
+/// character device is refused here rather than read until the process is
+/// killed, which is what a hash of `/dev/zero` does, and a record names its
+/// own source root so it can name `/dev`. `O_NONBLOCK` is what lets the open
+/// return far enough for this `fstat` to happen; this is what says no.
+fn refuse_non_regular(fd: std::os::fd::OwnedFd) -> io::Result<std::fs::File> {
+    let file = std::fs::File::from(fd);
     if !file.metadata()?.file_type().is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "not a regular file",
         ));
     }
-    hash_open_file(&mut file).map(|(_, hash)| hash)
+    Ok(file)
 }
 
 fn hex(bytes: &[u8]) -> String {

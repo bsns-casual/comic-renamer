@@ -9,6 +9,41 @@ use comic_renamer_core::corpus::{Corpus, Manifest, CORPUS_SCHEMA_VERSION};
 use std::path::Path;
 use tempfile::TempDir;
 
+/// Long enough that a slow machine does not fail a working refusal, short
+/// enough that a broken one is a test failure rather than a dead CI job.
+pub const DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// `reverse_from` on a worker, with a deadline.
+///
+/// Every caller plants something at a path a record names that must not be
+/// opened and read: a FIFO, where a blocking `open` waits for a writer that
+/// never comes, or a character device, where the read itself never ends —
+/// measured at 52 s of CPU and still climbing with the refusal removed.
+/// libtest has no per-test timeout and neither does this project's CI, so
+/// without a deadline a regression is a job that dies at the runner's limit
+/// rather than a test that fails in three seconds. The deadline is also the
+/// *only* signal for `O_NONBLOCK` specifically: refused and refused-late give
+/// the same `not a regular file` message.
+///
+/// The worker is leaked if it never returns, so a caller must keep its
+/// temporary directory rather than removing a path a live thread still holds.
+pub fn reverse_before(
+    record: &Path,
+    deadline: std::time::Duration,
+) -> comic_renamer_core::types::UndoReport {
+    let record = record.to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(comic_renamer_core::undo::reverse_from(&record));
+    });
+    rx.recv_timeout(deadline)
+        .expect(
+            "reverse_from never returned: the open or the read of a non-regular path \
+             was not refused, so either O_NONBLOCK or refuse_non_regular has regressed",
+        )
+        .unwrap()
+}
+
 /// `(name, name_key, publisher, language, year_began, run)`.
 pub type Row<'a> = (&'a str, &'a str, &'a str, &'a str, u16, u32);
 

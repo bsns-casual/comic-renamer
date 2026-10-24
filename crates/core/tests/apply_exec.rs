@@ -388,8 +388,207 @@ fn a_streamed_move_verifies_before_it_unlinks() {
         .collect();
     assert!(leftovers.is_empty(), "a .partial survived");
 
-    undo(&plan_path).unwrap();
+    // This is the only test that reaches the third unlink in `reverse_one`:
+    // the source is gone, so `rename_into` fails `EXDEV`, the file is streamed
+    // back, and the duplicate left at the destination is removed. Asserting
+    // only that the source came back leaves that removal unobserved — the
+    // restore reads as clean with the library copy still sitting there.
+    let placed = dest.join("Mazebook/Mazebook.pdf");
+    let report = undo(&plan_path).unwrap();
     assert!(source.path().join("mazebook.pdf").exists(), "undo did not restore it");
+    assert_eq!(report.restored, 1, "{report:?}");
+    assert!(report.refused.is_empty(), "{report:?}");
+    assert!(!placed.exists(), "the duplicate at the destination was left behind");
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+/// `stream_verified` opens the library file it is restoring *from*, and
+/// `undo` got there on an `Entry::identity` match — an `fstatat`, which says
+/// nothing about file type. So a record naming a FIFO at a destination the
+/// preset produces reaches that open, and reaches it only across volumes: a
+/// same-device `rename_into` succeeds and never streams.
+///
+/// Nothing is planted with privilege here. The record is honest about a FIFO
+/// anyone can create in their own library folder, and the source it claims to
+/// restore to is simply absent, which is the case `undo` is built for.
+///
+/// Point `COMIC_RENAMER_TEST_VOLUME` at a mount on another device.
+#[test]
+#[ignore]
+fn a_fifo_at_a_cross_volume_destination_is_refused_rather_than_streamed() {
+    let Ok(volume) = std::env::var("COMIC_RENAMER_TEST_VOLUME") else {
+        panic!("set COMIC_RENAMER_TEST_VOLUME to a mount on another device");
+    };
+
+    let source = tempdir().unwrap();
+    let library = PathBuf::from(&volume).join("comic-renamer-fifo");
+    let _ = std::fs::remove_dir_all(&library);
+    let resolved = comic_renamer_core::types::Resolved {
+        series: "Mazebook".into(),
+        volume: None,
+        subtitle: None,
+        run: 5,
+        status: comic_renamer_core::types::Status::Mapped,
+        record: None,
+    };
+    let relative = comic_renamer_core::preset::preset_by_id("komga")
+        .unwrap()
+        .destination(&resolved, "pdf");
+    std::fs::create_dir_all(library.join(&relative).parent().unwrap()).unwrap();
+
+    let fifo = library.join(&relative);
+    let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: a valid NUL-terminated path for the duration of the call.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o644) }, 0);
+
+    let record = source.path().join("run.record");
+    let mut w = UndoWriter::create_with(&record, source.path(), &library, "komga", 1).unwrap();
+    let seq = w
+        .record_pending_with(
+            Path::new("mazebook.pdf"),
+            &relative,
+            Mechanism::Stream,
+            Mode::Move,
+            &fifo,
+            "Mazebook",
+            None,
+            None,
+            5,
+            "pdf",
+        )
+        .unwrap();
+    let meta = std::fs::symlink_metadata(&fifo).unwrap();
+    w.record_placed(
+        seq,
+        (meta.len(), meta.ino(), meta.mtime() * 1_000_000_000 + meta.mtime_nsec()),
+    )
+    .unwrap();
+    w.record_done(seq).unwrap();
+    drop(w);
+
+    // Bounded: without `O_NONBLOCK` this open waits for a writer forever, and
+    // the library's lock is held while it waits.
+    let report = common::reverse_before(&record, common::DEADLINE);
+    assert_eq!(report.restored, 0, "{report:?}");
+    assert!(
+        report.refused.iter().any(|r| r.contains("not a regular file")),
+        "refused for the wrong reason, which means the open was not what stopped it: {report:?}"
+    );
+    assert!(!source.path().join("mazebook.pdf").exists(), "a FIFO was streamed into the bundle");
+    let _ = std::fs::remove_dir_all(&library);
+}
+
+/// Sets a file's mtime without touching its contents, so its *identity*
+/// changes and its hash does not.
+fn bump_mtime(path: &Path) {
+    let meta = std::fs::symlink_metadata(path).unwrap();
+    let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    let times = [
+        libc::timespec { tv_sec: meta.atime(), tv_nsec: meta.atime_nsec() as libc::c_long },
+        libc::timespec { tv_sec: meta.mtime() + 1, tv_nsec: 0 },
+    ];
+    // SAFETY: a valid NUL-terminated path and a two-element times array for
+    // the duration of the call.
+    let rc = unsafe {
+        libc::utimensat(libc::AT_FDCWD, name.as_ptr(), times.as_ptr(), libc::AT_SYMLINK_NOFOLLOW)
+    };
+    assert_eq!(rc, 0, "utimensat: {}", std::io::Error::last_os_error());
+}
+
+/// The destination changes *between* the identity check at the top of
+/// `reverse_one` and the unlink at the bottom, which only a cross-volume
+/// reverse can do: the stream back to the source is the gap.
+///
+/// `reverse_one` re-reads the destination's identity through the held
+/// descriptor before that unlink, and nothing pinned it — deleting the
+/// re-check left every test in this repository green. Here the mtime is bumped
+/// while the stream-back runs. The contents are untouched, so
+/// `stream_verified`'s own hash comparison still passes and the re-check is
+/// the only thing that can refuse.
+///
+/// Cannot be folded into `a_streamed_move_verifies_before_it_unlinks`: that
+/// test asserts the reverse succeeds and this one asserts it refuses.
+///
+/// Point `COMIC_RENAMER_TEST_VOLUME` at a mount on another device.
+#[test]
+#[ignore]
+fn a_destination_that_changes_during_the_stream_back_is_not_unlinked() {
+    let Ok(volume) = std::env::var("COMIC_RENAMER_TEST_VOLUME") else {
+        panic!("set COMIC_RENAMER_TEST_VOLUME to a mount on another device");
+    };
+    let c = gcd();
+
+    let source = tempdir().unwrap();
+    // Large enough that the copy and the two hashes of the stream-back take
+    // tens of milliseconds, which is the window the watcher below needs. A
+    // few bytes would make this a coin toss.
+    std::fs::write(source.path().join("mazebook.pdf"), vec![b'm'; 16 << 20]).unwrap();
+    let dest = PathBuf::from(&volume).join("comic-renamer-perturb");
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+    let plans = tempdir().unwrap();
+
+    let opts = ScanOpts {
+        source_root: source.path().to_path_buf(),
+        dest_root: dest.clone(),
+        preset: "komga".into(),
+        mode: Some(Mode::Move),
+        lang: "en".into(),
+    };
+    let comic_renamer_core::scan::ScanOutcome { header, rows, .. } =
+        scan::scan(&opts, &c, &mut |_| {}).unwrap();
+    assert_eq!(rows[0].mechanism, Mechanism::Stream, "not actually cross-volume");
+    let plan_path = plans.path().join("plan.jsonl");
+    plan::write(&header, &rows, &plan_path).unwrap();
+    apply(&plan_path, false, &mut |_| {}).unwrap();
+
+    let placed = dest.join("Mazebook/Mazebook.pdf");
+    let placed_before = std::fs::symlink_metadata(&placed).unwrap().mtime();
+
+    // `stream_verified` writes its temp into the directory it is restoring
+    // into, so a `.partial` appearing in the bundle folder means the
+    // stream-back has started and the unlink has not happened yet. The
+    // watcher has its own deadline: a miss fails this test rather than
+    // spinning on a `read_dir` forever.
+    let watch = source.path().to_path_buf();
+    let target = placed.clone();
+    let watcher = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            let started = std::fs::read_dir(&watch).into_iter().flatten().flatten().any(|e| {
+                e.file_name().to_string_lossy().contains(".partial")
+            });
+            if started {
+                bump_mtime(&target);
+                return true;
+            }
+        }
+        false
+    });
+
+    let report = undo(&plan_path).unwrap();
+    assert!(
+        watcher.join().unwrap(),
+        "the watcher never saw a .partial, so the stream-back never ran and this \
+         test proved nothing"
+    );
+    assert_ne!(
+        std::fs::symlink_metadata(&placed)
+            .map(|m| m.mtime())
+            .unwrap_or(placed_before),
+        placed_before,
+        "the mtime bump did not land, so the re-check had nothing to see"
+    );
+    assert_eq!(report.restored, 0, "{report:?}");
+    assert!(
+        report.refused.iter().any(|r| r.contains("changed while it was being restored")),
+        "{report:?}"
+    );
+    assert!(placed.exists(), "a destination that changed under the restore was unlinked");
+    assert!(
+        source.path().join("mazebook.pdf").exists(),
+        "the stream-back's copy was discarded, so the file now exists nowhere it is named"
+    );
     let _ = std::fs::remove_dir_all(&dest);
 }
 
