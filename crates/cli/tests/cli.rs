@@ -90,9 +90,25 @@ fn write_plan(
     mechanism: Mechanism,
     file: &Path,
 ) -> PathBuf {
+    write_plan_as("plan.jsonl", "Hellboy", beside, source_root, dest_root, mode, mechanism, file)
+}
+
+/// As `write_plan`, under a chosen plan name and series — so two plans can
+/// share one pair of roots without their destinations colliding.
+#[allow(clippy::too_many_arguments)]
+fn write_plan_as(
+    plan_name: &str,
+    series: &str,
+    beside: &Path,
+    source_root: &Path,
+    dest_root: &Path,
+    mode: Mode,
+    mechanism: Mechanism,
+    file: &Path,
+) -> PathBuf {
     let meta = std::fs::metadata(file).unwrap();
     let resolved = Resolved {
-        series: "Hellboy".into(),
+        series: series.into(),
         volume: Some(1),
         subtitle: None,
         run: 10,
@@ -133,7 +149,7 @@ fn write_plan(
         checksum: String::new(),
     };
 
-    let plan = beside.join("plan.jsonl");
+    let plan = beside.join(plan_name);
     comic_renamer_core::plan::write(&header, &[row], &plan).unwrap();
     plan
 }
@@ -1215,4 +1231,35 @@ fn the_menu_refuses_without_a_terminal() {
     assert!(!out.status.success());
     assert!(stderr(&out).contains("the menu needs an interactive terminal"), "{}", stderr(&out));
     assert!(!(stdout(&out) + &stderr(&out)).contains(f.config.to_str().unwrap()));
+}
+
+/// The sweep's count reaches the terminal, not just `apply`'s progress
+/// channel. It was discarded, so re-importing a bundle took the earlier run's
+/// undo in silence — the user would find out by running `undo` and being told
+/// there was nothing to do. Two plans over one pair of roots, each with its
+/// own series so the second run executes rather than colliding.
+#[test]
+fn re_importing_a_bundle_says_which_undo_the_sweep_took() {
+    let f = fixture(Mode::Move);
+    assert!(run_in(&f, &["apply", f.plan.to_str().unwrap(), "--yes"], "")
+        .status
+        .success());
+    assert_eq!(record_files(&f).len(), 1, "the first run left no record");
+
+    let root = f.plan.parent().unwrap().to_path_buf();
+    let other = f.source.join("velvet_vol1.pdf");
+    std::fs::File::create(&other).unwrap();
+    let second = write_plan_as(
+        "plan-b.jsonl", "Velvet", &root, &f.source, &f.dest, Mode::Move,
+        Mechanism::Rename, &other,
+    );
+
+    let out = run_in(&f, &["apply", second.to_str().unwrap(), "--yes"], "");
+    assert!(out.status.success(), "{}{}", stdout(&out), stderr(&out));
+    assert!(
+        stderr(&out).contains("1 earlier run(s) of this bundle can no longer be undone"),
+        "the sweep took the first run's record in silence: {}",
+        stderr(&out)
+    );
+    assert_eq!(record_files(&f).len(), 1, "both records survived, so nothing was swept");
 }
