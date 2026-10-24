@@ -78,12 +78,21 @@ Invariant 2 limits the damage: `apply` recomputes every destination through the
 preset, so the substituted plan cannot write outside the library layout. What the
 user consented to, though, is not what runs.
 
-**What a fix has to decide:** whether consent binds to the plan's bytes. Holding
-the lock across the prompt is the smallest version and closes the concurrent-
-`scan` case on its own. Executing from the copy the disclosure was computed from
-goes further. Re-reading after the prompt and comparing the checksum is the
-version that *reports* the substitution rather than silently preferring one read
-— and `plan::read_allowing_edits` already returns the signal that would carry it.
+**What a fix has to decide:** whether consent binds to the plan's bytes.
+
+**Correction, 2026-10-24.** This paragraph first said that holding the lock
+across the prompt "closes the concurrent-`scan` case on its own." That is false,
+and a builder check caught it. `plan::write` acquires no lock — `plan.rs` does
+not mention `Lock` at all — so a lock held in `apply` does not stop `scan` from
+rewriting the file underneath it. Holding the lock across the prompt is still
+worth doing, because it stops a second *`apply`* from interleaving, but it does
+nothing about the case named above.
+
+What closes that case is **executing from the copy the disclosure was computed
+from**, so consent and execution read the same bytes by construction. Re-reading
+after the prompt and comparing the checksum goes one further by *reporting* the
+substitution rather than silently preferring one read, and
+`plan::read_allowing_edits` already returns the signal that would carry it.
 
 ---
 
