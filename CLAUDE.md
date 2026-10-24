@@ -233,6 +233,16 @@ the code or run on 2026-10-24:
   because the menu's `l` promises it stays. One with nothing to put back is
   swept, so a bundle failing on its first row leaves one record, not one per
   attempt. `apply` prints how many earlier runs the sweep made unreversible.
+
+  **A record's `reversible` count is whatever `expected()` can identify, not the
+  rows marked `placed` or `done`.** The two disagreed until an adversarial review
+  on 2026-10-24: `expected()` has `(Pending, Rename) => source_identity`, because
+  a rename moves the inode so the recorded source identity still describes the
+  destination — so a crash in move mode's one-syscall window, the **default**
+  mode, left a reversible row that the count called zero. `undo` then exited 0
+  saying nothing was restored, the menu drew no offer, and the next run of the
+  same bundle deleted the record, because D57's interrupted exception also reads
+  that number. Derive the count from `expected()`; do not parallel it.
 - **Both `apply` and `reverse_run` check that the `&Lock` they hold names the
   library they are about to touch.** `reverse_run` did not, which made the
   obligation a convention on exactly the path a reverse mutates a library from.
@@ -265,10 +275,10 @@ agreed. The other 14.7% are known-bad decompositions, such as
 subtitle "Before the Fall Vol. 9" and no volume. Review them in a `map` session
 before any of this is committed.
 
-**Tests:** `cargo test --workspace` runs 510 and ignores 9 (counted 2026-10-24
-by summing the `test result:` lines: 510 passed, 0 failed, 9 ignored; 500 before
-the whole-branch review's fix wave, 409 and 7 before session-scoped undo), with
-no compiler warnings. The nine `#[ignore]`d
+**Tests:** `cargo test --workspace` runs 530 and ignores 9 (counted 2026-10-24
+by summing the `test result:` lines: 530 passed, 0 failed, 9 ignored; 510 before
+a four-seat adversarial review, 500 before the whole-branch review's fix wave,
+409 and 7 before session-scoped undo), with no compiler warnings. The nine `#[ignore]`d
 tests need real hardware or the real corpus release, and **CI runs all nine**:
 five are volume-gated (`COMIC_RENAMER_TEST_VOLUME`; four in `apply_exec.rs`,
 one in `cli.rs`) and four are corpus tests (`COMIC_RENAMER_TEST_ZIP`, in
