@@ -9,12 +9,37 @@
 use crate::fsops::{
     ensure_root, prune_empty_dirs, resolve_at, stat_at, stream_verified,
 };
-use crate::types::{Mechanism, Mode, UndoError, UndoReport};
+use crate::preset::preset_by_id;
+use crate::types::{Mechanism, Mode, Resolved, Status as MapStatus, UndoError, UndoReport};
 use std::io::{self, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
-const COLUMNS: &str = "seq,status,mode,mechanism,source_name,dest_relative,size,inode,mtime_ns";
+/// Everything a preset needs to rebuild a destination travels with the row, so
+/// a record reverses without the plan that produced it. The roots row carries
+/// the preset id and the planned count in the last two columns.
+pub const COLUMNS: &str = "seq,status,mode,mechanism,source_name,dest_relative,\
+    size,inode,mtime_ns,series,volume,subtitle,run,extension,preset,planned";
+
+/// Trailing columns after `mtime_ns` on rows that do not carry the pending
+/// fields: series, volume, subtitle, run, extension, preset, planned.
+const PAD: &str = ",,,,,,,";
+
+/// What a record says about its run, read without reversing anything.
+#[derive(Clone, Debug)]
+pub struct Summary {
+    pub source_root: PathBuf,
+    pub dest_root: PathBuf,
+    pub preset: String,
+    pub planned: u32,
+    /// Rows whose terminal state is `placed` or `done`. A same-volume move is
+    /// a rename, which records `done` and never `placed`, so counting only
+    /// `placed` would read 0 for every run in the default mode.
+    pub reversible: u32,
+    /// Some row reached neither `placed`, `done` nor `failed`.
+    pub interrupted: bool,
+    pub started: std::time::SystemTime,
+}
 
 /// `(size, inode, mtime_ns)`. All three, because size and inode alone survive
 /// an in-place edit — and the duplicate branch would then delete the only
@@ -39,6 +64,22 @@ impl UndoWriter {
     /// manifest, the only record of where those files went. (The *lock* uses
     /// `flock` instead — see `apply::Lock`.)
     pub fn create(path: &Path, source_root: &Path, dest_root: &Path) -> io::Result<UndoWriter> {
+        Self::create_with(path, source_root, dest_root, "", 0)
+    }
+
+    /// As `create`, with the preset id and planned count a later `reverse_from`
+    /// needs. The roots row's `mtime_ns` column holds the start time.
+    pub fn create_with(
+        path: &Path,
+        source_root: &Path,
+        dest_root: &Path,
+        preset: &str,
+        planned: u32,
+    ) -> io::Result<UndoWriter> {
+        let started = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -46,9 +87,10 @@ impl UndoWriter {
         writeln!(file, "{COLUMNS}")?;
         writeln!(
             file,
-            "0,roots,,,{},{},,,",
+            "0,roots,,,{},{},,,{started},,,,,,{},{planned}",
             path_field(source_root),
-            path_field(dest_root)
+            path_field(dest_root),
+            field(preset),
         )?;
         file.sync_all()?;
         // `sync_all` makes the contents durable, not the name.
@@ -66,17 +108,41 @@ impl UndoWriter {
         mode: Mode,
         source: &Path,
     ) -> io::Result<u64> {
+        self.record_pending_with(source_name, dest_relative, mechanism, mode, source, "", None, None, 0, "")
+    }
+
+    /// `record_pending` plus the fields a preset needs to rebuild
+    /// `dest_relative`. Text fields take the same always-on `'` prefix as
+    /// paths, so a series named `=cmd` is inert in a spreadsheet.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_pending_with(
+        &mut self,
+        source_name: &Path,
+        dest_relative: &Path,
+        mechanism: Mechanism,
+        mode: Mode,
+        source: &Path,
+        series: &str,
+        volume: Option<u32>,
+        subtitle: Option<&str>,
+        run: u32,
+        extension: &str,
+    ) -> io::Result<u64> {
         self.seq += 1;
         let meta = std::fs::symlink_metadata(source)?;
         let (size, inode, mtime) = identity_of(&meta);
         writeln!(
             self.file,
-            "{},pending,{},{},{},{},{size},{inode},{mtime}",
+            "{},pending,{},{},{},{},{size},{inode},{mtime},{},{},{},{run},{},,",
             self.seq,
             field(mode_name(mode)),
             field(mechanism_name(mechanism)),
             path_field(source_name),
             path_field(dest_relative),
+            field(&format!("'{series}")),
+            volume.map(|v| v.to_string()).unwrap_or_default(),
+            subtitle.map(|t| field(&format!("'{t}"))).unwrap_or_default(),
+            field(extension),
         )?;
         self.file.sync_all()
             .map(|()| self.seq)
@@ -87,7 +153,7 @@ impl UndoWriter {
     /// `reverse` guessed between them by matching on size — which is what
     /// reopened the two worst findings.
     pub fn record_failed(&mut self, seq: u64) -> io::Result<()> {
-        writeln!(self.file, "{seq},failed,,,,,,,")?;
+        writeln!(self.file, "{seq},failed,,,,,,,{PAD}")?;
         self.file.sync_all()
     }
 
@@ -98,12 +164,12 @@ impl UndoWriter {
     /// "this status carries none" and "the stat failed".
     pub fn record_placed(&mut self, seq: u64, identity: Identity) -> io::Result<()> {
         let (size, inode, mtime) = identity;
-        writeln!(self.file, "{seq},placed,,,,,{size},{inode},{mtime}")?;
+        writeln!(self.file, "{seq},placed,,,,,{size},{inode},{mtime}{PAD}")?;
         self.file.sync_all()
     }
 
     pub fn record_done(&mut self, seq: u64) -> io::Result<()> {
-        writeln!(self.file, "{seq},done,,,,,,,")?;
+        writeln!(self.file, "{seq},done,,,,,,,{PAD}")?;
         self.file.sync_all()
     }
 }
@@ -168,6 +234,17 @@ struct Row {
     dest_relative: PathBuf,
     source_identity: Option<Identity>,
     placed_identity: Option<Identity>,
+    /// Absent on a row that does not carry them, which cannot be rebuilt.
+    fields: Option<Fields>,
+}
+
+#[derive(Clone, Debug)]
+struct Fields {
+    series: String,
+    volume: Option<u32>,
+    subtitle: Option<String>,
+    run: u32,
+    extension: String,
 }
 
 impl Row {
@@ -211,7 +288,13 @@ pub fn reverse(
     dest_root: &Path,
     recomputed: &[PathBuf],
 ) -> Result<UndoReport, UndoError> {
-    let (recorded_source, recorded_dest, rows, unreadable) = read_manifest(manifest)?;
+    let Manifest {
+        source_root: recorded_source,
+        dest_root: recorded_dest,
+        rows,
+        unreadable,
+        ..
+    } = read_manifest(manifest)?;
 
     // The manifest's own roots are a cross-check, not the anchor. Exact
     // identity buys nothing if whoever edits the manifest also supplies the
@@ -228,6 +311,91 @@ pub fn reverse(
 
     for row in rows.into_iter().rev() {
         match reverse_one(&row, source_root, dest_root, recomputed) {
+            Ok(true) => report.restored += 1,
+            Ok(false) => report.skipped += 1,
+            Err(why) => report.refused.push(format!("row {}: {why}", row.seq)),
+        }
+    }
+    Ok(report)
+}
+
+/// Reads a record's own summary: no plan, no filesystem beyond the record.
+pub fn summarise(manifest: &Path) -> Result<Summary, UndoError> {
+    let m = read_manifest(manifest)?;
+    let started = match m.started {
+        Some(t) => t,
+        None => std::fs::metadata(manifest)?.modified()?,
+    };
+    let reversible = m
+        .rows
+        .iter()
+        .filter(|r| matches!(r.status, Status::Placed | Status::Done))
+        .count() as u32;
+    let interrupted = m.rows.iter().any(|r| r.status == Status::Pending);
+    Ok(Summary {
+        source_root: m.source_root,
+        dest_root: m.dest_root,
+        preset: m.preset,
+        planned: m.planned,
+        reversible,
+        interrupted,
+        started,
+    })
+}
+
+/// Reverses a run from its record alone. Roots and preset id come from the
+/// record; every destination is recomputed through the preset and must equal
+/// the one the row names, so an edited record cannot name an arbitrary path
+/// (invariant 2).
+pub fn reverse_from(manifest: &Path) -> Result<UndoReport, UndoError> {
+    let m = read_manifest(manifest)?;
+    let preset = preset_by_id(&m.preset).ok_or_else(|| UndoError::Parse {
+        line: 0,
+        message: format!("unknown preset {:?}", m.preset),
+    })?;
+
+    let mut report = UndoReport::default();
+    report.refused.extend(m.unreadable);
+
+    let (source_root, dest_root) = match (
+        std::fs::canonicalize(&m.source_root),
+        std::fs::canonicalize(&m.dest_root),
+    ) {
+        (Ok(s), Ok(d)) => (s, d),
+        (s, d) => {
+            // Nothing can be anchored, so nothing is touched; each row says why.
+            let why = [(&m.source_root, s), (&m.dest_root, d)]
+                .into_iter()
+                .filter_map(|(p, r)| r.err().map(|e| format!("{}: {e}", p.display())))
+                .collect::<Vec<_>>()
+                .join("; ");
+            report
+                .refused
+                .extend(m.rows.iter().map(|r| format!("row {}: root unavailable ({why})", r.seq)));
+            return Ok(report);
+        }
+    };
+    // Equal roots would let a content check hash one inode against itself and
+    // agree, deleting the only copy.
+    if source_root.starts_with(&dest_root) || dest_root.starts_with(&source_root) {
+        return Err(UndoError::NoRoot);
+    }
+
+    for row in m.rows.into_iter().rev() {
+        let Some(f) = &row.fields else {
+            report.refused.push(format!("row {}: the record holds no fields to rebuild it", row.seq));
+            continue;
+        };
+        let resolved = Resolved {
+            series: f.series.clone(),
+            volume: f.volume,
+            subtitle: f.subtitle.clone(),
+            run: f.run,
+            status: MapStatus::Mapped,
+            record: None,
+        };
+        let own = [preset.destination(&resolved, &f.extension)];
+        match reverse_one(&row, &source_root, &dest_root, &own) {
             Ok(true) => report.restored += 1,
             Ok(false) => report.skipped += 1,
             Err(why) => report.refused.push(format!("row {}: {why}", row.seq)),
@@ -415,13 +583,43 @@ fn single_component(path: &Path) -> Result<&Path, String> {
     }
 }
 
-type Parsed = (PathBuf, PathBuf, Vec<Row>, Vec<String>);
+fn pending_fields(columns: &[String]) -> Option<Fields> {
+    let get = |i: usize| columns.get(i).map(String::as_str);
+    let volume = match get(10)? {
+        "" => None,
+        v => Some(v.parse().ok()?),
+    };
+    Some(Fields {
+        series: unprefix(get(9)?).to_string(),
+        volume,
+        subtitle: match get(11)? {
+            "" => None,
+            t => Some(unprefix(t).to_string()),
+        },
+        run: get(12)?.parse().ok()?,
+        extension: get(13)?.to_string(),
+    })
+}
 
-fn read_manifest(manifest: &Path) -> Result<Parsed, UndoError> {
+/// Roots, preset id, planned count and start time, then the rows.
+struct Manifest {
+    source_root: PathBuf,
+    dest_root: PathBuf,
+    preset: String,
+    planned: u32,
+    started: Option<std::time::SystemTime>,
+    rows: Vec<Row>,
+    unreadable: Vec<String>,
+}
+
+fn read_manifest(manifest: &Path) -> Result<Manifest, UndoError> {
     let text = std::fs::read_to_string(manifest)?;
     let (records, torn) = parse_records(&text);
 
     let mut roots: Option<(PathBuf, PathBuf)> = None;
+    let mut preset = String::new();
+    let mut planned = 0u32;
+    let mut started = None;
     let mut rows: Vec<Row> = Vec::new();
     let mut unreadable: Vec<String> = Vec::new();
     if let Some(problem) = torn {
@@ -434,7 +632,18 @@ fn read_manifest(manifest: &Path) -> Result<Parsed, UndoError> {
         // records[0] unconditionally loses the first data row of a manifest
         // that has no header — a hand-edited file, which is exactly the
         // input invariant 1 exists for.
+        //
+        // A header that is present and wrong was written by another build, and
+        // its columns mean something else.
         if index == 0 && columns.first().map(String::as_str) == Some("seq") {
+            if columns.join(",") != COLUMNS {
+                return Err(UndoError::Parse {
+                    line: 1,
+                    message: "this record was written by an older build and has no \
+                              fields to rebuild destinations from"
+                        .into(),
+                });
+            }
             continue;
         }
         if columns.iter().all(|c| c.is_empty()) {
@@ -463,6 +672,12 @@ fn read_manifest(manifest: &Path) -> Result<Parsed, UndoError> {
                 PathBuf::from(unprefix(&columns[4])),
                 PathBuf::from(unprefix(&columns[5])),
             ));
+            preset = columns.get(14).cloned().unwrap_or_default();
+            planned = columns.get(15).and_then(|c| c.parse().ok()).unwrap_or(0);
+            started = columns[8]
+                .parse::<u64>()
+                .ok()
+                .map(|n| std::time::UNIX_EPOCH + std::time::Duration::from_nanos(n));
             continue;
         }
         let Ok(seq) = columns[0].parse::<u64>() else {
@@ -494,6 +709,7 @@ fn read_manifest(manifest: &Path) -> Result<Parsed, UndoError> {
                     dest_relative: PathBuf::from(unprefix(&columns[5])),
                     source_identity: identity,
                     placed_identity: None,
+                    fields: pending_fields(&columns),
                 });
             }
             // Last status wins per seq; a status row with no pending is
@@ -506,7 +722,7 @@ fn read_manifest(manifest: &Path) -> Result<Parsed, UndoError> {
     }
 
     let (source_root, dest_root) = roots.ok_or(UndoError::NoRoot)?;
-    Ok((source_root, dest_root, rows, unreadable))
+    Ok(Manifest { source_root, dest_root, preset, planned, started, rows, unreadable })
 }
 
 /// Last status wins per `seq`. A status row whose `seq` has no `pending` is
