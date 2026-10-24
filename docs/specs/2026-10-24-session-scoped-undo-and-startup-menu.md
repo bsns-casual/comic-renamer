@@ -236,14 +236,24 @@ understated it.** `check` and `apply` each take `&Path` and acquire the lock
 internally, so moving to "caller reads and holds, callee takes the held plan"
 changes a public signature, not a call.
 
-The builder check put this at 39 call sites. **Counted, it is 7, across 3
-files:** `apply`, `check`, `undo` and `undo_path` are called at
-`apply_refusals.rs:339,342,348` and `main.rs:370,420,430,751`, and the
-`undo.rs:205` hit is a doc comment. The check's substance stands — it is a core
-API change and the first draft's §7 listed only `undo.rs`'s tests — but the
-scope is small enough to do in one pass rather than something a plan has to
-budget around. The CLI's own integration tests drive the binary and are
-unaffected.
+The builder check put this at 39 call sites. **It was right, and the correction
+printed here on 2026-10-24 was wrong.** That correction claimed 7, from a grep
+for the qualified paths `apply::apply`, `apply::check` and friends. The largest
+caller imports them instead — `crates/core/tests/apply_exec.rs:7` is
+`use comic_renamer_core::apply::{apply, undo, undo_path};` — so every one of its
+calls is unqualified and the grep could not see a single one. That file is 898
+lines, carries 48 matches for the changing names, and its `Fixture` is built on
+`undo_path` at line 68, which this design deletes.
+
+Counted across the tree: `apply_exec.rs` 48, `apply_refusals.rs` 9,
+`apply.rs` 7 (definitions and internal calls), `main.rs` 4, `undo.rs` 1. The
+order of magnitude is the builder check's, not the correction's.
+
+The method error is the point worth keeping: a grep for a qualified path cannot
+count callers that import the name, and reporting its output as "counted" gave a
+wrong number more authority than the estimate it overrode. The scope is real —
+a plan for this has to name `apply_exec.rs`, because 898 lines of destructive-path
+tests hang off the function being deleted.
 
 Holding the lock across the prompt is still worth doing — it stops a second
 `apply` interleaving — but it does *not* close the finding on its own, because
