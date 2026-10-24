@@ -302,7 +302,7 @@ git commit -m "feat(record): one record per root pair, and never the live one"
   pub struct Summary {
       pub source_root: PathBuf, pub dest_root: PathBuf,
       pub preset: String, pub planned: u32,
-      pub placed: u32, pub interrupted: bool,
+      pub reversible: u32, pub interrupted: bool,
       pub started: std::time::SystemTime,
   }
   pub fn summarise(manifest: &Path) -> Result<Summary, UndoError>;
@@ -314,8 +314,14 @@ git commit -m "feat(record): one record per root pair, and never the live one"
   // record_pending gains: series: &str, volume: Option<u32>,
   //                       subtitle: Option<&str>, run: u32, extension: &str
   ```
-  `placed` counts rows whose terminal state is `placed` or `done`. `interrupted` is
-  true when any row has no terminal state. `started` comes from the roots row's
+  `reversible` counts rows whose terminal state is **`placed` or `done`**, and is
+  named for what it means rather than for one of the two states. A same-volume
+  move is a `Rename`, which records `done` and deliberately never `placed` —
+  "the inode does not move, so there is no new identity to record"
+  (`apply.rs:260-263`) — so a field that counted only `placed` rows would read 0
+  for every run in the default mode, and Task 7's "skip an empty record" filter
+  would hide every move run from the menu. `interrupted` is true when any row
+  reached neither `placed`, `done` nor `failed`. `started` comes from the roots row's
   `mtime`, so §5's screen can say when the run happened. `reverse_from` takes roots
   and preset id from the record, canonicalises both, **keeps the `RootsOverlap`
   refusal** (Review Focus 5), and recomputes each destination through
@@ -334,7 +340,7 @@ git commit -m "feat(record): one record per root pair, and never the live one"
 fn a_record_alone_rebuilds_every_destination() {
     let (dir, record) = a_written_record();
     let s = summarise(&record).unwrap();
-    assert_eq!((s.preset.as_str(), s.planned, s.placed, s.interrupted), ("komga", 1, 1, false));
+    assert_eq!((s.preset.as_str(), s.planned, s.reversible, s.interrupted), ("komga", 1, 1, false));
     let report = reverse_from(&record).unwrap();
     assert_eq!(report.refused, Vec::<String>::new());
     assert_eq!(report.restored, 1);
@@ -380,6 +386,19 @@ fn a_record_whose_roots_canonicalise_equal_is_refused() {
     drop(dir);
 }
 
+/// The naming trap, pinned: a same-volume move records `done` and never
+/// `placed`, and Move is the default mode.
+#[test]
+fn a_move_run_is_reversible_even_though_no_row_is_placed() {
+    let (dir, record) = a_written_move_record();     // Mechanism::Rename
+    let s = summarise(&record).unwrap();
+    assert_eq!(s.reversible, 1, "a renamed row is reversible");
+    assert!(!s.interrupted);
+    let text = std::fs::read_to_string(&record).unwrap();
+    assert!(!text.contains(",placed,"), "and it really has no placed row");
+    drop(dir);
+}
+
 #[test]
 fn every_status_row_has_the_full_column_count() {
     let (dir, record) = a_written_record();
@@ -396,7 +415,8 @@ fn every_status_row_has_the_full_column_count() {
 whose name a preset can produce a destination for, drives `create_with` →
 `record_pending` → `record_placed` → `record_done` for a Copy row with series
 `Hellboy`, volume 1, run 3, extension `pdf`, and returns `(TempDir, PathBuf)` with
-**canonicalised** roots. `a_record_with_one_root_for_both()` is the same with one
+**canonicalised** roots. `a_written_move_record()` is the same with
+`Mechanism::Rename` and `Mode::Move`. `a_record_with_one_root_for_both()` is the same with one
 directory as both roots.
 
 - [ ] **Step 2: Run them; expect FAIL (`summarise` not found)**
@@ -467,22 +487,21 @@ fn a_real_copy_is_reversed_because_the_source_still_matches() {
     assert!(!f.library_file.exists() && f.source_file.exists());
 }
 
+/// Isolates the content gate, which is the only test here that does.
+/// Overwriting the source normally changes its mtime, so the *existing*
+/// identity check refuses and the test passes with no new code — a trap the
+/// first draft fell into. Same length, same inode (written in place) and the
+/// recorded mtime restored with `utimensat` leaves identity matching exactly,
+/// so only a content comparison can refuse.
 #[test]
-fn a_source_with_different_content_refuses_the_delete() {
+fn a_same_size_stranger_with_the_recorded_identity_refuses_the_delete() {
     let f = real_copy();
-    std::fs::write(&f.source_file, b"different bytes entirely").unwrap();
-    assert_eq!(reverse_from(&f.record).unwrap().restored, 0);
-    assert!(f.library_file.exists());
-}
-
-/// Same length, different bytes — the case an identity check passes and a
-/// content check does not. `apply_exec.rs:880` already pins the same idea for
-/// the old gate.
-#[test]
-fn a_same_size_stranger_at_the_source_refuses_the_delete() {
-    let f = real_copy();
-    let len = std::fs::metadata(&f.source_file).unwrap().len() as usize;
-    std::fs::write(&f.source_file, vec![b'z'; len]).unwrap();
+    let before = std::fs::metadata(&f.source_file).unwrap();
+    let len = before.len() as usize;
+    write_in_place(&f.source_file, &vec![b'z'; len]);
+    set_mtime(&f.source_file, &before);
+    assert_eq!(identity_of(&f.source_file), f.recorded_source_identity,
+               "the identity check cannot see this, which is the point");
     assert_eq!(reverse_from(&f.record).unwrap().restored, 0);
     assert!(f.library_file.exists());
 }
@@ -509,8 +528,9 @@ fn a_move_is_reversed_by_renaming_back_without_a_content_check() {
 `planted(mode)` builds the research note's fixture: a 5-byte source the planter
 made, a 33-byte library file no run placed, and a record carrying the library
 file's real identity. `real_copy()` and `real_move()` drive a genuine
-`apply`-shaped operation so source and destination really correspond. `mkfifo`
-is a two-line `libc::mkfifo` helper in the test file.
+`apply`-shaped operation so source and destination really correspond, and expose
+`recorded_source_identity`. `mkfifo`, `write_in_place`, `set_mtime` (a
+`libc::utimensat` call) and `identity_of` are small helpers in the test file.
 
 - [ ] **Step 2: Run them; expect FAIL — the planted Move case deletes the file**
 - [ ] **Step 3: Implement `sha256_of` and the shared gate**
@@ -578,11 +598,13 @@ fn apply_refuses_when_the_records_directory_cannot_be_written() {
     let f = fixture();
     let blocked = f.dir.path().join("blocked");
     std::fs::write(&blocked, "not a directory").unwrap();
-    let guard = TreeGuard::new(&[&f.source_root, &f.dest_root]);
+    // `TreeGuard` asserts on drop and has no `.assert()`; its methods are
+    // `new`, `expect_created`, `expect_removed` and `expect_modified`
+    // (`crates/core/tests/common/mod.rs:242-272`).
+    let _guard = TreeGuard::new(&[&f.source_root, &f.dest_root]);
     let lock = Lock::library(&f.records, &f.dest_root).unwrap();
     let err = apply(&lock, &f.header, &f.rows, &blocked, false, &mut |_| {}).unwrap_err();
     assert!(matches!(err, ApplyError::Records(_)), "{err:?}");
-    guard.assert();
 }
 
 /// The HIGH finding: running one command twice must not make the first run
@@ -680,7 +702,8 @@ git commit -m "feat(apply): a held plan, a library lock, and a record the tool o
   adding one is not in the design. A run id is a record's **file name**, matched
   against `record::list`'s output — never `records.join(run)`, which would make any
   relative path a run id. With no argument, the most recent record `is_live` says
-  nobody holds.
+  nobody holds. Tests point the binary at a temporary records directory with
+  `XDG_CONFIG_HOME`, which `config_dir()` already honours.
 
 *Review changes:* `--yes` cut. The lookup is a match against enumerated names
 rather than a join.
@@ -697,9 +720,12 @@ fn undo_with_no_argument_reverses_the_most_recent_run() { /* newest reversed, ol
 #[test]
 fn a_run_id_is_a_name_and_never_a_path() {
     // A traversal, an absolute path, and a plan path are all rejected.
+    // `cli.rs:135` already defines `run(args, stdin) -> Output`; use it rather
+    // than a second helper of the same name. The records directory is selected
+    // by `XDG_CONFIG_HOME`, which the test sets on the child.
     for bad in ["../../etc/passwd", "/etc/passwd", "comic-renamer-plan.jsonl"] {
-        let out = run(&["undo", bad], &f);
-        assert!(!out.status.success(), "{bad}: {}", out.stderr);
+        let out = run(&["undo", bad], "");
+        assert!(!out.status.success(), "{bad}: {}", String::from_utf8_lossy(&out.stderr));
     }
 }
 
@@ -742,7 +768,7 @@ git commit -m "feat(cli): undo names a run, and apply stops printing a path"
   pub fn dispatch(key: char, waiting: &[(PathBuf, Summary)]) -> Option<Key>;
   pub fn run(records: &Path) -> Result<(), String>;
   ```
-  `waiting` skips live records, records with `placed == 0`, and anything `summarise`
+  `waiting` skips live records, records with `reversible == 0`, and anything `summarise`
   refuses; it sorts `interrupted` first. `render` is a pure function of the summary
   list so the wording is testable without a terminal, and a `Summary` whose
   `interrupted` is true renders "interrupted … (N of M rows placed)" while one that
