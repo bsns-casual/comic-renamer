@@ -60,6 +60,38 @@ fn a_lock_name_is_a_pure_function_of_the_canonical_path() {
     assert_ne!(lock_name(&real).unwrap(), lock_name(&other).unwrap());
 }
 
+/// The canonical path, **not** a case-folded one.
+///
+/// Canonicalisation is the whole normalisation here, and it is deliberately
+/// not followed by a fold: on a case-sensitive volume `Lib` and `lib` are two
+/// real libraries, and one lock between them means a run on either blocks the
+/// other. The symlink test above pins the canonicalisation; nothing pinned
+/// the absence of the fold, and adding `.to_lowercase()` to the hashed string
+/// left the whole suite green.
+///
+/// Pinned at the function rather than with two case-differing directories,
+/// because making those needs a case-sensitive volume and this has to hold in
+/// CI: the name is asserted to be the hash of the canonical path exactly, and
+/// not the hash of its folded form. `Lib` guarantees the two differ.
+#[test]
+fn a_lock_name_is_not_case_folded() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("Lib");
+    std::fs::create_dir(&root).unwrap();
+    let canonical = root.canonicalize().unwrap();
+    let text = canonical.to_string_lossy();
+    assert_ne!(text, text.to_lowercase(), "the fixture has to carry a capital");
+
+    let name = lock_name(&root).unwrap();
+    let hash = |s: &str| format!("{}.lock", comic_renamer_core::corpus::sha256_hex(s.as_bytes()));
+    assert_eq!(name, hash(&text));
+    assert_ne!(
+        name,
+        hash(&text.to_lowercase()),
+        "the root was folded before hashing, so two libraries share one lock"
+    );
+}
+
 #[test]
 fn a_canonicalisation_failure_is_an_error_not_a_second_lock() {
     assert!(lock_name(Path::new("/no/such/library")).is_err());

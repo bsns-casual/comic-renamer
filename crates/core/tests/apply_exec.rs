@@ -40,6 +40,11 @@ fn gcd() -> Mappings {
     mappings(&[
         ("mazebook", "Mazebook", None, None, Some(5)),
         ("birdking_vol1", "Birdking", Some(1), None, Some(3)),
+        // The second volume of the same series, so two rows share one series
+        // folder. Every other pair in this file lands in a directory of its
+        // own, which is why nothing could see the order rows are reversed in
+        // or the `prune_empty_dirs` call between them.
+        ("birdking_vol2", "Birdking", Some(2), None, Some(3)),
         ("hellboyomnibus_vol1", "Hellboy Omnibus", Some(1), None, Some(4)),
     ])
 }
@@ -317,6 +322,172 @@ fn reverse_refuses_when_only_size_and_inode_match() {
     let report = r.reverse().unwrap();
     assert_eq!(report.restored, 0, "{report:?}");
     assert!(destination.exists(), "an in-place edit was mistaken for our own file");
+}
+
+/// A record of a same-volume move: `rename`, so the inode moved and the
+/// recorded *source* identity is what still describes the destination. No
+/// `placed` row, because a rename makes no new inode.
+///
+/// The bundle folder is left empty, which is the branch with **no content
+/// gate**: `Mode::Move` with the source absent renames the destination back,
+/// and the only thing standing between that and a stranger's file being moved
+/// into the user's bundle folder is the identity comparison. Every weakening
+/// of that comparison survived the suite, because the only fixture exercising
+/// it was `Mode::Copy`, where `remove_with_a_copy_at_the_source` hashes the
+/// two sides and refuses anyway.
+struct RecordedMove {
+    _dir: TempDir,
+    manifest: PathBuf,
+    source_root: PathBuf,
+    destination: PathBuf,
+    /// The identity the record carries, read from the file before it moved.
+    identity: (u64, u64, i64),
+}
+
+impl RecordedMove {
+    fn new(name: &str, body: &[u8]) -> RecordedMove {
+        let dir = tempdir().unwrap();
+        let source_root = dir.path().join("src");
+        let dest_root = dir.path().join("dest");
+        std::fs::create_dir_all(&source_root).unwrap();
+        std::fs::create_dir_all(&dest_root).unwrap();
+        let source = source_root.join(name);
+        std::fs::write(&source, body).unwrap();
+
+        let (resolved, relative) = produced("Mazebook");
+        let destination = dest_root.join(&relative);
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+
+        let manifest = dir.path().join("run.record");
+        let mut writer =
+            UndoWriter::create(&manifest, &source_root, &dest_root, "komga", 1).unwrap();
+        // `record_pending` stats the source, so it runs before the rename —
+        // exactly as `apply` orders it.
+        let seq = writer
+            .record_pending(
+                Path::new(name),
+                &relative,
+                Mechanism::Rename,
+                Mode::Move,
+                &source,
+                &resolved.series,
+                resolved.volume,
+                resolved.subtitle.as_deref(),
+                resolved.run,
+                "pdf",
+            )
+            .unwrap();
+        std::fs::rename(&source, &destination).unwrap();
+        writer.record_done(seq).unwrap();
+        drop(writer);
+
+        let meta = std::fs::symlink_metadata(&destination).unwrap();
+        let identity = (
+            meta.len(),
+            MetadataExt::ino(&meta),
+            MetadataExt::mtime(&meta) * 1_000_000_000 + MetadataExt::mtime_nsec(&meta),
+        );
+        RecordedMove {
+            _dir: dir,
+            manifest,
+            source_root,
+            destination,
+            identity,
+        }
+    }
+
+    fn reverse(&self) -> UndoReport {
+        reverse(&self.manifest).unwrap()
+    }
+
+    fn restored(&self, name: &str) -> PathBuf {
+        self.source_root.join(name)
+    }
+
+    fn destination(&self) -> &Path {
+        &self.destination
+    }
+
+    fn live_identity(&self) -> (u64, u64, i64) {
+        let meta = std::fs::symlink_metadata(&self.destination).unwrap();
+        (
+            meta.len(),
+            MetadataExt::ino(&meta),
+            MetadataExt::mtime(&meta) * 1_000_000_000 + MetadataExt::mtime_nsec(&meta),
+        )
+    }
+}
+
+/// The rename-back is gated on identity and on nothing else, so each component
+/// of that identity has to be load-bearing on this path. Each case below
+/// matches the recorded identity in every component but one.
+///
+/// Without this, three weakenings all passed: ignoring `mtime_ns`, comparing
+/// size alone, and ignoring the inode. Under any of them a destination the run
+/// did not place is renamed into the user's bundle folder and reported
+/// restored — and in the first case that destination is the file they had
+/// edited in place, which is the loss `Identity` carries `mtime_ns` to prevent.
+#[test]
+fn a_move_refuses_a_destination_that_is_not_the_file_it_placed() {
+    use std::io::Write;
+
+    // 1. Edited in place: same size, same inode, new mtime.
+    let r = RecordedMove::new("mazebook.pdf", b"original");
+    let mut file = std::fs::OpenOptions::new().write(true).open(r.destination()).unwrap();
+    file.write_all(b"EDITEDxx").unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    let live = r.live_identity();
+    assert_eq!(
+        (live.0, live.1),
+        (r.identity.0, r.identity.1),
+        "the edit has to keep size and inode or this tests nothing"
+    );
+    assert_ne!(live.2, r.identity.2, "and it has to change the mtime");
+
+    let report = r.reverse();
+    assert_eq!(report.restored, 0, "{report:?}");
+    assert_eq!(report.refused.len(), 1, "{report:?}");
+    assert!(r.destination().exists(), "an edit in place was taken for our own file");
+    assert!(
+        !r.restored("mazebook.pdf").exists(),
+        "an edited file was renamed into the bundle folder"
+    );
+
+    // 2. A different file of the same length, with the recorded mtime set on
+    //    it: only the inode differs.
+    let r = RecordedMove::new("mazebook.pdf", b"original");
+    std::fs::remove_file(r.destination()).unwrap();
+    std::fs::write(r.destination(), b"stranger").unwrap();
+    let stamp = filetime::FileTime::from_unix_time(
+        r.identity.2.div_euclid(1_000_000_000),
+        r.identity.2.rem_euclid(1_000_000_000) as u32,
+    );
+    filetime::set_file_mtime(r.destination(), stamp).unwrap();
+    let live = r.live_identity();
+    assert_eq!(
+        (live.0, live.2),
+        (r.identity.0, r.identity.2),
+        "size and mtime have to match, or the inode is not what is being tested"
+    );
+    assert_ne!(live.1, r.identity.1, "and the inode has to differ");
+
+    let report = r.reverse();
+    assert_eq!(report.restored, 0, "{report:?}");
+    assert_eq!(report.refused.len(), 1, "{report:?}");
+    assert_eq!(std::fs::read(r.destination()).unwrap(), b"stranger");
+    assert!(
+        !r.restored("mazebook.pdf").exists(),
+        "a stranger's file was renamed into the bundle folder"
+    );
+
+    // 3. And the fixture really does reverse when nothing was touched, so
+    //    none of the refusals above came from the shape of the record.
+    let r = RecordedMove::new("mazebook.pdf", b"original");
+    let report = r.reverse();
+    assert_eq!((report.restored, report.refused.len()), (1, 0), "{report:?}");
+    assert_eq!(std::fs::read(r.restored("mazebook.pdf")).unwrap(), b"original");
+    assert!(!r.destination().exists());
 }
 
 #[test]
@@ -1068,6 +1239,57 @@ fn a_partial_undo_can_be_resumed() {
 
     // And the plan is runnable again.
     assert_eq!(f.run().unwrap().executed, 2);
+}
+
+/// Rows are reversed newest-first, and two rows in one series folder is the
+/// only fixture that can see it.
+///
+/// `reverse` iterates `m.rows.into_iter().rev()`, and turning that into
+/// forward order left the whole suite green: every other pair of rows here
+/// lands in a directory of its own, so neither the iteration order nor the
+/// `prune_empty_dirs` call between two rows was observable.
+///
+/// The order is read off `refused`, which is pushed per row as the loop meets
+/// them. Measured while writing this, and worth recording: with the komga
+/// preset the *outcome* is the same either way — `rmdir` refuses a directory
+/// that still holds the sibling's file, so the folder goes on whichever row is
+/// last and both rows restore regardless. So this pins the order itself, plus
+/// the shared-folder prune that forward order would otherwise have hidden.
+#[test]
+fn two_rows_in_one_series_folder_reverse_newest_first() {
+    let c = gcd();
+    let f = Fixture::new(&["birdking_vol1.pdf", "birdking_vol2.pdf"], &c, Mode::Move);
+    let record = f.run().unwrap().record.unwrap();
+    let folder = f.dest.join("Birdking");
+    assert_eq!(
+        f.files_under(&folder).len(),
+        2,
+        "both rows have to land in one folder for this to mean anything"
+    );
+
+    // Both original names occupied, so both rows refuse and the order they
+    // were met in is visible.
+    for name in ["birdking_vol1.pdf", "birdking_vol2.pdf"] {
+        std::fs::write(f.source.join(name), b"squatter").unwrap();
+    }
+    let report = f.undo(&record).unwrap();
+    assert_eq!(report.restored, 0, "{report:?}");
+    assert_eq!(report.refused.len(), 2, "{report:?}");
+    assert!(
+        report.refused[0].starts_with("row 2") && report.refused[1].starts_with("row 1"),
+        "rows were reversed oldest-first: {:?}",
+        report.refused
+    );
+
+    // And with the squatters cleared, the shared folder is pruned exactly
+    // once, by whichever row empties it.
+    for name in ["birdking_vol1.pdf", "birdking_vol2.pdf"] {
+        std::fs::remove_file(f.source.join(name)).unwrap();
+    }
+    let report = f.undo(&record).unwrap();
+    assert_eq!((report.restored, report.refused.len()), (2, 0), "{report:?}");
+    assert!(!folder.exists(), "the emptied series folder was left behind");
+    assert!(f.files_under(&f.dest).is_empty(), "{:?}", f.files_under(&f.dest));
 }
 
 #[test]

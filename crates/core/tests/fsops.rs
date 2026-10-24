@@ -254,6 +254,85 @@ fn stream_verified_refuses_an_occupied_destination_without_reading_the_source() 
     assert_eq!(read(&root.join("dst.pdf")), "ORIGINAL");
 }
 
+/// The verify that licenses every streamed unlink, observed failing.
+///
+/// `apply` writes `placed` and then removes the source only because
+/// `stream_verified` returned `Ok`, and the cross-volume reverse unlinks the
+/// library copy on the same promise — the assertion message of the test next
+/// to it says "the copy was unlinked from without being verified". But that
+/// test checks the destination holds the right bytes, which `io::copy`
+/// produces whether or not the comparison ran, so dropping the comparison
+/// entirely left the suite green: no fixture ever handed it a copy that did
+/// not match.
+///
+/// This one does. The temp is written sequentially and never rewritten, so a
+/// byte changed at offset 0 once the copy has moved past it survives into the
+/// final file: same length, different contents, which is exactly what the
+/// hash comparison exists to catch. The window is the whole copy, and the
+/// temp's own size says when it has been entered — so this is deterministic
+/// rather than timed.
+#[test]
+fn a_stream_whose_copy_does_not_match_the_source_is_refused() {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let d = tempdir().unwrap();
+    let root = d.path().join("dest");
+    std::fs::create_dir(&root).unwrap();
+    let src = d.path().join("big.pdf");
+    // Large enough that the copy is still running when the writer lands, and
+    // small enough to stay a unit test. Non-uniform, so a changed byte
+    // genuinely changes the hash.
+    let payload: Vec<u8> = (0..8 * 1024 * 1024u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&src, &payload).unwrap();
+
+    let watched = root.clone();
+    let corrupter = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            let partial = std::fs::read_dir(&watched)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.path())
+                .find(|p| {
+                    p.extension().is_some_and(|e| e == "partial")
+                        && std::fs::metadata(p).is_ok_and(|m| m.len() > 1 << 20)
+                });
+            // Offset 0 is already written and will not be written again.
+            if let Some(partial) = partial {
+                let mut file = std::fs::OpenOptions::new().write(true).open(&partial).unwrap();
+                file.seek(SeekFrom::Start(0)).unwrap();
+                file.write_all(b"!").unwrap();
+                file.sync_all().unwrap();
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_micros(200));
+        }
+        false
+    });
+
+    let result = stream_verified(&src, &root, &rel("out.pdf"));
+    assert!(
+        corrupter.join().unwrap(),
+        "the temp was never seen, so nothing was corrupted and this proved nothing"
+    );
+
+    let err = result.expect_err("a copy that does not match the source was accepted");
+    assert_eq!(err.kind(), ErrorKind::InvalidData, "{err}");
+    assert!(
+        !root.join("out.pdf").exists(),
+        "a mismatching copy was renamed into place, and apply would now unlink the source"
+    );
+    // And the temp took itself with it.
+    let left: Vec<PathBuf> = std::fs::read_dir(&root)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+    // The source is untouched either way: this function never unlinks.
+    assert_eq!(std::fs::read(&src).unwrap(), payload);
+}
+
 #[test]
 fn a_failed_stream_leaves_no_partial_behind() {
     let d = tempdir().unwrap();

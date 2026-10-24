@@ -303,6 +303,50 @@ fn an_edited_plan_cannot_make_the_roots_overlap() {
     assert!(matches!(run(&f), Err(ApplyError::RootsOverlap)));
 }
 
+/// Both halves, and only nesting can tell them apart. Equal roots satisfy
+/// both, and the `/` case above is the bundle sitting inside the library — so
+/// dropping `dest_root.starts_with(&source_root)` left every overlap test
+/// green while a plan whose **library is inside the bundle folder** was
+/// accepted. That is the self-ingestion §6.10 refuses: the run writes into a
+/// tree it is also reading, so a later row's source is a file an earlier row
+/// placed. `undo::reverse`'s identical check is pinned both ways by
+/// `undo_schema.rs nested_roots_are_refused_in_both_directions`, whose
+/// docstring says why one direction is not enough; the same reasoning was
+/// never applied here.
+#[test]
+fn an_edited_plan_cannot_nest_either_root_inside_the_other() {
+    let c = gcd();
+
+    // Library inside the bundle folder — the half nothing covered.
+    let f = Fixture::new(&["mazebook.pdf"], &c);
+    let inner = f.source.join("library");
+    std::fs::create_dir_all(&inner).unwrap();
+    f.rewrite(|header, _| header.dest_root = inner.clone());
+    {
+        let _guard = TreeGuard::new(&[f.source.as_path(), f.dest.as_path()]);
+        assert!(matches!(run(&f), Err(ApplyError::RootsOverlap)), "library inside bundle");
+    }
+
+    // Bundle folder inside the library, which `/` reaches by accident and
+    // this reaches on purpose.
+    let f = Fixture::new(&["mazebook.pdf"], &c);
+    let inner = f.dest.join("bundle");
+    std::fs::create_dir_all(&inner).unwrap();
+    f.rewrite(|header, rows| {
+        header.source_root = inner.clone();
+        // The rows have to be inside the root they claim, or
+        // `verify_inside_source_root` refuses them before the overlap check
+        // and the test would pass for the wrong reason.
+        for row in rows {
+            row.source = inner.join(row.source.file_name().unwrap());
+        }
+    });
+    {
+        let _guard = TreeGuard::new(&[f.source.as_path(), f.dest.as_path()]);
+        assert!(matches!(run(&f), Err(ApplyError::RootsOverlap)), "bundle inside library");
+    }
+}
+
 // `a_run_that_executes_nothing_does_not_burn_the_plan` moved to
 // `apply_record.rs` as `a_run_that_executes_nothing_writes_no_record`: it is
 // the only test in this file that executed a run, and what it was really
