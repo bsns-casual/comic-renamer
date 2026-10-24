@@ -12,9 +12,9 @@ use tempfile::tempdir;
 
 fn gcd() -> Mappings {
     mappings(&[
-        ("mazebook", "Mazebook", None, Some(5)),
-        ("hellboyomnibus_vol1", "Hellboy Omnibus", Some(1), Some(4)),
-        ("maskomnibusvolume1secondedition", "The Mask Omnibus", Some(1), Some(2)),
+        ("mazebook", "Mazebook", None, None, Some(5)),
+        ("hellboyomnibus_vol1", "Hellboy Omnibus", Some(1), None, Some(4)),
+        ("maskomnibusvolume1secondedition", "The Mask Omnibus", Some(1), None, Some(2)),
     ])
 }
 

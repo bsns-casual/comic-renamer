@@ -312,6 +312,10 @@ pub enum ApplyError {
     /// means it does not happen. Raised before the first row.
     #[error("the record store is unusable: {0}")]
     Records(String),
+    /// The lock held is some other library's, so this one is not locked at
+    /// all. A caller bug, caught before the first row rather than trusted.
+    #[error("the lock held is for {locked}, but this plan writes to {planned}")]
+    WrongLibrary { locked: PathBuf, planned: PathBuf },
     #[error("source {0} changed since the scan")]
     SourceChanged(PathBuf),
     #[error("need {}, only {} available after the reserve", human_bytes(*required), human_bytes(*available))]

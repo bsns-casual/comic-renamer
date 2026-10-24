@@ -98,9 +98,20 @@ pub fn corpus(rows: &[Row<'_>]) -> (TempDir, Corpus) {
     (dir, corpus)
 }
 
-/// `(stem, series, volume, volume_count)`. The key is derived from the stem,
-/// so a fixture is written the way a contributor would write it.
-pub type MapRow<'a> = (&'a str, &'a str, Option<u32>, Option<u32>);
+/// `(stem, series, volume, subtitle, volume_count)`. The key is derived from
+/// the stem, so a fixture is written the way a contributor would write it.
+///
+/// `subtitle` is here rather than hardcoded `None` because a field no fixture
+/// can express is a field no test can pin: `execute` passed `subtitle: None`
+/// for every row and the whole workspace stayed green, while the undo it
+/// wrote was useless for any bundle whose titles carry one.
+pub type MapRow<'a> = (
+    &'a str,
+    &'a str,
+    Option<u32>,
+    Option<&'a str>,
+    Option<u32>,
+);
 
 /// A mapping holding exactly `rows`, loaded through the real TSV path so the
 /// fixture is validated like shipped data is.
@@ -108,11 +119,11 @@ pub fn mappings(rows: &[MapRow<'_>]) -> comic_renamer_core::mapping::Mappings {
     use comic_renamer_core::mapping::{key, to_tsv, MappingRow, Mappings};
     let rows: Vec<MappingRow> = rows
         .iter()
-        .map(|(stem, series, volume, volume_count)| MappingRow {
+        .map(|(stem, series, volume, subtitle, volume_count)| MappingRow {
             key: key(stem).unwrap(),
             series: (*series).into(),
             volume: *volume,
-            subtitle: None,
+            subtitle: subtitle.map(str::to_string),
             lang: "en".into(),
             volume_count: *volume_count,
             bundle: String::new(),

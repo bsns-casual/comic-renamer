@@ -38,9 +38,9 @@ fn produced(series: &str) -> (Resolved, PathBuf) {
 
 fn gcd() -> Mappings {
     mappings(&[
-        ("mazebook", "Mazebook", None, Some(5)),
-        ("birdking_vol1", "Birdking", Some(1), Some(3)),
-        ("hellboyomnibus_vol1", "Hellboy Omnibus", Some(1), Some(4)),
+        ("mazebook", "Mazebook", None, None, Some(5)),
+        ("birdking_vol1", "Birdking", Some(1), None, Some(3)),
+        ("hellboyomnibus_vol1", "Hellboy Omnibus", Some(1), None, Some(4)),
     ])
 }
 

@@ -147,7 +147,7 @@ fn apply_inner(
     // `None` is `check`: everything above has run, and nothing below it
     // writes. The lock and the record store are only bound when they are
     // about to be used.
-    let Some((_lock, records)) = run else {
+    let Some((lock, records)) = run else {
         return Ok(ApplyResult {
             executed: runnable.len(),
             skipped,
@@ -155,6 +155,18 @@ fn apply_inner(
             record: None,
         });
     };
+
+    // The lock has to be *this* library's. Holding one for somewhere else
+    // leaves this library unlocked while the type says otherwise, and nothing
+    // below would notice: two runs would interleave and each would sweep the
+    // other's record. Both sides are canonical, so a symlinked library still
+    // matches itself.
+    if lock.dest_root != header.dest_root {
+        return Err(ApplyError::WrongLibrary {
+            locked: lock.dest_root.clone(),
+            planned: header.dest_root.clone(),
+        });
+    }
 
     // Before the first row, not from it: a run that cannot be recorded does
     // not happen, and the refusal has to arrive while that is still true.
@@ -690,9 +702,17 @@ fn is_cloud_synced(path: &Path) -> bool {
 /// Held by the caller, so one process can run a pre-flight, a disclosure, a
 /// prompt and then `apply` and `reverse_run` without deadlocking against
 /// itself — which an internal acquire per call could not.
+/// It **names the library it locks.** A `Lock` that only proved *a* lock was
+/// held would let `apply(&lock_for_a, &header_for_b, …)` compile and run, and
+/// a type that does not identify what it locks delivers less than taking
+/// `&Lock` claims. The only caller derives both from one header today, which
+/// is why this is cheap rather than why it is unnecessary.
 pub struct Lock {
     /// Held open for the lifetime of the lock: closing it releases the flock.
     _file: std::fs::File,
+    /// Canonical, so it compares equal to the `dest_root` `apply_inner`
+    /// resolves — which is the same reason the record stores canonical roots.
+    dest_root: PathBuf,
 }
 
 impl Lock {
@@ -714,6 +734,9 @@ impl Lock {
         if !crate::fsops::flock_nb(&file)? {
             return Err(ApplyError::Locked);
         }
-        Ok(Lock { _file: file })
+        Ok(Lock {
+            _file: file,
+            dest_root: canonical_dir(dest_root)?,
+        })
     }
 }

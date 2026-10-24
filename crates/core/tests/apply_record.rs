@@ -17,8 +17,18 @@ use tempfile::{tempdir, TempDir};
 
 fn gcd() -> Mappings {
     mappings(&[
-        ("mazebook", "Mazebook", None, Some(5)),
-        ("birdking_vol1", "Birdking", Some(1), Some(3)),
+        ("mazebook", "Mazebook", None, None, Some(5)),
+        ("birdking_vol1", "Birdking", Some(1), None, Some(3)),
+        // A subtitle, because the preset puts it in the leaf — `Hellboy Vol.
+        // 01 - Seed of Destruction.pdf` — so a record that loses it names a
+        // path the preset does not produce and the row is refused forever.
+        (
+            "hellboy_vol1_seedofdestruction",
+            "Hellboy",
+            Some(1),
+            Some("Seed of Destruction"),
+            Some(4),
+        ),
     ])
 }
 
@@ -317,6 +327,54 @@ fn apply_and_reverse_share_one_library_lock() {
     assert!(f.source_root.join("mazebook.pdf").exists());
 }
 
+/// A lock for one library does not license a run against another. Without
+/// this the type says "locked" while the library this run writes to is
+/// unlocked, and two runs would interleave on it — each sweeping the other's
+/// record under a lock neither of them holds.
+#[test]
+fn a_lock_for_another_library_is_refused() {
+    let mine = fixture();
+    let theirs = fixture();
+    let wrong = Lock::library(&mine.records, &theirs.dest_root).unwrap();
+
+    let err = {
+        let _guard = TreeGuard::new(&[&mine.source_root, &mine.dest_root]);
+        apply(
+            &wrong,
+            &mine.header,
+            &mine.rows,
+            &mine.records,
+            false,
+            &mut |_| {},
+        )
+        .unwrap_err()
+    };
+    assert!(matches!(err, ApplyError::WrongLibrary { .. }), "{err:?}");
+
+    // And the right lock runs, so the refusal is about identity and not about
+    // the fixture being unrunnable.
+    let right = Lock::library(&mine.records, &mine.dest_root).unwrap();
+    assert_eq!(run(&mine, &right).unwrap().executed, 1);
+}
+
+/// The same library reached by another name is the same library: both sides
+/// of the comparison are canonical, so a plan naming a symlink still runs
+/// under a lock taken on the real directory.
+#[test]
+fn a_lock_on_the_real_library_covers_a_plan_naming_a_symlink_to_it() {
+    let f = fixture();
+    let aka = f.dest_root.with_file_name("library-link");
+    std::os::unix::fs::symlink(&f.dest_root, &aka).unwrap();
+    let header = PlanHeader {
+        dest_root: aka,
+        ..f.header.clone()
+    };
+
+    let lock = Lock::library(&f.records, &f.dest_root).unwrap();
+    let r = apply(&lock, &header, &f.rows, &f.records, false, &mut |_| {}).unwrap();
+    assert_eq!(r.executed, 1, "one library read as two: {r:?}");
+}
+
 /// Two libraries are two locks: one run must not stop another library's.
 #[test]
 fn two_libraries_in_one_store_do_not_block_each_other() {
@@ -481,6 +539,79 @@ fn a_record_is_named_by_the_store_and_lives_in_it() {
             .and_then(|e| e.to_str()),
         Some("record")
     );
+}
+
+/// Every field `execute` writes has to be the row's own, and a subtitle is
+/// the one that had nothing watching it: no fixture in the suite carried one,
+/// so `subtitle: None` in `execute` passed the entire workspace while the
+/// records it wrote were useless for any bundle whose titles have subtitles.
+///
+/// The blast radius is the same as the `series` half of the same defect.
+/// `undo::reverse` rebuilds the destination from the record's fields, and the
+/// preset puts the subtitle in the leaf, so a row that lost it names a path
+/// the preset does not produce and is refused — a reverse that restores
+/// nothing and reports every row as refused.
+#[test]
+fn a_record_carries_the_subtitle_its_own_reverse_needs() {
+    let f = build(&["hellboy_vol1_seedofdestruction.pdf"], Mode::Move).0;
+    let lock = Lock::library(&f.records, &f.dest_root).unwrap();
+
+    // The subtitle is in the name, so losing it is losing the destination.
+    let placed = f
+        .dest_root
+        .join("Hellboy/Hellboy Vol. 01 - Seed of Destruction.pdf");
+    let record = run(&f, &lock).unwrap().record.unwrap();
+    assert!(placed.exists(), "{:?}", f.rows[0].destination_preview);
+
+    // It is in the record, under the always-on `'` prefix every text field
+    // takes, and not merely in the path the row names.
+    let text = std::fs::read_to_string(&record).unwrap();
+    assert!(
+        text.contains(",'Seed of Destruction,"),
+        "the subtitle column is empty, so the reverse below is rebuilding \
+         from a different title:\n{text}"
+    );
+
+    let report = reverse_run(&lock, &record).unwrap();
+    assert_eq!(report.restored, 1, "{report:?}");
+    assert!(report.refused.is_empty(), "{report:?}");
+    assert!(
+        f.source_root
+            .join("hellboy_vol1_seedofdestruction.pdf")
+            .exists(),
+        "the subtitled row never came back"
+    );
+    assert!(!placed.exists());
+}
+
+/// The mechanism and mode columns are the row's own, asserted where they are
+/// written rather than through what they later cause.
+///
+/// `Row::expected` reads the mechanism in exactly two states: a completed
+/// rename, where the source's identity still describes the destination because
+/// the inode moved, and an interrupted clone or stream, where nothing does and
+/// the row must be refused. Recording a *weaker* mechanism than the truth is
+/// caught by any move's round trip — the rename loses that fallback and the
+/// reverse refuses every row. The other direction is not reachable from here:
+/// a completed clone always writes `placed`, after which `expected` never
+/// consults the mechanism again, and the one state where a forged `rename`
+/// would be read needs a clone that fails *between* landing and its `placed`
+/// write. `perform` marks that path "reasoned, not tested" for the same
+/// reason. So the column is pinned at the point of writing.
+#[test]
+fn a_records_mode_and_mechanism_are_the_rows_own() {
+    // Both trees are in one temporary directory, so a move is a rename and a
+    // copy is a clone.
+    for (mode, expected) in [(Mode::Move, ",move,rename,"), (Mode::Copy, ",copy,clone,")] {
+        let f = build(&["mazebook.pdf"], mode).0;
+        let lock = Lock::library(&f.records, &f.dest_root).unwrap();
+        let record = run(&f, &lock).unwrap().record.unwrap();
+        let text = std::fs::read_to_string(&record).unwrap();
+        assert!(
+            text.contains(expected),
+            "a {mode:?} run did not record {expected:?}:\n{text}"
+        );
+    }
 }
 
 /// The record reverses on its own: `reverse_run` is handed no plan, no roots
