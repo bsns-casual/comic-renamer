@@ -6,88 +6,104 @@
 the tool owns, take away its authority to authorise a deletion, and reach it from a
 startup menu and a run-keyed `undo`.
 
-**Architecture:** A new `core::record` module owns where records live, how they are
-named, enumerated, liveness-tested and superseded; it takes the directory as an
-argument so core stays free of `config_dir()`. `core::undo` keeps the CSV format and
-grows the five per-row fields a preset needs plus two roots-row fields, so `reverse`
-recomputes destinations itself and no longer takes them from its caller. Deleting a
-copied file is gated on a content check against the filesystem, not on the record.
-`apply` and `check` take a plan the caller has already read, which closes the
-confirm-then-re-read window.
+**Architecture:** `core::record` owns everything about records as a *set* — naming,
+enumeration, liveness, retention and the per-library lock — and takes the directory
+as an argument so core never reaches for `config_dir()`. `core::undo` keeps the CSV
+format and grows the fields a preset needs, so `reverse` recomputes destinations
+itself. Every path that unlinks a library file routes through one guarded helper
+that checks the filesystem rather than the record. `apply` and `check` take a plan
+the caller has already read and a lock the caller already holds.
 
-**Tech Stack:** Rust 1.88, `libc` (`flock`), `sha2` (already a dependency, used by
-`fsops`), `ratatui`/`crossterm` (already present, for the menu if a TUI is chosen).
+**Tech Stack:** Rust 1.88, `libc` (`flock`), `corpus::sha256_hex` and
+`fsops::hash_open_file` for hashing, `fsops::ensure_root`, `normalize::collision_key`.
 
 **Spec:** `docs/specs/2026-10-24-session-scoped-undo-and-startup-menu.md`
 
+**Revision:** second draft, 2026-10-24. The first failed a three-seat review:
+four of nine tasks could not compile at their own commit, the delete gate covered
+one of the two arms that need it, and `supersede` could destroy the only record of
+a 400-file run. The review notes below each task say what changed.
+
 ## Global Constraints
 
-- Rust edition and floor: `rust-version` is **1.88**; do not raise it.
-- macOS only. `renamex_np`, `clonefile`, `SF_DATALESS` and `flock` are all already used.
-- **Invariant 1:** presets are the only code that constructs paths. `reverse`
-  recomputing a destination must go through `Preset::destination`.
-- **Invariant 2:** `apply` never trusts a path string in a plan. Unchanged by this work.
-- **Invariant 6:** no-clobber at the syscall. The move-reverse keeps `renamex_np(RENAME_EXCL)`.
-- **Invariant 7:** collision comparison is NFC-normalised and case-folded, via
-  `normalize::collision_key`. Applies to the lock name derived from `dest_root`.
+- `rust-version` is **1.88**; do not raise it. macOS only.
+- **Invariant 1:** presets are the only code that constructs paths.
+- **Invariant 2:** `apply` never trusts a path string in a plan.
+- **Invariant 6:** no-clobber at the syscall, and **never check-then-act on a
+  destructive operation.** This applies to `supersede` as much as to a rename.
+- **Invariant 7:** collision comparison is NFC-normalised and case-folded via
+  `normalize::collision_key`, including the lock name derived from `dest_root`.
 - **New invariant 11:** a record never authorises its own deletion.
-- Do not run `cargo fmt`; `rustfmt` is not installed and the tree has never been through it.
-- Do not reformat files you are not otherwise changing.
-- `cargo test --workspace` must end with 0 failures and **0 compiler warnings**.
-  Baseline at the start of this plan: 409 passed, 7 ignored.
-- `cargo xtask check-mappings` must pass and `cargo xtask measure` must still report
-  `located` 91.6%.
-- **`timeout` is not installed on this machine.** `timeout N cargo test` produces no
-  output and looks exactly like a hang. The suite runs in about 3 seconds.
+- **`crates/core/tests/apply_exec.rs` is 898 lines and calls every signature this
+  plan changes** — `apply` 19 times, `undo` 14, `reverse` 14, `UndoWriter::create`
+  7, `undo_path` via `Fixture::manifest()` at line 68, and `Lock::acquire` at 891.
+  It is named in the Files list of every task that changes one of those. A task
+  whose Files list omits it cannot end green.
+- Do not run `cargo fmt`; `rustfmt` is not installed. Do not reformat untouched files.
+- `cargo test --workspace` must end 0 failures, **0 compiler warnings**. Baseline:
+  409 passed, 7 ignored.
+- `cargo xtask check-mappings` passes and `cargo xtask measure` reports `located` 91.6%.
+- **`timeout` is not installed.** `timeout N cargo test` prints nothing and looks
+  exactly like a hang. The suite runs in ~3 seconds.
 - Never run `git push`, `gh pr create`, or any remote-touching command.
+
+## Design change this plan makes
+
+**`Trust::InSession` is cut; verification is unconditional.** The design's §3 says
+the content check is skipped for a reverse within the session that wrote the record,
+to keep "I just ran this, undo it" fast. Two seats independently rejected it: the
+enum has one call site no test exercises, and a single miswired `InSession` reopens
+the finding with a green suite. An exemption to invariant 11 that nothing proves is
+worth more than the file reads it saves. Cost: an in-session undo of 300 rows reads
+600 files. Update §3 in Task 10.
 
 ## Review Focus
 
-Five conditions the spec implies and whose absence would bite a user. Each has a
-test in the task that owns the code.
-
-1. **A record whose roots no longer exist** — library unmounted or moved since the
-   run. Every row refuses with a reason naming the root; no panic, no partial
-   reverse reported as clean. (Task 2)
-2. **A live record for the same root pair** — supersede must never delete a record
-   whose run is still going, or a crash in run B destroys run A's only way back.
-   (Task 1)
-3. **A record written by an older build** — wrong column count must refuse with a
-   message saying so, never misparse a column into the wrong field. (Task 2)
-4. **The records directory cannot be written** — no `HOME`, no `XDG_CONFIG_HOME`, or
-   the directory is unwritable. `apply` **refuses before placing anything** rather
-   than running without a record: a run nobody can reverse is exactly the case a
-   user would want to be asked about. (Task 4)
-5. **A `dest_root` whose path is awkward as a filename** — spaces, `/`, non-ASCII,
-   or longer than 255 bytes. The lock filename is derived by hashing the canonical
-   root, never by escaping it. (Task 1)
+1. **A record whose roots no longer exist** — every row refuses with a reason naming
+   the root; no panic, no partial reverse reported clean. (Task 3)
+2. **A live record must survive superseding** — or a crash in run B destroys run A's
+   only way back. (Task 2)
+3. **A record from an older build** — a header that is *present and wrong* refuses by
+   name. A *headerless* record keeps its first row, which is what
+   `a_manifest_with_no_header_keeps_its_first_row` exists to pin. (Task 3)
+4. **The records directory cannot be written** — `apply` refuses before placing
+   anything, via a new `ApplyError` variant. (Task 5)
+5. **Roots that canonicalise equal** — `source_name == dest_relative` would make the
+   content gate hash one inode against itself and agree. `RootsOverlap` must still
+   refuse. (Task 4)
+6. **A non-regular file at the recorded source** — a FIFO must not block `open`
+   forever while the library lock is held. (Task 4)
 
 ---
 
-## Task 1: The record store
+## Task 1: Record naming, liveness, and the per-library lock
 
 **Files:**
 - Create: `crates/core/src/record.rs`
-- Modify: `crates/core/src/lib.rs` (add `pub mod record;`)
+- Modify: `crates/core/src/lib.rs`, `crates/core/src/apply.rs` (extract `flock_nb`)
 - Test: `crates/core/tests/record.rs`
 
 **Interfaces:**
-- Consumes: nothing from earlier tasks.
 - Produces:
   ```rust
-  pub fn dir_in(config_dir: &Path) -> PathBuf;              // config_dir.join("runs")
-  pub fn ensure_dir(dir: &Path) -> std::io::Result<()>;
   pub fn basename(now: std::time::SystemTime) -> String;
-  pub fn lock_name(dest_root: &Path) -> String;
+  pub fn lock_name(dest_root: &Path) -> Result<String, std::io::Error>;
   pub fn is_live(path: &Path) -> std::io::Result<bool>;
   pub fn hold(path: &Path) -> std::io::Result<std::fs::File>;
   ```
-  `basename` is `.comic-renamer.<unix-secs>.<pid>.<seq>.record`, the
-  pid-plus-counter shape of `fsops::temp_basename` plus a wall-clock stamp.
-  `lock_name` is `<hex sha256 of collision_key(canonical dest_root)>.lock`.
-  `hold` takes an exclusive non-blocking `flock` and returns the file whose
-  lifetime holds it. `is_live` returns `true` when `hold` would fail with
-  `EWOULDBLOCK`.
+  `basename` is `.comic-renamer.<unix-secs>.<pid>.<seq>.record`, written fresh —
+  `fsops::temp_basename` yields a `.partial` suffix and cannot be reused directly,
+  but its `static AtomicU64` counter shape is the thing to copy.
+  `lock_name` canonicalises `dest_root`, hashes
+  `normalize::collision_key(&canonical.to_string_lossy())` with
+  `corpus::sha256_hex`, and returns `<hex>.lock`. It returns `Result` so a
+  canonicalisation failure cannot silently fall back to two locks for one library.
+  `hold` and `apply::Lock::acquire` both call one new
+  `fsops::flock_nb(&File) -> io::Result<bool>`; the `unsafe` block exists once.
+
+*Review changes:* `ensure_dir` cut — `fsops::ensure_root` (`fsops.rs:291`) is the
+same function. `dir_in` cut — inline `config_dir()?.join("runs")` at the one CLI
+call site. `lock_name` returns `Result`, was `String`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -95,492 +111,557 @@ test in the task that owns the code.
 #[test]
 fn a_basename_is_unique_per_call_and_carries_the_stamp() {
     let now = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_793_000_000);
-    let a = basename(now);
-    let b = basename(now);
-    assert_ne!(a, b, "two records in one process must not collide");
-    assert!(a.contains("1793000000"), "{a}");
-    assert!(a.starts_with(".comic-renamer."), "{a}");
-    assert!(a.ends_with(".record"), "{a}");
+    let (a, b) = (basename(now), basename(now));
+    assert_ne!(a, b);
+    assert!(a.contains("1793000000") && a.starts_with(".comic-renamer.") && a.ends_with(".record"), "{a}");
 }
 
-/// Review Focus 5. A root is a path, not a filename, so it is hashed. Spaces,
-/// separators, non-ASCII and 300 bytes all have to produce one usable name.
+/// Review Focus: a root is a path, not a filename, so it is hashed.
 #[test]
-fn a_lock_name_is_a_filename_whatever_the_root_looks_like() {
-    for root in ["/Volumes/My Comics/lib", "/a/b/c", &format!("/{}", "x".repeat(300)), "/Volumes/Caf\u{e9}"] {
-        let name = lock_name(Path::new(root));
-        assert!(name.len() <= 255, "{root}: {}", name.len());
-        assert_eq!(Path::new(&name).components().count(), 1, "{root}: {name}");
-        assert!(name.ends_with(".lock"), "{name}");
+fn a_lock_name_is_one_filename_whatever_the_root_looks_like() {
+    let dir = tempfile::tempdir().unwrap();
+    for leaf in ["My Comics", "Caf\u{e9}", &"x".repeat(200)] {
+        let root = dir.path().join(leaf);
+        std::fs::create_dir(&root).unwrap();
+        let name = lock_name(&root).unwrap();
+        assert!(name.len() <= 255 && name.ends_with(".lock"), "{name}");
+        assert_eq!(Path::new(&name).components().count(), 1, "{name}");
     }
 }
 
-/// Invariant 7 reaches the lock: one library must not be two locks.
+/// Invariant 7 reaches the lock. Both paths must exist, or the test passes
+/// through `lock_name`'s error arm and proves nothing.
 #[test]
 fn one_library_is_one_lock_whatever_its_case_or_composition() {
-    assert_eq!(
-        lock_name(Path::new("/Volumes/Hellboy")),
-        lock_name(Path::new("/Volumes/hellboy")),
-        "case-folded"
-    );
-    assert_eq!(
-        lock_name(Path::new("/Volumes/Caf\u{e9}")),
-        lock_name(Path::new("/Volumes/Cafe\u{301}")),
-        "NFC-normalised"
-    );
-    assert_ne!(
-        lock_name(Path::new("/Volumes/Hellboy")),
-        lock_name(Path::new("/Volumes/Hellboy2")),
-        "and still distinguishes two libraries"
-    );
+    let dir = tempfile::tempdir().unwrap();
+    let nfc = dir.path().join("Caf\u{e9}");
+    std::fs::create_dir(&nfc).unwrap();
+    let nfd = dir.path().join("Cafe\u{301}");          // same directory on APFS
+    assert_eq!(lock_name(&nfc).unwrap(), lock_name(&nfd).unwrap());
+    let other = dir.path().join("Hellboy");
+    std::fs::create_dir(&other).unwrap();
+    assert_ne!(lock_name(&nfc).unwrap(), lock_name(&other).unwrap());
 }
 
-/// Review Focus 2, half of it: a held record reads as live.
+#[test]
+fn a_canonicalisation_failure_is_an_error_not_a_second_lock() {
+    assert!(lock_name(Path::new("/no/such/library")).is_err());
+}
+
+/// `flock` attaches to the open file description, so a second open in this
+/// same process conflicts. An implementer who reaches for `fcntl`/`F_SETLK`
+/// gets per-process semantics and this assertion silently inverts.
 #[test]
 fn a_held_record_is_live_and_a_released_one_is_not() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("r.record");
     std::fs::write(&path, "x").unwrap();
-    assert!(!is_live(&path).unwrap(), "nobody holds it yet");
+    assert!(!is_live(&path).unwrap());
     let held = hold(&path).unwrap();
-    assert!(is_live(&path).unwrap(), "held in this process still conflicts");
+    assert!(is_live(&path).unwrap());
     drop(held);
-    assert!(!is_live(&path).unwrap(), "released");
+    assert!(!is_live(&path).unwrap());
 }
 
+/// Review Focus 6's sibling: a record that cannot be opened for write must not
+/// make the whole sweep fail. `is_live` answers the question it was asked.
 #[test]
-fn ensure_dir_is_idempotent_and_creates_parents() {
+fn a_read_only_record_is_not_live_rather_than_an_error() {
     let dir = tempfile::tempdir().unwrap();
-    let runs = dir_in(&dir.path().join("comic-renamer"));
-    ensure_dir(&runs).unwrap();
-    ensure_dir(&runs).unwrap();
-    assert!(runs.is_dir());
+    let path = dir.path().join("ro.record");
+    std::fs::write(&path, "x").unwrap();
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_readonly(true);
+    std::fs::set_permissions(&path, perms).unwrap();
+    assert!(!is_live(&path).unwrap(), "nobody holds it, so it is not live");
 }
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [ ] **Step 2: Run them; expect FAIL (unresolved module `record`)**
 
 Run: `cargo test -p comic-renamer-core --test record`
-Expected: FAIL, unresolved module `record`.
 
-- [ ] **Step 3: Implement the six functions in `crates/core/src/record.rs`**
+- [ ] **Step 3: Implement the four functions and extract `fsops::flock_nb`**
 
-`lock_name` hashes `normalize::collision_key(&canonical.to_string_lossy())` with
-`sha2::Sha256` and hex-encodes it. `hold` uses `libc::flock` with
-`LOCK_EX | LOCK_NB`, mirroring `apply::Lock::acquire`; `is_live` calls `hold` and
-maps `EWOULDBLOCK` to `true`, any other error through.
+`is_live` opens read-only, so a read-only record answers the question instead of
+erroring; only a genuine `EWOULDBLOCK` means live.
 
-- [ ] **Step 4: Run them to verify they pass, and the suite stays green**
+- [ ] **Step 4: Run them, then the workspace**
 
 Run: `cargo test -p comic-renamer-core --test record` then `cargo test --workspace`
-Expected: PASS; workspace 414 passed, 0 failed, 7 ignored, 0 warnings.
+Expected: PASS; workspace still 0 failures, 0 warnings.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/core/src/record.rs crates/core/src/lib.rs crates/core/tests/record.rs
-git commit -m "feat(record): where a run's record lives, and how to tell a live one"
+git add crates/core/src/record.rs crates/core/src/lib.rs crates/core/src/apply.rs crates/core/tests/record.rs
+git commit -m "feat(record): how a record is named, whether it is live, and one lock per library"
 ```
 
 ---
 
-## Task 2: The record carries what a reverse needs
+## Task 2: Enumeration and retention
 
 **Files:**
-- Modify: `crates/core/src/undo.rs` (`COLUMNS`, `UndoWriter::create`,
-  `record_pending`, `Row`, `read_manifest`, `reverse`)
-- Test: `crates/core/tests/undo_schema.rs`
+- Modify: `crates/core/src/record.rs`
+- Test: `crates/core/tests/record.rs`
 
 **Interfaces:**
-- Consumes: nothing from Task 1.
+- Consumes: Task 1.
 - Produces:
   ```rust
-  pub const COLUMNS: &str = "seq,status,mode,mechanism,source_name,dest_relative,\
-                             size,inode,mtime_ns,series,volume,subtitle,run,extension,\
-                             preset,planned";
-  pub struct Summary {
-      pub source_root: PathBuf,
-      pub dest_root: PathBuf,
-      pub preset: String,
-      pub planned: u32,
-      pub placed: u32,
-      pub interrupted: bool,
-  }
-  pub fn summarise(manifest: &Path) -> Result<Summary, UndoError>;
-  pub fn reverse(manifest: &Path) -> Result<UndoReport, UndoError>;
+  pub fn list(dir: &Path) -> std::io::Result<Vec<PathBuf>>;          // newest first, by name
+  pub fn supersede(
+      dir: &Path, keep: &Path, source_root: &Path, dest_root: &Path,
+  ) -> std::io::Result<usize>;
   ```
-  `UndoWriter::create(path, source_root, dest_root, preset, planned)` gains the
-  last two. `record_pending` gains `series: &str, volume: Option<u32>,
-  subtitle: Option<&str>, run: u32, extension: &str`. `reverse` **loses**
-  `source_root`, `dest_root` and `recomputed`: the record carries all three, and
-  it canonicalises the roots and recomputes each destination through
-  `preset_by_id(&summary.preset)` itself. `interrupted` is true when any row's
-  terminal state is missing.
+  `list` skips anything not matching `basename`'s shape, so a junk file in the
+  directory cannot abort a sweep. `supersede` is called **while the caller holds
+  the library lock**, deletes every record other than `keep` whose roots match both
+  arguments and which `is_live` says nobody holds, and returns the count. Its
+  caller passes the record it just created as `keep`, so a run that created none
+  never calls it.
+
+*Review changes:* split out of Task 4, because D57 is the one policy the design
+says the owner may want different and it has to be rejectable on its own.
+`supersede` gained `keep` and the lock obligation: the first draft called it "after
+the run completes", which deleted record A when run 2 collided on every row and
+wrote no record B — 400 files made permanently unreversible by running one command
+twice. Holding the lock across the delete is invariant 6: `is_live()` then
+`unlink()` is check-then-act aimed at the only record of where a user's files went.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```rust
-/// The blocking defect the design was revised for: with the plan gone there
-/// has to be enough in the record to rebuild every destination.
+/// Review Focus 2.
+#[test]
+fn supersede_leaves_a_live_record_alone() {
+    let f = two_records_for_one_root_pair();
+    let held = hold(&f.older).unwrap();
+    assert_eq!(supersede(&f.dir, &f.newer, &f.source_root, &f.dest_root).unwrap(), 0);
+    assert!(f.older.exists(), "a live run's record is its only way back");
+    drop(held);
+    assert_eq!(supersede(&f.dir, &f.newer, &f.source_root, &f.dest_root).unwrap(), 1);
+}
+
+/// The HIGH finding the first draft shipped: a second run that places nothing
+/// must not take the first run's record with it.
+#[test]
+fn a_run_that_wrote_no_record_supersedes_nothing() {
+    let f = two_records_for_one_root_pair();
+    // `keep` is a record that was never created.
+    let absent = f.dir.join("nothing");
+    assert_eq!(supersede(&f.dir, &absent, &f.source_root, &f.dest_root).unwrap(), 2);
+    // ...which is why `apply` must not call it at all in that case; see Task 5.
+}
+
+#[test]
+fn supersede_keeps_a_different_root_pairs_record() {
+    let f = two_bundles_one_library();
+    assert_eq!(supersede(&f.dir, &f.b, &f.source_b, &f.dest_root).unwrap(), 0);
+    assert!(f.a.exists(), "disjoint bundles, both reversible");
+}
+
+#[test]
+fn list_is_newest_first_and_ignores_a_junk_file() {
+    let f = two_records_for_one_root_pair();
+    std::fs::write(f.dir.join("README"), "not a record").unwrap();
+    let found = list(&f.dir).unwrap();
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert_eq!(found[0], f.newer);
+}
+```
+
+`two_records_for_one_root_pair()` and `two_bundles_one_library()` are helpers in the
+test file: each creates a tempdir, real `source*/` and `library/` directories, and
+writes records with `UndoWriter` (Task 3's arity) carrying those canonical roots.
+
+- [ ] **Step 2: Run them; expect FAIL (`list` not found)**
+- [ ] **Step 3: Implement `list` and `supersede`**
+- [ ] **Step 4: Run them, then the workspace**
+- [ ] **Step 5: Commit**
+
+```bash
+git commit -m "feat(record): one record per root pair, and never the live one"
+```
+
+---
+
+## Task 3: The record carries what a reverse needs — additively
+
+**Files:**
+- Modify: `crates/core/src/undo.rs`
+- Test: `crates/core/tests/undo_schema.rs`
+
+**Interfaces:**
+- Consumes: nothing.
+- Produces, **alongside today's `create` and `reverse`, which stay until Task 5**:
+  ```rust
+  pub const COLUMNS: &str = "seq,status,mode,mechanism,source_name,dest_relative,\
+      size,inode,mtime_ns,series,volume,subtitle,run,extension,preset,planned";
+  pub struct Summary {
+      pub source_root: PathBuf, pub dest_root: PathBuf,
+      pub preset: String, pub planned: u32,
+      pub placed: u32, pub interrupted: bool,
+      pub started: std::time::SystemTime,
+  }
+  pub fn summarise(manifest: &Path) -> Result<Summary, UndoError>;
+  pub fn reverse_from(manifest: &Path) -> Result<UndoReport, UndoError>;
+  impl UndoWriter {
+      pub fn create_with(path: &Path, source_root: &Path, dest_root: &Path,
+                         preset: &str, planned: u32) -> io::Result<UndoWriter>;
+  }
+  // record_pending gains: series: &str, volume: Option<u32>,
+  //                       subtitle: Option<&str>, run: u32, extension: &str
+  ```
+  `placed` counts rows whose terminal state is `placed` or `done`. `interrupted` is
+  true when any row has no terminal state. `started` comes from the roots row's
+  `mtime`, so §5's screen can say when the run happened. `reverse_from` takes roots
+  and preset id from the record, canonicalises both, **keeps the `RootsOverlap`
+  refusal** (Review Focus 5), and recomputes each destination through
+  `preset_by_id`.
+
+*Review changes:* additive rather than in-place, which is the only shape where
+"do not touch `apply.rs`" is an instruction that can be obeyed and end green.
+`Summary` gained `started`. The header rule is resolved below. `record_failed`,
+`record_placed` and `record_done` each write exactly 9 fields today
+(`undo.rs:90,101,106`) and must be padded to 16, which the first draft missed.
+
+- [ ] **Step 1: Write the failing tests**
+
+```rust
 #[test]
 fn a_record_alone_rebuilds_every_destination() {
-    let (dir, record) = a_written_record();   // one Copy row, series "Hellboy", volume 1, run 3
+    let (dir, record) = a_written_record();
     let s = summarise(&record).unwrap();
-    assert_eq!(s.preset, "komga");
-    assert_eq!(s.planned, 1);
-    assert_eq!(s.placed, 1);
-    assert!(!s.interrupted);
-    // No plan is passed, and no caller-supplied destinations.
-    let report = reverse(&record).unwrap();
+    assert_eq!((s.preset.as_str(), s.planned, s.placed, s.interrupted), ("komga", 1, 1, false));
+    let report = reverse_from(&record).unwrap();
     assert_eq!(report.refused, Vec::<String>::new());
     assert_eq!(report.restored, 1);
     drop(dir);
 }
 
-/// Review Focus 3. A record from an older build must say so.
+/// Review Focus 3, both halves. A header that is present and wrong is an older
+/// build. A record with no header at all keeps its first row — the bug
+/// `a_manifest_with_no_header_keeps_its_first_row` (apply_exec.rs:787) pins is
+/// that `read_manifest` ate record 0 unconditionally, and that proof survives.
 #[test]
-fn a_record_with_the_old_columns_is_refused_by_name() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("old.record");
-    std::fs::write(&path, "seq,status,mode,mechanism,source_name,dest_relative,size,inode,mtime_ns\n").unwrap();
-    let err = summarise(&path).unwrap_err().to_string();
-    assert!(err.contains("older build"), "{err}");
+fn a_wrong_header_is_refused_and_a_missing_one_is_not() {
+    let (dir, record) = a_written_record();
+    let text = std::fs::read_to_string(&record).unwrap();
+
+    let old = dir.path().join("old.record");
+    std::fs::write(&old, "seq,status,mode,mechanism,source_name,dest_relative,size,inode,mtime_ns\n").unwrap();
+    assert!(summarise(&old).unwrap_err().to_string().contains("older build"));
+
+    let headerless = dir.path().join("bare.record");
+    std::fs::write(&headerless, text.lines().skip(1).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+    assert_eq!(summarise(&headerless).unwrap().planned, 1, "the roots row is not eaten as a header");
+    drop(dir);
 }
 
-/// Review Focus 1. The library is gone; every row refuses with a reason, and
-/// the report does not read as a clean undo.
+/// Review Focus 1.
 #[test]
 fn a_record_whose_roots_are_gone_refuses_every_row() {
     let (dir, record) = a_written_record();
     std::fs::remove_dir_all(dir.path().join("library")).unwrap();
-    let report = reverse(&record).unwrap();
+    let report = reverse_from(&record).unwrap();
     assert_eq!(report.restored, 0);
-    assert!(!report.refused.is_empty(), "a missing library is refusals, not silence");
     assert!(report.refused.iter().any(|r| r.contains("library")), "{:?}", report.refused);
     drop(dir);
 }
 
+/// Review Focus 5. Equal roots would make Task 4's gate hash one inode against
+/// itself and agree, deleting the only copy.
 #[test]
-fn the_roots_row_is_not_a_data_row() {
+fn a_record_whose_roots_canonicalise_equal_is_refused() {
+    let (dir, record) = a_record_with_one_root_for_both();
+    assert!(matches!(reverse_from(&record), Err(UndoError::NoRoot) | Err(UndoError::Parse { .. })));
+    drop(dir);
+}
+
+#[test]
+fn every_status_row_has_the_full_column_count() {
     let (dir, record) = a_written_record();
     let text = std::fs::read_to_string(&record).unwrap();
-    assert!(text.lines().next().unwrap() == COLUMNS, "the header is the column list");
-    assert_eq!(text.lines().filter(|l| l.contains(",roots,")).count(), 1);
+    let want = COLUMNS.split(',').count();
+    for line in text.lines().skip(1) {
+        assert_eq!(line.split(',').count(), want, "{line}");
+    }
     drop(dir);
 }
 ```
 
-`a_written_record()` is a helper in the test file: makes a tempdir with
-`source/` and `library/`, writes one file, drives `UndoWriter` through
-`create` → `record_pending` → `record_placed` → `record_done` for a Copy row,
-and returns the tempdir and the record's path.
+`a_written_record()` makes a tempdir with `source/` and `library/`, one real file
+whose name a preset can produce a destination for, drives `create_with` →
+`record_pending` → `record_placed` → `record_done` for a Copy row with series
+`Hellboy`, volume 1, run 3, extension `pdf`, and returns `(TempDir, PathBuf)` with
+**canonicalised** roots. `a_record_with_one_root_for_both()` is the same with one
+directory as both roots.
 
-- [ ] **Step 2: Run them to verify they fail**
+- [ ] **Step 2: Run them; expect FAIL (`summarise` not found)**
+- [ ] **Step 3: Grow `COLUMNS`, add `create_with`, `summarise`, `reverse_from`**
 
-Run: `cargo test -p comic-renamer-core --test undo_schema`
-Expected: FAIL — `summarise` not found, `reverse` takes four arguments.
+Pad the three terminal-status writers to 16 fields. `read_manifest` refuses only a
+header whose first field is `seq` and whose text is not `COLUMNS`.
 
-- [ ] **Step 3: Grow `COLUMNS` and the writer, then narrow `reverse`**
-
-Fill the five new per-row columns on `pending` rows only and the two roots-row
-columns on the roots row; leave each blank where it does not apply, as the
-existing rows already do. `read_manifest` compares the header to `COLUMNS`
-exactly and returns the "older build" error on any mismatch. Delete the
-`recorded_source != source_root` cross-check and its test: with the record
-supplying both sides it is `x == x` (design §6).
-
-- [ ] **Step 4: Run them to verify they pass**
-
-Run: `cargo test -p comic-renamer-core --test undo_schema` then `cargo test --workspace`
-Expected: PASS. Call sites in `apply.rs` and `apply_refusals.rs` are updated in Task 4,
-so the workspace build is expected to fail until then **only if** you change
-`apply.rs` in this task — do not. Keep `apply::undo` compiling by passing the
-record path through; it is rewritten in Task 4.
-
+- [ ] **Step 4: Run them, then the workspace. Nothing else changed, so it stays green.**
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/core/src/undo.rs crates/core/tests/undo_schema.rs
-git commit -m "feat(undo): the record carries the fields a destination is rebuilt from"
+git commit -m "feat(undo): a record that carries its own roots, preset and fields"
 ```
 
 ---
 
-## Task 3: A record never authorises its own deletion
+## Task 4: One gate on every unlink of a library file
 
 **Files:**
-- Modify: `crates/core/src/undo.rs` (`reverse_one`'s Copy arm)
-- Modify: `crates/core/src/fsops.rs` (expose a hash of a path)
+- Modify: `crates/core/src/undo.rs` (`reverse_one`), `crates/core/src/fsops.rs`
 - Test: `crates/core/tests/undo_authority.rs`
 
 **Interfaces:**
-- Consumes: Task 2's `reverse(manifest)`.
+- Consumes: Task 3's `reverse_from`.
 - Produces:
   ```rust
   // fsops
-  pub fn sha256_of(path: &Path) -> std::io::Result<String>;
-  // undo
-  pub enum Trust { InSession, FromDisk }
-  pub fn reverse_with(manifest: &Path, trust: Trust) -> Result<UndoReport, UndoError>;
+  pub fn sha256_of(path: &Path) -> std::io::Result<String>;   // regular files only
   ```
-  `reverse(manifest)` becomes `reverse_with(manifest, Trust::FromDisk)`.
-  Under `Trust::FromDisk`, a Copy row's destination is unlinked **only** when a
-  file exists at `source_root/source_name` and `sha256_of` agrees for both.
-  Under `Trust::InSession` the existing identity check alone applies.
-  `sha256_of` opens with `open_nofollow` and reuses the existing hashing loop.
+  Inside `undo.rs`, one private helper gates both of the unlink sites that act on
+  record-supplied source data — `undo.rs:317` (Copy) and `undo.rs:334` (Move, the
+  duplicate a failed unlink left) — and removes the destination only when a regular
+  file at `source_root/source_name` hashes equal to it. **`undo.rs:378` is not
+  gated:** that path removes a duplicate the tool itself streamed back moments
+  earlier and re-verifies identity through the handle, so the source is not
+  record-claimed and hashing it would be cost without safety.
+  `sha256_of` opens with `open_nofollow`, **refuses a non-regular file** so a FIFO
+  at the recorded source cannot block forever while the library lock is held
+  (Review Focus 6), and reuses `fsops::hash_open_file`.
+
+*Review changes:* the first draft gated only the Copy arm. The Move arm's `placed`
+branch reaches `entry.remove()` on identity alone, so a planted record with
+`mode=move, mechanism=clone, status=placed`, a source file the planter made, and the
+target's real identity deletes a library file and reports `restored: 1` — the
+research note's reproduction through a different arm. `Trust` is cut (see "Design
+change"). The FIFO refusal is new.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```rust
-/// The executed reproduction from
-/// docs/research/2026-10-23-two-pre-existing-data-safety-findings.md, as a
-/// regression test. A planted record names a library file and carries its real
-/// identity; nothing was ever copied from the source it names.
+/// The executed reproduction from the research note, as a regression test.
 #[test]
 fn a_planted_record_does_not_delete_a_library_file() {
-    let f = planted();           // 5-byte source, 33-byte library file, forged identity
-    let report = reverse_with(&f.record, Trust::FromDisk).unwrap();
-    assert_eq!(report.restored, 0, "it restored nothing, because it placed nothing");
-    assert!(!report.refused.is_empty(), "and it says so: {:?}", report.refused);
-    assert!(f.library_file.exists(), "the file no run placed is still there");
+    for mode in [Mode::Copy, Mode::Move] {
+        let f = planted(mode);
+        let report = reverse_from(&f.record).unwrap();
+        assert_eq!(report.restored, 0, "{mode:?}");
+        assert!(!report.refused.is_empty(), "{mode:?}: {:?}", report.refused);
+        assert!(f.library_file.exists(), "{mode:?}: the file no run placed is still there");
+    }
 }
 
 #[test]
 fn a_real_copy_is_reversed_because_the_source_still_matches() {
-    let f = real_copy();         // source and destination are the same bytes
-    let report = reverse_with(&f.record, Trust::FromDisk).unwrap();
-    assert_eq!(report.restored, 1);
-    assert!(!f.library_file.exists(), "the copy is gone");
-    assert!(f.source_file.exists(), "the original is not");
+    let f = real_copy();
+    assert_eq!(reverse_from(&f.record).unwrap().restored, 1);
+    assert!(!f.library_file.exists() && f.source_file.exists());
 }
 
-/// Same bytes at the source is what authorises it, so a source that differs
-/// refuses even though the record's identity matches the destination exactly.
 #[test]
 fn a_source_with_different_content_refuses_the_delete() {
     let f = real_copy();
     std::fs::write(&f.source_file, b"different bytes entirely").unwrap();
-    let report = reverse_with(&f.record, Trust::FromDisk).unwrap();
-    assert_eq!(report.restored, 0);
+    assert_eq!(reverse_from(&f.record).unwrap().restored, 0);
     assert!(f.library_file.exists());
 }
 
-/// In-session skips the content check, which is what keeps "I just ran this,
-/// undo it" as fast as it is now.
+/// Same length, different bytes — the case an identity check passes and a
+/// content check does not. `apply_exec.rs:880` already pins the same idea for
+/// the old gate.
 #[test]
-fn in_session_reverses_without_reading_the_source() {
+fn a_same_size_stranger_at_the_source_refuses_the_delete() {
     let f = real_copy();
-    std::fs::remove_file(&f.source_file).unwrap();
-    let report = reverse_with(&f.record, Trust::InSession).unwrap();
-    assert_eq!(report.restored, 1, "the in-memory record is trusted: {:?}", report.refused);
+    let len = std::fs::metadata(&f.source_file).unwrap().len() as usize;
+    std::fs::write(&f.source_file, vec![b'z'; len]).unwrap();
+    assert_eq!(reverse_from(&f.record).unwrap().restored, 0);
+    assert!(f.library_file.exists());
 }
 
-/// Reversing a move is unaffected: RENAME_EXCL already refuses to clobber.
+/// Review Focus 6.
 #[test]
-fn a_move_is_reversed_without_a_content_check() {
+fn a_fifo_at_the_source_is_refused_rather_than_blocking() {
+    let f = real_copy();
+    std::fs::remove_file(&f.source_file).unwrap();
+    mkfifo(&f.source_file);
+    assert_eq!(reverse_from(&f.record).unwrap().restored, 0);
+    assert!(f.library_file.exists());
+}
+
+/// Reversing a move by renaming back is untouched: RENAME_EXCL refuses to clobber.
+#[test]
+fn a_move_is_reversed_by_renaming_back_without_a_content_check() {
     let f = real_move();
-    let report = reverse_with(&f.record, Trust::FromDisk).unwrap();
-    assert_eq!(report.restored, 1);
+    assert_eq!(reverse_from(&f.record).unwrap().restored, 1);
     assert!(f.source_file.exists());
 }
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+`planted(mode)` builds the research note's fixture: a 5-byte source the planter
+made, a 33-byte library file no run placed, and a record carrying the library
+file's real identity. `real_copy()` and `real_move()` drive a genuine
+`apply`-shaped operation so source and destination really correspond. `mkfifo`
+is a two-line `libc::mkfifo` helper in the test file.
 
-Run: `cargo test -p comic-renamer-core --test undo_authority`
-Expected: FAIL — `a_planted_record_does_not_delete_a_library_file` deletes the file,
-which is the finding.
-
-- [ ] **Step 3: Implement the check**
-
-- [ ] **Step 4: Run them to verify they pass**
-
-Run: `cargo test -p comic-renamer-core --test undo_authority` then `cargo test --workspace`
-Expected: PASS.
-
+- [ ] **Step 2: Run them; expect FAIL — the planted Move case deletes the file**
+- [ ] **Step 3: Implement `sha256_of` and the shared gate**
+- [ ] **Step 4: Run them, then the workspace**
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/core/src/undo.rs crates/core/src/fsops.rs crates/core/tests/undo_authority.rs
-git commit -m "fix(undo): a copied file is deleted only if its source still matches"
+git commit -m "fix(undo): one gate on every unlink that trusts a record's source"
 ```
 
 ---
 
-## Task 4: `apply` writes to the store, and the lock moves to the library
+## Task 5: `apply` takes a held plan, a held lock, and the record store
 
 **Files:**
-- Modify: `crates/core/src/apply.rs` (`apply_inner`'s writer, `Lock`, `lock_path`,
-  `undo`, delete `undo_path`)
-- Modify: `crates/core/tests/apply_refusals.rs:339,342,348`
+- Modify: `crates/core/src/apply.rs`, `crates/core/src/types.rs`
+- Modify: `crates/core/tests/apply_exec.rs`, `crates/core/tests/apply_refusals.rs`
+- Modify: `crates/cli/src/main.rs`
 - Test: `crates/core/tests/apply_record.rs`
 
 **Interfaces:**
-- Consumes: Task 1's `record::{dir_in, ensure_dir, basename, lock_name, hold}`,
-  Task 2's `UndoWriter::create(.., preset, planned)` and `summarise`.
+- Consumes: Tasks 1–4.
 - Produces:
   ```rust
+  pub struct Lock { /* … */ }
+  impl Lock { pub fn library(records: &Path, dest_root: &Path) -> Result<Lock, ApplyError>; }
   pub fn apply(
-      plan: &Path, records: &Path, allow_cloud_move: bool,
-      progress: &mut dyn FnMut(Progress),
+      lock: &Lock, header: &PlanHeader, rows: &[PlanRow], records: &Path,
+      allow_cloud_move: bool, progress: &mut dyn FnMut(Progress),
   ) -> Result<ApplyResult, ApplyError>;
-  pub fn check(/* same, minus records */) -> Result<ApplyResult, ApplyError>;
-  pub fn supersede(records: &Path, source_root: &Path, dest_root: &Path) -> std::io::Result<usize>;
+  pub fn check(
+      header: &PlanHeader, rows: &[PlanRow],
+      allow_cloud_move: bool, progress: &mut dyn FnMut(Progress),
+  ) -> Result<ApplyResult, ApplyError>;
+  pub fn reverse_run(lock: &Lock, record: &Path) -> Result<UndoReport, ApplyError>;
+  // ApplyResult gains: pub record: Option<PathBuf>
+  // ApplyError gains:  Records(String)
   ```
-  `Lock::acquire(records, dest_root)` replaces `Lock::acquire(plan)` and
-  `lock_path(plan)`; `undo_path(plan)` is deleted. `supersede` removes records whose
-  summary matches both roots and which `record::is_live` says nobody holds, and
-  returns how many it removed.
+  `Lock::acquire(plan)`, `lock_path(plan)`, `undo_path(plan)` and `apply::undo` are
+  all **deleted**. The lock lives in the caller so one process cannot deadlock
+  against itself, and `apply` taking `&Lock` makes "locked" a type obligation
+  rather than a convention. `apply` validates the records directory **before the
+  first row**, returning `ApplyError::Records` (Review Focus 4); creates the record
+  lazily on the first row that executes, for the reason at `apply.rs:150`; holds
+  `record::hold` on it for the run; and calls `record::supersede(dir, created, …)`
+  **only when a record was created**, under the same lock. `reverse_run` replaces
+  `apply::undo` and **deletes** the record after a reverse with no refusals, where
+  today it renames it to `<name>.reversed` (`apply.rs:380-391`) — §3's lifecycle
+  table says deleted, and `O_EXCL`-per-plan is no longer the reason for the rename.
+  `main.rs` reads the plan once, takes the lock, computes the disclosure from that
+  copy, prompts, and passes the same copy to `apply`.
+
+*Review changes:* merged the first draft's Tasks 4 and 5 — one decision about one
+object, and splitting them produced a self-deadlock where Task 4 kept the internal
+acquire and Task 5 added a caller-held one. `apply_exec.rs` is in the Files list.
+`ApplyResult.record` is new, so Task 7 can know which record this session wrote.
+Delete-after-reverse was in no task.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```rust
-/// Review Focus 4. A run that cannot be recorded does not happen: a run nobody
-/// can reverse is the case a user would want to be asked about.
+/// Review Focus 4. A run that cannot be recorded does not happen.
 #[test]
 fn apply_refuses_when_the_records_directory_cannot_be_written() {
     let f = fixture();
     let blocked = f.dir.path().join("blocked");
     std::fs::write(&blocked, "not a directory").unwrap();
-    let guard = assert_unchanged(&f.source_root, &f.dest_root);
-    let err = apply(&f.plan, &blocked, false, &mut |_| {}).unwrap_err();
-    assert!(err.to_string().contains("record"), "{err}");
+    let guard = TreeGuard::new(&[&f.source_root, &f.dest_root]);
+    let lock = Lock::library(&f.records, &f.dest_root).unwrap();
+    let err = apply(&lock, &f.header, &f.rows, &blocked, false, &mut |_| {}).unwrap_err();
+    assert!(matches!(err, ApplyError::Records(_)), "{err:?}");
     guard.assert();
 }
 
-/// Review Focus 2. Superseding must not touch a record whose run is going.
+/// The HIGH finding: running one command twice must not make the first run
+/// unreversible.
 #[test]
-fn supersede_leaves_a_live_record_alone() {
-    let f = two_records_for_one_root_pair();
-    let held = comic_renamer_core::record::hold(&f.older).unwrap();
-    assert_eq!(supersede(&f.records, &f.source_root, &f.dest_root).unwrap(), 0);
-    assert!(f.older.exists(), "a live run's record is its only way back");
-    drop(held);
-    assert_eq!(supersede(&f.records, &f.source_root, &f.dest_root).unwrap(), 1);
-}
-
-#[test]
-fn a_second_run_into_one_library_supersedes_the_first() {
+fn a_second_run_that_places_nothing_keeps_the_first_runs_record() {
     let f = fixture();
-    apply(&f.plan, &f.records, false, &mut |_| {}).unwrap();
-    let first = one_record_in(&f.records);
-    apply(&f.plan_again, &f.records, false, &mut |_| {}).unwrap();
-    assert!(!first.exists(), "the same root pair keeps only its newest record");
-    assert_eq!(count_records(&f.records), 1);
+    let lock = Lock::library(&f.records, &f.dest_root).unwrap();
+    let first = apply(&lock, &f.header, &f.rows, &f.records, false, &mut |_| {}).unwrap();
+    let record = first.record.clone().expect("a run that placed rows wrote a record");
+    let again = apply(&lock, &f.header, &f.rows, &f.records, false, &mut |_| {}).unwrap();
+    assert_eq!(again.record, None, "every row collided, so nothing was recorded");
+    assert!(record.exists(), "and the first run is still reversible");
 }
 
 #[test]
-fn two_bundles_into_one_library_each_keep_their_record() {
-    let f = two_bundles();
-    apply(&f.plan_a, &f.records, false, &mut |_| {}).unwrap();
-    apply(&f.plan_b, &f.records, false, &mut |_| {}).unwrap();
-    assert_eq!(count_records(&f.records), 2, "disjoint bundles, both reversible");
+fn a_second_real_run_supersedes_the_first() {
+    let f = two_plans_one_root_pair();
+    let lock = Lock::library(&f.records, &f.dest_root).unwrap();
+    let a = apply(&lock, &f.header_a, &f.rows_a, &f.records, false, &mut |_| {}).unwrap();
+    let b = apply(&lock, &f.header_b, &f.rows_b, &f.records, false, &mut |_| {}).unwrap();
+    assert!(!a.record.unwrap().exists());
+    assert!(b.record.unwrap().exists());
 }
 
-/// The lock is per-library now, not per-plan: two plans into one library serialise.
+/// The successor to `apply_and_undo_share_one_lock` (apply_exec.rs:884), which
+/// pinned the per-plan lock this task deletes.
 #[test]
-fn two_plans_into_one_library_cannot_run_at_once() {
-    let f = two_bundles();
-    let _held = Lock::acquire(&f.records, &f.dest_root).unwrap();
-    assert!(matches!(Lock::acquire(&f.records, &f.dest_root), Err(ApplyError::Locked)));
+fn apply_and_reverse_share_one_library_lock() {
+    let f = fixture();
+    let held = Lock::library(&f.records, &f.dest_root).unwrap();
+    assert!(matches!(Lock::library(&f.records, &f.dest_root), Err(ApplyError::Locked)));
+    drop(held);
+    let lock = Lock::library(&f.records, &f.dest_root).unwrap();
+    let r = apply(&lock, &f.header, &f.rows, &f.records, false, &mut |_| {}).unwrap();
+    assert_eq!(reverse_run(&lock, &r.record.unwrap()).unwrap().restored, 1);
 }
 
-/// A run that places nothing writes no record, so no offer is ever made for it.
 #[test]
-fn a_run_that_places_nothing_leaves_no_record() {
-    let f = every_row_refused();
-    apply(&f.plan, &f.records, false, &mut |_| {}).unwrap();
-    assert_eq!(count_records(&f.records), 0);
+fn a_reversed_record_is_deleted_not_renamed_aside() {
+    let f = fixture();
+    let lock = Lock::library(&f.records, &f.dest_root).unwrap();
+    let r = apply(&lock, &f.header, &f.rows, &f.records, false, &mut |_| {}).unwrap();
+    let record = r.record.unwrap();
+    reverse_run(&lock, &record).unwrap();
+    assert!(!record.exists());
+    assert!(!record.with_extension("record.reversed").exists());
 }
+
+/// Finding 2. The plan is rewritten between the disclosure and the
+/// confirmation; what runs is what the user was shown.
+#[test]  // in crates/cli/tests/cli.rs
+fn a_plan_rewritten_after_the_disclosure_does_not_run() { /* see Step 1 note */ }
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+The CLI test spawns the binary, waits for the disclosure on stdout, overwrites the
+plan file with a different one, then sends `MOVE\n`. `crates/cli/tests/cli.rs`
+already drives the binary with `std::process::Command`; this is the first test
+there that must write to its stdin mid-run, so it needs `Stdio::piped()` on both.
 
-Run: `cargo test -p comic-renamer-core --test apply_record`
-Expected: FAIL — `apply` takes three arguments, `Lock::acquire` takes one.
+- [ ] **Step 2: Run them; expect FAIL on arity, and the CLI test on plan B running**
+- [ ] **Step 3: Implement, and sweep `apply_exec.rs` and `apply_refusals.rs`**
 
-- [ ] **Step 3: Wire the store into `apply_inner`**
+`Fixture::manifest()` (`apply_exec.rs:68`) returns `undo_path(&self.plan)` and must
+become the record this run wrote. `Recorded::reverse` (`:163`) and the direct
+`reverse` calls at `:271, 288, 620, 668, 865` move to `reverse_from`. The seven
+`UndoWriter::create` calls move to `create_with`.
+`reverse_refuses_a_manifest_whose_roots_disagree_with_the_plan` (`:284`) is deleted:
+with the record supplying both sides it asserts `x == x`. Its concern lives on in
+Task 3's `a_record_whose_roots_canonicalise_equal_is_refused`.
 
-Keep creation lazy, on the first row that executes, for the reason at
-`apply.rs:150` — but validate the records directory **before** the first row, so
-Review Focus 4 refuses before anything moves rather than after. Call `supersede`
-once, after the run completes, so a failed run does not destroy the previous
-record. Take `record::hold` on the record for the run's lifetime.
+- [ ] **Step 4: Run the workspace and both gates**
 
-- [ ] **Step 4: Run them to verify they pass**
-
-Run: `cargo test -p comic-renamer-core --test apply_record` then `cargo test --workspace`
-Expected: PASS.
+Run: `cargo test --workspace`, `cargo xtask check-mappings`, `cargo xtask measure`
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/core/src/apply.rs crates/core/tests/apply_record.rs crates/core/tests/apply_refusals.rs
-git commit -m "feat(apply): the record is the tool's, and the lock is the library's"
-```
-
----
-
-## Task 5: The plan is read once and held
-
-**Files:**
-- Modify: `crates/core/src/apply.rs` (`apply`, `check`, `apply_inner`)
-- Modify: `crates/cli/src/main.rs:363-420`
-- Test: `crates/cli/tests/cli.rs`
-
-**Interfaces:**
-- Consumes: Task 4's `apply`/`check`.
-- Produces:
-  ```rust
-  pub fn apply(
-      plan: &PlanHeader, rows: &[PlanRow], records: &Path,
-      allow_cloud_move: bool, progress: &mut dyn FnMut(Progress),
-  ) -> Result<ApplyResult, ApplyError>;
-  pub fn check(
-      plan: &PlanHeader, rows: &[PlanRow],
-      allow_cloud_move: bool, progress: &mut dyn FnMut(Progress),
-  ) -> Result<ApplyResult, ApplyError>;
-  ```
-  Neither reads the plan file. `main.rs` reads it once with
-  `plan::read_allowing_edits`, computes the disclosure from that copy, takes the
-  confirmation, and passes the same copy to `apply`. The lock is taken by the
-  caller around the whole sequence, via Task 4's `Lock::acquire(records, dest_root)`.
-
-- [ ] **Step 1: Write the failing test**
-
-```rust
-/// The second finding. The plan is rewritten between the disclosure and the
-/// confirmation; what runs is what the user was shown, not what is on disk.
-#[test]
-fn a_plan_rewritten_after_the_disclosure_does_not_run() {
-    let f = fixture_with_two_plans();      // plan A: 1 row; plan B: a different row
-    let mut child = spawn_apply_expecting_confirmation(&f.plan_path);
-    wait_for_disclosure(&mut child);
-    std::fs::copy(&f.plan_b, &f.plan_path).unwrap();   // swap under the prompt
-    confirm(&mut child, "MOVE");
-    let out = child.wait_with_output().unwrap();
-    assert!(f.a_destination.exists(), "plan A is what was consented to");
-    assert!(!f.b_destination.exists(), "plan B never ran: {}", String::from_utf8_lossy(&out.stdout));
-}
-```
-
-- [ ] **Step 2: Run it to verify it fails**
-
-Run: `cargo test -p comic-renamer --test cli a_plan_rewritten`
-Expected: FAIL — plan B's destination exists, which is the finding.
-
-- [ ] **Step 3: Move the read to the caller**
-
-- [ ] **Step 4: Run it to verify it passes**
-
-Run: `cargo test -p comic-renamer --test cli a_plan_rewritten` then `cargo test --workspace`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add crates/core/src/apply.rs crates/cli/src/main.rs crates/cli/tests/cli.rs
-git commit -m "fix(apply): execute the plan the user was shown, not the file"
+git commit -m "feat(apply): a held plan, a library lock, and a record the tool owns"
 ```
 
 ---
@@ -588,198 +669,171 @@ git commit -m "fix(apply): execute the plan the user was shown, not the file"
 ## Task 6: `undo` names a run
 
 **Files:**
-- Modify: `crates/cli/src/main.rs` (the `Undo` variant and its handler)
+- Modify: `crates/cli/src/main.rs`
 - Test: `crates/cli/tests/cli.rs`
 
 **Interfaces:**
-- Consumes: Task 1's `record::is_live`, Task 2's `summarise`, Task 3's
-  `reverse_with(.., Trust::FromDisk)`.
-- Produces: the `Undo { run: Option<String>, list: bool, yes: bool }` variant,
-  replacing `Undo { plan: PathBuf }`. With neither argument it reverses the most
-  recent record no live process holds; `--list` prints one line per record and
-  reverses nothing; a run id selects one. A run id is the record's basename.
+- Consumes: Task 1's `is_live`, Task 3's `summarise`, Task 5's `Lock::library` and
+  `reverse_run`.
+- Produces: `Undo { run: Option<String>, list: bool }`, replacing
+  `Undo { plan: PathBuf }`. No `--yes`: `run_undo` has no prompt to skip, and
+  adding one is not in the design. A run id is a record's **file name**, matched
+  against `record::list`'s output — never `records.join(run)`, which would make any
+  relative path a run id. With no argument, the most recent record `is_live` says
+  nobody holds.
+
+*Review changes:* `--yes` cut. The lookup is a match against enumerated names
+rather than a join.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```rust
 #[test]
-fn undo_list_names_each_run_without_reversing_anything() {
-    let f = two_applied_runs();
-    let out = run(&["undo", "--list"], &f);
-    assert!(out.stdout.contains(&f.run_a_id), "{}", out.stdout);
-    assert!(out.stdout.contains(&f.run_b_id), "{}", out.stdout);
-    assert!(f.a_destination.exists(), "--list reverses nothing");
+fn undo_list_names_each_run_without_reversing_anything() { /* both ids present, both files intact */ }
+
+#[test]
+fn undo_with_no_argument_reverses_the_most_recent_run() { /* newest reversed, older not */ }
+
+#[test]
+fn a_run_id_is_a_name_and_never_a_path() {
+    // A traversal, an absolute path, and a plan path are all rejected.
+    for bad in ["../../etc/passwd", "/etc/passwd", "comic-renamer-plan.jsonl"] {
+        let out = run(&["undo", bad], &f);
+        assert!(!out.status.success(), "{bad}: {}", out.stderr);
+    }
 }
 
 #[test]
-fn undo_with_no_argument_reverses_the_most_recent_run() {
-    let f = two_applied_runs();
-    run(&["undo", "--yes"], &f);
-    assert!(!f.b_destination.exists(), "the newest went back");
-    assert!(f.a_destination.exists(), "the older did not");
-}
-
-#[test]
-fn undo_takes_a_run_id_and_never_a_plan_path() {
-    let f = two_applied_runs();
-    run(&["undo", "--yes", &f.run_a_id], &f);
-    assert!(!f.a_destination.exists());
-    let out = run(&["undo", "--yes", f.plan.to_str().unwrap()], &f);
-    assert!(!out.status.success(), "a plan path is not a run id: {}", out.stderr);
-}
-
-#[test]
-fn undo_does_not_print_the_records_path() {
-    let f = two_applied_runs();
-    let out = run(&["undo", "--list"], &f);
-    assert!(!out.stdout.contains("/runs/"), "availability, not a path: {}", out.stdout);
-}
+fn undo_does_not_print_a_record_path() { /* no "/runs/" and no "Application Support" in stdout */ }
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
-
-Run: `cargo test -p comic-renamer --test cli undo_`
-Expected: FAIL — `--list` is not a recognised argument.
-
+- [ ] **Step 2: Run them; expect FAIL (`--list` unrecognised)**
 - [ ] **Step 3: Reshape the variant and its handler**
 
-- [ ] **Step 4: Run them to verify they pass**
+Also replace `main.rs:430-431`, which prints `undo manifest: <path>` and
+`comic-renamer undo <plan>`. Both cite a deleted function and a deleted argument
+shape; the replacement states availability — that `comic-renamer undo` will
+reverse this run — and names no path.
 
-Run: `cargo test -p comic-renamer --test cli undo_` then `cargo test --workspace`
-Expected: PASS.
-
+- [ ] **Step 4: Run them, then the workspace**
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/cli/src/main.rs crates/cli/tests/cli.rs
-git commit -m "feat(cli): undo names a run, not a plan"
+git commit -m "feat(cli): undo names a run, and apply stops printing a path"
 ```
 
 ---
 
-## Task 7: The startup menu
+## Task 7: The menu, its offers, and its keys
 
 **Files:**
 - Create: `crates/cli/src/menu.rs`
-- Modify: `crates/cli/src/main.rs` (`Cli::command` to `Option<Command>`, dispatch)
+- Modify: `crates/cli/src/main.rs`, `crates/cli/src/map/mod.rs` (`require_terminal`
+  to `pub(crate)`)
 - Test: `crates/cli/src/menu.rs` (`mod tests`), `crates/cli/tests/cli.rs`
 
 **Interfaces:**
-- Consumes: Task 1's `record::is_live`, Task 2's `summarise` (for `interrupted`,
-  `planned`, `placed`), Task 3's `reverse_with`.
+- Consumes: Tasks 1, 3, 5, 6.
 - Produces:
   ```rust
-  pub enum Waiting { Interrupted(Summary), Completed(Summary) }
-  pub fn waiting(records: &Path) -> std::io::Result<Vec<(PathBuf, Waiting)>>;
-  pub fn render(waiting: &[(PathBuf, Waiting)], session_run: bool) -> String;
+  pub fn waiting(records: &Path) -> std::io::Result<Vec<(PathBuf, Summary)>>;
+  pub fn render(waiting: &[(PathBuf, Summary)], session_run: bool) -> String;
+  pub enum Key { Reverse(PathBuf), Decline(PathBuf), Map, Scan, Apply, ReverseSession, Quit }
+  pub fn dispatch(key: char, waiting: &[(PathBuf, Summary)]) -> Option<Key>;
   pub fn run(records: &Path) -> Result<(), String>;
   ```
-  `waiting` skips live records and empty ones, and sorts interrupted first.
-  `render` is the screen as text, so the wording is testable without a terminal.
-  `run` refuses without a TTY exactly as `map` does.
+  `waiting` skips live records, records with `placed == 0`, and anything `summarise`
+  refuses; it sorts `interrupted` first. `render` is a pure function of the summary
+  list so the wording is testable without a terminal, and a `Summary` whose
+  `interrupted` is true renders "interrupted … (N of M rows placed)" while one that
+  is false renders "placed M files on <date>". `dispatch` maps a keystroke to an
+  intent without performing it, which is the seam that makes `r` and `u` testable;
+  `map::run_with` is the precedent. `run` refuses without a terminal via
+  `map::require_terminal(stdout_is_terminal, stdin_is_terminal)`.
+
+*Review changes:* `Waiting` cut — `Summary.interrupted` already carries it.
+`dispatch` and `Key` are new: the first draft produced `render` and `run` and no
+task drove a key, so the `r`/`u` paths and menu items 1–3 were unimplemented.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```rust
-/// The first draft had one offer worded "a run was interrupted", which
-/// described a clean `apply --yes` from yesterday as a crash.
 #[test]
-fn the_two_offers_are_worded_differently() {
-    let screen = render(&[(p("a"), Waiting::Interrupted(summary(312, 400))),
-                          (p("b"), Waiting::Completed(summary(400, 400)))], false);
-    let interrupted = screen.lines().position(|l| l.contains("interrupted")).expect(&screen);
-    let completed = screen.lines().position(|l| l.contains("placed 400 files")).expect(&screen);
-    assert!(interrupted < completed, "the half-migrated library comes first:\n{screen}");
-    assert!(!screen.contains("interrupted on") || completed > interrupted);
-    assert!(screen.contains("312 of 400"), "a partial run says how far it got:\n{screen}");
-}
+fn the_two_offers_are_worded_differently_and_interrupted_comes_first() { /* … */ }
 
 #[test]
-fn a_live_or_empty_record_is_not_offered() {
-    let f = records_with(&[Kind::Live, Kind::Empty, Kind::Completed]);
-    let w = waiting(&f.records).unwrap();
-    assert_eq!(w.len(), 1, "{w:?}");
-}
+fn a_live_or_empty_record_is_not_offered() { /* Live, placed==0, and unparseable all filtered */ }
 
 #[test]
-fn item_four_appears_only_with_a_run_from_this_session() {
-    assert!(!render(&[], false).contains("reverse this session"));
-    assert!(render(&[], true).contains("reverse this session"));
-}
+fn item_four_appears_only_with_a_run_from_this_session() { /* render(&[], false) vs true */ }
 
 #[test]
-fn the_menu_never_prints_a_record_path() {
-    let screen = render(&[(p("/Users/x/Library/Application Support/comic-renamer/runs/r"),
-                           Waiting::Completed(summary(400, 400)))], true);
-    assert!(!screen.contains("Application Support"), "{screen}");
-}
+fn the_menu_never_prints_a_record_path() { /* no "Application Support" in render's output */ }
 
 #[test]
-fn the_menu_refuses_without_a_terminal() {
-    let out = run_binary_with_no_args_and_no_tty();
-    assert!(!out.status.success());
-    assert!(out.stderr.contains("terminal"), "{}", out.stderr);
+fn r_reverses_the_interrupted_record_and_u_the_completed_one() {
+    let w = vec![(p("a"), interrupted(312, 400)), (p("b"), completed(400))];
+    assert!(matches!(dispatch('r', &w), Some(Key::Reverse(x)) if x == p("a")));
+    assert!(matches!(dispatch('u', &w), Some(Key::Reverse(x)) if x == p("b")));
+    assert!(matches!(dispatch('k', &w), Some(Key::Decline(x)) if x == p("b")));
+    assert!(matches!(dispatch('l', &w), None), "leaving an interrupted run declines nothing");
 }
+
+#[test]  // crates/cli/tests/cli.rs
+fn the_menu_refuses_without_a_terminal() { /* no args, piped stdio, non-zero, "terminal" in stderr */ }
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [ ] **Step 2: Run them; expect FAIL (unresolved module `menu`)**
+- [ ] **Step 3: Implement the menu; `Cli::command` becomes `Option<Command>`**
 
-Run: `cargo test -p comic-renamer menu`
-Expected: FAIL, unresolved module `menu`.
+Plain prompts, not `ratatui`: `render` already makes the screen a string. Items 1,
+2 and 3 collect their own options and call the same entry points `Command::Map`,
+`Command::Scan` and `Command::Apply` use, so there is one implementation per action.
 
-- [ ] **Step 3: Implement the menu**
-
-Plain prompts rather than `ratatui`: the screen is five lines plus the offers and
-`render` already makes it a string. `Cli::command` becomes `Option<Command>` and
-`None` dispatches to `menu::run`.
-
-- [ ] **Step 4: Run them to verify they pass**
-
-Run: `cargo test -p comic-renamer menu` then `cargo test --workspace`
-Expected: PASS.
-
+- [ ] **Step 4: Run them, then the workspace**
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/cli/src/menu.rs crates/cli/src/main.rs crates/cli/tests/cli.rs
-git commit -m "feat(cli): a startup menu, and two offers that are not the same offer"
+git commit -m "feat(cli): a startup menu, two offers that differ, and keys that are testable"
 ```
 
 ---
 
-## Task 8: Quitting the menu is declining
+## Task 8: Quitting is declining
 
 **Files:**
 - Modify: `crates/cli/src/menu.rs`
 - Test: `crates/cli/src/menu.rs` (`mod tests`)
 
 **Interfaces:**
-- Consumes: Task 7's `menu::run`, Task 1's `record::is_live`.
-- Produces: `pub fn decline(records: &Path, offered: &[PathBuf]) -> std::io::Result<usize>`,
-  called on the quit path as an explicit step. It deletes the records it was
-  **offered and the user declined with `k`**, plus this session's own run, and never
-  the interrupted ones. It is not a `Drop` impl.
+- Consumes: Task 7's `dispatch`, Task 5's `ApplyResult.record`.
+- Produces: `pub fn decline(declined: &[PathBuf], session_run: Option<&Path>) -> std::io::Result<usize>`.
+  An explicit step on the quit path, **never a `Drop` impl**: a panic unwinds, and
+  that is exactly when the record must survive. It deletes only records the user
+  declined with `k` plus this session's own run, which `run` learns from
+  `ApplyResult.record`.
+
+*Review changes:* takes the declined list rather than re-deriving it, so "a record
+never offered is never deleted" is provable. The session's own record comes from
+`ApplyResult.record`, which the first draft had no way to learn.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```rust
 #[test]
-fn quitting_deletes_the_completed_record_it_offered() {
-    let f = records_with(&[Kind::Completed]);
-    assert_eq!(decline(&f.records, &[f.completed.clone()]).unwrap(), 1);
-    assert!(!f.completed.exists());
-}
+fn quitting_deletes_a_declined_record_and_this_sessions_run() { /* both gone, count 2 */ }
 
-/// A half-migrated library stays reversible until someone fixes it, so `l` is
-/// not a decline.
 #[test]
-fn quitting_keeps_an_interrupted_record() {
-    let f = records_with(&[Kind::Interrupted]);
-    assert_eq!(decline(&f.records, &[f.interrupted.clone()]).unwrap(), 0);
-    assert!(f.interrupted.exists());
+fn a_record_that_was_never_offered_is_never_deleted() {
+    let f = three_records();
+    assert_eq!(decline(&[f.a.clone()], None).unwrap(), 1);
+    assert!(f.b.exists() && f.c.exists());
 }
 
-/// A panic must not be a decline: the record has to survive exactly then.
+/// A half-migrated library stays reversible until someone fixes it.
+#[test]
+fn an_interrupted_record_is_not_declined_by_quitting() { /* `l` produced no Decline, so not in the list */ }
+
 #[test]
 fn declining_is_not_a_destructor() {
     let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/menu.rs")).unwrap();
@@ -787,22 +841,12 @@ fn declining_is_not_a_destructor() {
 }
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
-
-Run: `cargo test -p comic-renamer menu::tests::quitting`
-Expected: FAIL — `decline` not found.
-
-- [ ] **Step 3: Implement `decline` and call it on the quit path**
-
-- [ ] **Step 4: Run them to verify they pass, and the whole suite with both gates**
-
-Run: `cargo test --workspace`, then `cargo xtask check-mappings`, then `cargo xtask measure`
-Expected: 0 failures, 0 warnings; `check-mappings` passes; `located` 91.6%.
-
+- [ ] **Step 2: Run them; expect FAIL (`decline` not found)**
+- [ ] **Step 3: Implement `decline` and call it on the quit path, with one line saying so**
+- [ ] **Step 4: Run the workspace and both gates**
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/cli/src/menu.rs
 git commit -m "feat(menu): quitting is declining the undo you were shown"
 ```
 
@@ -811,65 +855,65 @@ git commit -m "feat(menu): quitting is declining the undo you were shown"
 ## Task 9: Write down what changed
 
 **Files:**
-- Modify: `CLAUDE.md` (invariants, State, Known gaps)
-- Modify: `docs/specs/2026-10-19-comic-renamer-design.md` (§13: D54–D57, amend D38)
-- Modify: `README.md` (the menu, `undo`'s new shape)
-- Modify: `docs/specs/2026-10-24-session-scoped-undo-and-startup-menu.md` (status)
-
-**Interfaces:**
-- Consumes: every earlier task.
-- Produces: nothing code depends on.
+- Modify: `CLAUDE.md`, `README.md`,
+  `docs/specs/2026-10-19-comic-renamer-design.md`,
+  `docs/specs/2026-10-21-undo-and-reverse-design.md`,
+  `docs/specs/2026-10-24-session-scoped-undo-and-startup-menu.md`
 
 - [ ] **Step 1: Add invariant 11 to `CLAUDE.md`, verbatim from the design's §2**
-
 - [ ] **Step 2: Fold D54–D57 into §13 and amend D38**
 
-D38's entry keeps its reasoning and gains a line saying its premise is void
-in-session and that its lock consequence moved to the library rather than being
-dropped. §6.13's amendment note is updated the same way.
+D38 keeps its reasoning and gains a line: its premise is void once the record is
+tool-written, and its lock consequence moved to the library rather than being
+dropped.
 
-- [ ] **Step 3: Update `CLAUDE.md`'s State and Known gaps**
+- [ ] **Step 3: Update `docs/specs/2026-10-21-undo-and-reverse-design.md`**
 
-State: the menu is the no-argument entry point, `undo` names a run. Known gaps:
-re-check the `ApplyResult.failed` entry, and record the measured test count.
+`undo.rs`'s module header points at it, and this work reverses its anchor decision.
+It was in no task of the first draft.
 
-- [ ] **Step 4: Verify every claim you just wrote**
+- [ ] **Step 4: Update the 2026-10-24 design's §3 to record that `Trust` was cut**
 
-Run the commands the docs cite and paste real numbers. Do not write a count you
-did not run.
+The design promises a fast in-session reverse; the plan removed the exemption.
+Say which, and why, rather than leaving the document describing code that does not
+exist.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Update `CLAUDE.md`'s State and Known gaps, then verify every number**
+
+Run the commands the docs cite and paste real output. Do not write a count you did
+not run, and do not count call sites by grepping a qualified path — the census for
+this very plan was wrong by six times for exactly that reason.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add CLAUDE.md README.md docs/specs
-git commit -m "docs: invariant 11, D54-D57, and the menu"
+git commit -m "docs: invariant 11, D54-D57, and what the plan changed about the design"
 ```
 
 ---
 
 ## Self-review
 
-**1. Spec coverage.** §2's D54 → Task 3; D55 → Task 8; D56 → Task 6; D57 → Task 4.
-§3's location and naming → Task 1; schema → Task 2; lock → Task 4; liveness →
-Tasks 1 and 7; lazy creation → Task 4; `Trust` → Task 3. §4 → Task 5. §5 → Task 7.
-§6's breakage → Task 9, except the roots cross-check deletion, which is Task 2's
-step 3. §7's four builder choices are settled in Tasks 1, 3 and 7 (`sha256_of`,
-plain prompts, `render` as a string) — the fourth, sweeping pre-existing records,
-is **deliberately not planned**: no release has shipped, so no such record exists.
+**1. Spec coverage.** D54 → Task 4; D55 → Task 8; D56 → Task 6; D57 → Task 2.
+§3's naming and liveness → Task 1; schema → Task 3; lock → Tasks 1 and 5; lazy
+creation, records-dir refusal and delete-after-reverse → Task 5; `Trust` →
+cut, recorded in Task 9. §4 → Task 5. §5's screen, offers, keys and items → Task 7;
+the path-print removal → Task 6. §6's breakage → Tasks 5 and 9.
+§7's four open questions: `sha256_of` (Task 4), plain prompts (Task 7),
+partial-run rendering (Task 7's `render`), and sweeping pre-existing records —
+**deliberately not planned**, since no release has shipped and no such record exists.
 
-**2. Step scan.** No step says "handle errors" or "add validation". Each code step
-carries a signature; the only code blocks are tests and the two `COLUMNS`/interface
-declarations the implementer cannot guess.
+**2. Step scan.** No step says "handle errors" or "add validation". Code blocks are
+tests and interface declarations only; no function body appears.
 
-**3. Type consistency.** `Summary` is defined once in Task 2 and consumed by Tasks 4
-and 7. Task 3 adds `reverse_with(manifest, trust)` and leaves `reverse(manifest)` as
-`reverse_with(manifest, Trust::FromDisk)`, so Task 2's tests keep compiling
-unchanged; `UndoWriter::create` gains two parameters in Task 2 and its only
-non-test caller is rewritten in Task 4, which is why Task 2's step 4 says not to
-touch `apply.rs`.
+**3. Type consistency.** `Summary` is defined in Task 3 and consumed by Tasks 2, 5,
+6 and 7. `create_with`/`reverse_from` are added in Task 3 and the old `create`/
+`reverse` are deleted in Task 5, which is the only task whose Files list includes
+`apply_exec.rs`'s 48 call sites — so every task before it compiles against both.
+`ApplyResult.record` is produced in Task 5 and consumed in Task 8.
 
-**4. Review Focus.** All five have an owning task and a named test: 1 and 3 in
-Task 2, 2 and 4 in Task 4, 5 in Task 1.
+**4. Review Focus.** Six conditions, each with an owning task and a named test:
+1 and 3 and 5 in Task 3, 2 in Task 2, 4 in Task 5, 6 in Task 4.
 
-**5. Proportion.** The design is 335 lines; this plan is about 500, most of it test
-assertions. No function body appears.
+**5. Proportion.** The design is 345 lines; this plan is about 560, nearly all of it
+test assertions and interface declarations.
