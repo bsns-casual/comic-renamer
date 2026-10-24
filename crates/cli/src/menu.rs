@@ -45,7 +45,11 @@ pub fn waiting(records: &Path) -> std::io::Result<Vec<(PathBuf, Summary)>> {
     let mut found: Vec<(PathBuf, Summary)> = record::list(records)?
         .into_iter()
         // An unanswerable liveness question is treated as live: offering to
-        // reverse a record a running `apply` is still writing is the worse error.
+        // reverse a record a running `apply` is still writing is the worse
+        // error. `record::any_live` writes this expression with the opposite
+        // default on purpose — it asks "is a run in progress?" and refuses on
+        // a yes, where this asks "should I offer this?" and declines on a yes.
+        // Same expression, opposite safe side; see its doc comment.
         .filter(|path| !record::is_live(path).unwrap_or(true))
         .filter_map(|path| undo::summarise(&path).ok().map(|s| (path, s)))
         .filter(|(_, s)| s.reversible > 0)
@@ -173,10 +177,11 @@ pub fn dispatch(key: char, waiting: &[(PathBuf, Summary)]) -> Option<Key> {
 pub fn decline(declined: &[PathBuf], session_run: Option<&Path>) -> std::io::Result<usize> {
     let mut gone = 0;
     for path in declined.iter().map(PathBuf::as_path).chain(session_run) {
-        match std::fs::remove_file(path) {
-            Ok(()) => gone += 1,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
+        // `record::forget`, not a second hand-rolled `remove_file`: its doc
+        // comment claims every record deletion goes through it, and a claim
+        // like that is either true or it is the next false comment.
+        if record::forget(path)? {
+            gone += 1;
         }
     }
     Ok(gone)

@@ -161,6 +161,34 @@ fn any_live_sees_a_held_record_and_nothing_else() {
     assert!(!any_live(&f.dir).unwrap());
 }
 
+/// A record nobody can open is not evidence that a run is in progress.
+///
+/// `menu::waiting` reads an unanswerable liveness question as *live*, and that
+/// is right there, because its question is "should I offer this record" and
+/// not offering is the safe answer. This question is the opposite one, so the
+/// same default inverts: one unreadable record would have `undo` refuse with
+/// "a run is in progress" while `undo --list` says there are no runs, for as
+/// long as the file exists and with no way out from inside the tool. The state
+/// is constructible — a file at mode `000` cannot be opened by its owner.
+#[test]
+fn an_unreadable_record_is_not_a_run_in_progress() {
+    let f = two_records_for_one_root_pair();
+    std::fs::set_permissions(&f.older, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let answer = any_live(&f.dir);
+    // Restored before the assertion, so a failure cannot leave the TempDir
+    // holding a file it is then unable to remove.
+    std::fs::set_permissions(&f.older, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(
+        !answer.unwrap(),
+        "an unreadable record made `undo` refuse every run forever"
+    );
+    // And a record that genuinely is held still reads as live, so the safe
+    // direction was not bought by making the answer always false.
+    let held = hold(&f.newer).unwrap();
+    assert!(any_live(&f.dir).unwrap());
+    drop(held);
+}
+
 /// A record that cannot be opened for write must not make the whole sweep
 /// fail. `is_live` answers the question it was asked.
 #[test]

@@ -69,13 +69,26 @@ pub fn is_live(path: &Path) -> io::Result<bool> {
     Ok(!crate::fsops::flock_nb(&file)?)
 }
 
-/// Whether some run is writing a record in `dir` right now.
+/// Whether some run is writing a record in `dir` right now. Used to tell
+/// "nothing to undo" from "a run is mid-flight", which are different answers.
 ///
-/// An unanswerable liveness question counts as live, the same way
-/// `menu::waiting` reads it: this is what distinguishes "nothing to undo" from
-/// "a run is mid-flight", and the second must not be reported as the first.
+/// **An unanswerable liveness question counts as _not_ live here, and that is
+/// the opposite default from `menu::waiting`'s identical-looking expression.**
+/// The two ask opposite questions, so the same default lands on opposite
+/// sides:
+///
+/// - `waiting` asks "should I offer this record?", and not offering is the
+///   safe answer — so an unreadable record is treated as live and filtered out.
+/// - this asks "is a run in progress?", and the answer is used to *refuse*. A
+///   `true` here from one record at mode `000` makes `undo` refuse with "a run
+///   is in progress" while `undo --list` says there are no runs, for as long as
+///   that file exists and with nothing the user can do about it from inside the
+///   tool.
+///
+/// So do not unify the two for consistency: the expressions match and the
+/// meanings do not.
 pub fn any_live(dir: &Path) -> io::Result<bool> {
-    Ok(list(dir)?.iter().any(|path| is_live(path).unwrap_or(true)))
+    Ok(list(dir)?.iter().any(|path| is_live(path).unwrap_or(false)))
 }
 
 /// `remove_file`, where a record that is already gone is success.
