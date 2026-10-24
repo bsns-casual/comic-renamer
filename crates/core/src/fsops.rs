@@ -455,6 +455,31 @@ pub fn temp_basename() -> String {
     format!(".comic-renamer.{}.{seq}.partial", std::process::id())
 }
 
+/// Try to take an exclusive, non-blocking `flock` on `file`: `Ok(true)` if
+/// taken, `Ok(false)` if another open file description holds it. The lock
+/// lasts as long as the descriptor is open.
+///
+/// The one `unsafe` `flock` call in the crate. `flock`, not `fcntl`/`F_SETLK`:
+/// the lock belongs to the open file description, so two opens in one process
+/// conflict, which the liveness checks rely on.
+pub fn flock_nb(file: &std::fs::File) -> io::Result<bool> {
+    // SAFETY: a valid open descriptor we own, for the duration of the call.
+    let rc = unsafe {
+        libc::flock(
+            std::os::fd::AsRawFd::as_raw_fd(file),
+            libc::LOCK_EX | libc::LOCK_NB,
+        )
+    };
+    if rc == 0 {
+        return Ok(true);
+    }
+    let e = io::Error::last_os_error();
+    match e.raw_os_error() {
+        Some(libc::EWOULDBLOCK) => Ok(false),
+        _ => Err(e),
+    }
+}
+
 /// A temp file this code created, unlinked on drop unless it was renamed away.
 ///
 /// Everything goes through the parent descriptor. An earlier version derived

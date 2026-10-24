@@ -10,6 +10,7 @@ pub mod normalize;
 pub mod overrides;
 pub mod plan;
 pub mod preset;
+pub mod record;
 pub mod residue;
 pub mod resolve;
 pub mod scan;

@@ -628,19 +628,8 @@ impl Lock {
             .create(true)
             .truncate(false)
             .open(lock_path(plan))?;
-        // SAFETY: a valid open descriptor we own, for the duration of the call.
-        let rc = unsafe {
-            libc::flock(
-                std::os::fd::AsRawFd::as_raw_fd(&file),
-                libc::LOCK_EX | libc::LOCK_NB,
-            )
-        };
-        if rc != 0 {
-            let e = std::io::Error::last_os_error();
-            return match e.raw_os_error() {
-                Some(libc::EWOULDBLOCK) => Err(ApplyError::Locked),
-                _ => Err(ApplyError::Io(e)),
-            };
+        if !crate::fsops::flock_nb(&file)? {
+            return Err(ApplyError::Locked);
         }
         Ok(Lock { _file: file })
     }
