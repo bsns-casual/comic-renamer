@@ -29,6 +29,10 @@ fn gcd() -> Mappings {
             Some("Seed of Destruction"),
             Some(4),
         ),
+        // A run of 100, because `pad` is `run.to_string().len().max(2)` and
+        // every shorter run floors to width 2 — so this is the only shape in
+        // which the run is visible in a path at all.
+        ("velvet_vol1", "Velvet", Some(1), None, Some(100)),
     ])
 }
 
@@ -582,6 +586,48 @@ fn a_record_carries_the_subtitle_its_own_reverse_needs() {
         "the subtitled row never came back"
     );
     assert!(!placed.exists());
+}
+
+/// `run` is the zero-padding width (D37, D44). It is stored per row precisely
+/// because deriving it from a growing mapping table would rename files already
+/// placed, so a wrong value renames real files — and it has to survive into the
+/// record, because `undo::reverse` rebuilds the padded name from it.
+///
+/// It takes a run of 100 or more to be observable at all: `pad` is
+/// `run.to_string().len().max(2)`, so every shorter run floors to width 2 and
+/// `run → 0` changes no path. Every other fixture in the suite is in that
+/// range, which is why this field was unpinned by construction until the
+/// fixture above existed.
+#[test]
+fn a_record_carries_the_run_that_set_its_padding() {
+    let f = build(&["velvet_vol1.pdf"], Mode::Move).0;
+    let lock = Lock::library(&f.records, &f.dest_root).unwrap();
+
+    // Three digits, not two: this is the padding the run decides.
+    let padded = f.dest_root.join("Velvet/Velvet Vol. 001.pdf");
+    let record = run(&f, &lock).unwrap().record.unwrap();
+    assert!(
+        padded.exists(),
+        "the fixture's run did not reach the name, so nothing below is about \
+         the run: {:?}",
+        f.rows[0].destination_preview
+    );
+
+    // Volume 1, no subtitle, run 100, extension pdf — the run column itself,
+    // not a number that happens to appear in an identity column.
+    let text = std::fs::read_to_string(&record).unwrap();
+    assert!(
+        text.contains(",1,,100,'pdf,"),
+        "the run column is not the row's:\n{text}"
+    );
+
+    // And the reverse is the half that matters: it rebuilds `Vol. 001` from
+    // the recorded run, and a record carrying 0 would name `Vol. 01` — a path
+    // the preset does not produce for this row, refused forever.
+    let report = reverse_run(&lock, &record).unwrap();
+    assert_eq!(report.restored, 1, "{report:?}");
+    assert!(report.refused.is_empty(), "{report:?}");
+    assert!(f.source_root.join("velvet_vol1.pdf").exists());
 }
 
 /// The mechanism and mode columns are the row's own, asserted where they are
