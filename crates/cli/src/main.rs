@@ -25,6 +25,7 @@ use comic_renamer_core::types::{
 };
 use comic_renamer_core::{apply, komga_api, plan, record, scan, undo};
 mod map;
+mod menu;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -53,7 +54,7 @@ const COLLISIONS_SHOWN: usize = 5;
 #[command(name = "comic-renamer", version, about = "Rename comic bundles into a library layout")]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -158,6 +159,20 @@ enum Command {
 fn main() -> ExitCode {
     let Cli { command } = Cli::parse();
     let outcome = match command {
+        None => records_dir().and_then(|records| menu::run(&records)),
+        Some(command) => run_command(command),
+    };
+    match outcome {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            eprintln!("error: {message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_command(command: Command) -> Result<(), String> {
+    match command {
         Command::Scan {
             source,
             dest,
@@ -203,13 +218,6 @@ fn main() -> ExitCode {
             komga_url,
         } => run_apply(&plan, allow_cloud_move, yes, komga_url.as_deref()),
         Command::Undo { run, list } => run_undo(run.as_deref(), list),
-    };
-    match outcome {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(message) => {
-            eprintln!("error: {message}");
-            ExitCode::FAILURE
-        }
     }
 }
 
@@ -784,9 +792,14 @@ fn run_undo(run: Option<&str>, list: bool) -> Result<(), String> {
     };
     // The record names its own library. The same lock `apply` runs under, so
     // a record being written by a live run is not reversed under it.
-    let summary = undo::summarise(&record).map_err(|e| e.to_string())?;
-    let lock = apply::Lock::library(&records, &summary.dest_root).map_err(|e| e.to_string())?;
-    let report = apply::reverse_run(&lock, &record).map_err(|e| e.to_string())?;
+    reverse_path(&records, &record)
+}
+
+/// Reverses one record under its library's lock. Shared by `undo` and the menu.
+fn reverse_path(records: &Path, record: &Path) -> Result<(), String> {
+    let summary = undo::summarise(record).map_err(|e| e.to_string())?;
+    let lock = apply::Lock::library(records, &summary.dest_root).map_err(|e| e.to_string())?;
+    let report = apply::reverse_run(&lock, record).map_err(|e| e.to_string())?;
     print_report(&report)
 }
 

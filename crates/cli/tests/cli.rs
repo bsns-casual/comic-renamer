@@ -1207,3 +1207,12 @@ fn undo_does_not_rebuild_a_bundle_folder_when_the_library_is_gone() {
     assert!(!out.status.success(), "{}", stdout(&out));
     assert!(!f.source.exists(), "recreated a folder with nothing to put in it");
 }
+
+#[test]
+fn the_menu_refuses_without_a_terminal() {
+    let f = fixture(Mode::Move);
+    let out = run_in(&f, &[], "");
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("the menu needs an interactive terminal"), "{}", stderr(&out));
+    assert!(!(stdout(&out) + &stderr(&out)).contains(f.config.to_str().unwrap()));
+}

@@ -58,13 +58,17 @@ pub fn orientation(unmapped: usize, total: usize) -> String {
 /// A session reads keys and draws a screen, so it needs both streams. Refused
 /// before anything is drawn: a pipe never receives escape codes and a CI job
 /// never waits for input that cannot arrive.
-fn require_terminal(stdout_is_terminal: bool, stdin_is_terminal: bool) -> Result<(), String> {
+pub(crate) fn require_terminal(
+    what: &str,
+    stdout_is_terminal: bool,
+    stdin_is_terminal: bool,
+) -> Result<(), String> {
     let hint = "Run it directly in a terminal, or use `scan` to write a plan without a session.";
     if !stdout_is_terminal {
-        return Err(format!("`map` needs an interactive terminal, but stdout is not one. {hint}"));
+        return Err(format!("{what} needs an interactive terminal, but stdout is not one. {hint}"));
     }
     if !stdin_is_terminal {
-        return Err(format!("`map` needs an interactive terminal, but stdin is not one. {hint}"));
+        return Err(format!("{what} needs an interactive terminal, but stdin is not one. {hint}"));
     }
     Ok(())
 }
@@ -509,7 +513,7 @@ fn run_with(
         println!("Every file is already mapped; nothing needed mapping.");
         first
     } else {
-        require_terminal(stdout_tty, stdin_tty)?;
+        require_terminal("`map`", stdout_tty, stdin_tty)?;
         let total = first.rows.len() + first.unmapped.len();
         println!("{}\n", orientation(first.unmapped.len(), total));
         if let Outcome::Quit = session(&first)? {
@@ -692,10 +696,10 @@ mod tests {
 
     #[test]
     fn a_session_needs_both_streams_to_be_terminals() {
-        assert!(require_terminal(true, true).is_ok());
-        let out = require_terminal(false, true).unwrap_err();
+        assert!(require_terminal("`map`", true, true).is_ok());
+        let out = require_terminal("`map`", false, true).unwrap_err();
         assert!(out.contains("stdout") && out.contains("terminal"), "{out}");
-        let inp = require_terminal(true, false).unwrap_err();
+        let inp = require_terminal("`map`", true, false).unwrap_err();
         assert!(inp.contains("stdin") && inp.contains("terminal"), "{inp}");
     }
 
