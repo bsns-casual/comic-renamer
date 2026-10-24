@@ -128,6 +128,45 @@ pub fn dispatch(key: char, waiting: &[(PathBuf, Summary)]) -> Option<Key> {
     }
 }
 
+/// Quitting the menu declines the undo it offered. Deletes the records the user
+/// declined with `k` and this session's own run, and nothing else: the list is
+/// an argument so that a record never offered cannot be reached from here.
+///
+/// An explicit step on the quit path and never a `Drop` impl, because a panic
+/// unwinds and a panic is exactly when the record has to survive. A record that
+/// is already gone is not an error and is not counted.
+pub fn decline(declined: &[PathBuf], session_run: Option<&Path>) -> std::io::Result<usize> {
+    let mut gone = 0;
+    for path in declined.iter().map(PathBuf::as_path).chain(session_run) {
+        match std::fs::remove_file(path) {
+            Ok(()) => gone += 1,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(gone)
+}
+
+/// What leaving the menu on `key` deletes: the record declined with `k`, if
+/// that was the key, plus this session's own run. `None` for a key that does
+/// not leave. Pure, so what each exit reaches `decline` with is testable.
+fn exit_deletes<'a>(key: &Key, session_run: Option<&'a Path>) -> Option<(Vec<PathBuf>, Option<&'a Path>)> {
+    match key {
+        Key::Quit => Some((Vec::new(), session_run)),
+        Key::Decline(record) => Some((vec![record.clone()], session_run)),
+        _ => None,
+    }
+}
+
+/// The quit path, shared by `q` and `k`. Says so when it deletes anything.
+fn leave(declined: &[PathBuf], session_run: Option<&Path>) -> Result<(), String> {
+    let gone = decline(declined, session_run).map_err(|e| e.to_string())?;
+    if gone > 0 {
+        println!("Stopped offering to undo {gone} run(s). The files stay where they are.");
+    }
+    Ok(())
+}
+
 fn ask(prompt: &str, default: Option<&str>) -> Result<String, String> {
     let mut stdout = std::io::stdout();
     match default {
@@ -171,7 +210,7 @@ pub fn run(records: &Path) -> Result<(), String> {
         std::io::stdin().is_terminal(),
     )?;
     // The record `apply` made from this menu, if it did. Item 4 exists for it.
-    let mut session: Option<String> = None;
+    let mut session: Option<PathBuf> = None;
     loop {
         let waiting = waiting(records).map_err(|e| e.to_string())?;
         print!("\n{}", render(&waiting, session.is_some()));
@@ -185,14 +224,14 @@ pub fn run(records: &Path) -> Result<(), String> {
             println!("not an option here");
             continue;
         };
+        if let Some((declined, session_run)) = exit_deletes(&key, session.as_deref()) {
+            return leave(&declined, session_run);
+        }
         let done = match key {
-            Key::Quit => return Ok(()),
-            // shortcut: deleting a declined record lands with the decline task;
-            // until then `k` leaves it, which is the safe side.
-            Key::Decline(_) => return Ok(()),
+            Key::Quit | Key::Decline(_) => unreachable!("handled by exit_deletes"),
             Key::Reverse(record) => crate::reverse_path(records, &record),
             Key::ReverseSession => match session.take() {
-                Some(id) => crate::reverse_path(records, &records.join(id)),
+                Some(record) => crate::reverse_path(records, &record),
                 None => {
                     println!("not an option here");
                     continue;
@@ -205,14 +244,15 @@ pub fn run(records: &Path) -> Result<(), String> {
                 crate::run_scan(source, dest, None, "komga".into(), "en".into(), "Humble".into(), mode)
             }),
             Key::Apply => {
-                let before = ids(records);
-                let result = ask_path("plan file")
-                    .and_then(|plan| crate::run_apply(&plan, false, false, None));
-                // The record this apply made is the one that was not there before.
-                if let Some(id) = ids(records).into_iter().find(|id| !before.contains(id)) {
-                    session = Some(id);
-                }
-                result
+                ask_path("plan file")
+                    .and_then(|plan| crate::run_apply(&plan, false, false, None))
+                    .map(|made| {
+                        // The record the apply says it wrote, not one inferred
+                        // from the directory.
+                        if made.is_some() {
+                            session = made;
+                        }
+                    })
             }
         };
         // A failed action is reported and the menu comes back: the user chose
@@ -229,18 +269,6 @@ fn ask_bundle() -> Result<(PathBuf, PathBuf, Mode), String> {
         ask_path("library folder (must exist)")?,
         ask_mode()?,
     ))
-}
-
-/// File names in the store, never paths.
-fn ids(records: &Path) -> Vec<String> {
-    if !records.exists() {
-        return Vec::new();
-    }
-    record::list(records)
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_string))
-        .collect()
 }
 
 #[cfg(test)]
@@ -401,6 +429,84 @@ mod tests {
         let newer = record_with(dir.path(), 2, 2, false);
         let order: Vec<PathBuf> = waiting(dir.path()).unwrap().into_iter().map(|(p, _)| p).collect();
         assert_eq!(order, vec![crashed, newer]);
+    }
+
+    fn three_records() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let mk = |n: &str| {
+            let p = dir.path().join(n);
+            std::fs::write(&p, b"").unwrap();
+            p
+        };
+        let (a, b, c) = (mk("a"), mk("b"), mk("c"));
+        (dir, a, b, c)
+    }
+
+    #[test]
+    fn quitting_deletes_a_declined_record_and_this_sessions_run() {
+        let (_d, a, b, c) = three_records();
+        assert_eq!(decline(std::slice::from_ref(&a), Some(&b)).unwrap(), 2);
+        assert!(!a.exists() && !b.exists() && c.exists());
+    }
+
+    #[test]
+    fn a_record_that_was_never_offered_is_never_deleted() {
+        let (_d, a, b, c) = three_records();
+        assert_eq!(decline(std::slice::from_ref(&a), None).unwrap(), 1);
+        assert!(!a.exists() && b.exists() && c.exists());
+    }
+
+    /// A half-migrated library stays reversible until someone fixes it: `l`
+    /// produces no `Decline`, so the record is never in the list.
+    #[test]
+    fn an_interrupted_record_is_not_declined_by_quitting() {
+        let (_d, a, b, _c) = three_records();
+        let w = vec![(a.clone(), interrupted(1, 4)), (b.clone(), completed(4))];
+        assert_eq!(dispatch('l', &w), None);
+        let declined: Vec<PathBuf> = match dispatch('k', &w) {
+            Some(Key::Decline(p)) => vec![p],
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(decline(&declined, None).unwrap(), 1);
+        assert!(a.exists(), "the interrupted record must survive");
+        assert!(!b.exists());
+    }
+
+    #[test]
+    fn a_record_already_gone_is_not_an_error_and_not_counted() {
+        let (_d, a, _b, _c) = three_records();
+        std::fs::remove_file(&a).unwrap();
+        assert_eq!(decline(&[a], None).unwrap(), 0);
+    }
+
+    #[test]
+    fn q_deletes_only_this_sessions_run() {
+        let run = p("run");
+        assert_eq!(exit_deletes(&Key::Quit, Some(&run)), Some((vec![], Some(run.as_path()))));
+        assert_eq!(exit_deletes(&Key::Quit, None), Some((vec![], None)));
+    }
+
+    #[test]
+    fn k_deletes_the_declined_record_and_this_sessions_run_and_nothing_displayed() {
+        let (b, run) = (p("b"), p("run"));
+        let got = exit_deletes(&Key::Decline(b.clone()), Some(&run));
+        assert_eq!(got, Some((vec![b], Some(run.as_path()))));
+    }
+
+    #[test]
+    fn keys_that_do_not_leave_delete_nothing() {
+        let run = p("run");
+        for key in [Key::Map, Key::Scan, Key::Apply, Key::ReverseSession, Key::Reverse(p("a"))] {
+            assert_eq!(exit_deletes(&key, Some(&run)), None, "{key:?}");
+        }
+    }
+
+    #[test]
+    fn declining_is_not_a_destructor() {
+        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/menu.rs")).unwrap();
+        // Built from parts so this test's own text does not contain the phrase.
+        let needle = format!("{} {}", "impl", "Drop");
+        assert_eq!(src.matches(&needle).count(), 0, "the quit-path delete must be an explicit step");
     }
 
     #[test]

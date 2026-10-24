@@ -216,7 +216,7 @@ fn run_command(command: Command) -> Result<(), String> {
             allow_cloud_move,
             yes,
             komga_url,
-        } => run_apply(&plan, allow_cloud_move, yes, komga_url.as_deref()),
+        } => run_apply(&plan, allow_cloud_move, yes, komga_url.as_deref()).map(|_| ()),
         Command::Undo { run, list } => run_undo(run.as_deref(), list),
     }
 }
@@ -371,7 +371,7 @@ fn run_apply(
     allow_cloud_move: bool,
     yes: bool,
     komga_url: Option<&str>,
-) -> Result<(), String> {
+) -> Result<Option<PathBuf>, String> {
     // Read **once**. Everything below — the pre-flight, the disclosure's
     // arithmetic, and the run itself — works from this copy, so a plan
     // rewritten while the user reads the disclosure cannot be what runs.
@@ -425,7 +425,7 @@ fn run_apply(
         // prompt does not mean anything.
         print!("{}", nothing_to_do(&facts));
         if rows.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         // A caller cannot tell "the library now matches the plan" from "it
         // does not" out of an exit code that is zero either way.
@@ -457,7 +457,7 @@ fn run_apply(
     if result.record.is_some() {
         println!("  comic-renamer undo    puts this run back");
     }
-    Ok(())
+    Ok(result.record)
 }
 
 /// The record store: `$XDG_CONFIG_HOME/comic-renamer/runs`, or

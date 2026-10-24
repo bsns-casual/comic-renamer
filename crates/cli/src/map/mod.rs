@@ -496,7 +496,7 @@ pub fn run(
         &config,
         terminals,
         |first| session(&first.unmapped, &marketplace, &folder, &lang, &overrides, preset_impl.as_ref(), &local),
-        |plan| crate::run_apply(plan, false, false, None),
+        |plan| crate::run_apply(plan, false, false, None).map(|_| ()),
     )
 }
 
