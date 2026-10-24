@@ -9,13 +9,18 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// A record's basename: `.comic-renamer.<unix-secs>.<pid>.<seq>.record`. The
-/// pid and per-process counter keep two runs in the same second apart.
+/// A record's basename: `.comic-renamer.<unix-nanos>.<pid>.<seq>.record`. The
+/// stamp is nanoseconds because `list` orders by it and "the newest run" is
+/// what `undo` picks: at one-second resolution two runs finishing in the same
+/// second ordered by pid, which is not time. The pid and per-process counter
+/// still keep two names from one instant apart.
 pub fn basename(now: SystemTime) -> String {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let secs = now.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    format!(".comic-renamer.{secs}.{}.{seq}.record", std::process::id())
+    let nanos = now
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+    format!(".comic-renamer.{nanos}.{}.{seq}.record", std::process::id())
 }
 
 /// The lock filename for a library: a hash of its canonical root, so a root
@@ -60,7 +65,7 @@ pub fn hold(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
-/// `(secs, pid, seq)` from a name `basename` produced, or `None` for anything
+/// `(nanos, pid, seq)` from a name `basename` produced, or `None` for anything
 /// else. Numeric, because a lexical sort puts `.9.` after `.10.`.
 fn parse_name(name: &str) -> Option<(u64, u32, u64)> {
     let rest = name.strip_prefix(".comic-renamer.")?.strip_suffix(".record")?;
