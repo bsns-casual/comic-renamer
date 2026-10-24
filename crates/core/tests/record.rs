@@ -8,7 +8,23 @@ fn a_basename_is_unique_per_call_and_carries_the_stamp() {
     let now = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_793_000_000);
     let (a, b) = (basename(now), basename(now));
     assert_ne!(a, b);
-    assert!(a.contains("1793000000") && a.starts_with(".comic-renamer.") && a.ends_with(".record"), "{a}");
+    assert!(a.contains("1793000000000000000") && a.starts_with(".comic-renamer.") && a.ends_with(".record"), "{a}");
+}
+
+/// Two instants a millisecond apart, taken with no sleep between them, name
+/// records that list in time order. At one-second resolution both stamps were
+/// equal and the order fell to the pid.
+#[test]
+fn records_a_millisecond_apart_list_in_time_order() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = UNIX_EPOCH + Duration::from_secs(1_793_000_000);
+    // The later one is made first, so creation order cannot be what sorts.
+    let later = tmp.path().join(basename(t + Duration::from_millis(1)));
+    let earlier = tmp.path().join(basename(t));
+    for p in [&later, &earlier] {
+        std::fs::write(p, "x").unwrap();
+    }
+    assert_eq!(list(tmp.path()).unwrap(), vec![later, earlier]);
 }
 
 /// Review Focus: a root is a path, not a filename, so it is hashed.

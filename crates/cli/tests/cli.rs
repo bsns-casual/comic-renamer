@@ -945,14 +945,13 @@ struct Second {
     placed: PathBuf,
 }
 
-/// Applies the fixture's own plan, then a second library's. A record's name
-/// sorts by start second, so the gap between them is what makes the second
-/// the newer run; two applies inside one second are ordered by pid.
+/// Applies the fixture's own plan, then a second library's. Each apply is its
+/// own process, so the second is the newer run by the nanosecond stamp in its
+/// record's name; no pause is needed between them.
 fn two_runs(f: &Fixture) -> Second {
     assert!(run_in(f, &["apply", f.plan.to_str().unwrap(), "--yes"], "")
         .status
         .success());
-    std::thread::sleep(std::time::Duration::from_millis(1100));
 
     let root = f._dir.path().canonicalize().unwrap().join("two");
     let source = root.join("bundle");
@@ -999,6 +998,16 @@ fn undo_list_names_each_run_without_reversing_anything() {
 }
 
 #[test]
+fn undo_list_with_no_record_store_says_so_and_succeeds() {
+    // Nothing has been applied, so the store was never created.
+    let f = fixture(Mode::Move);
+    assert!(!runs_dir(&f).exists());
+    let out = run_in(&f, &["undo", "--list"], "");
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("no runs to reverse"), "{}", stdout(&out));
+}
+
+#[test]
 fn undo_list_is_newest_first_and_names_no_path() {
     let f = fixture(Mode::Move);
     two_runs(&f);
@@ -1008,6 +1017,10 @@ fn undo_list_is_newest_first_and_names_no_path() {
     sorted.sort();
     sorted.reverse();
     assert_eq!(ids, sorted, "newest first: {}", stdout(&out));
+    // An id is a file name, so it carries the `.record` suffix; what must
+    // never appear is a path. That is why this test checks for `/` in the ids
+    // and the other undo output tests check for `.record`: they hold the same
+    // rule, applied to output that does and does not print ids.
     for id in &ids {
         assert!(!id.contains('/'), "an id that is a path: {id}");
     }
@@ -1153,7 +1166,7 @@ fn undo_with_no_argument_steps_over_a_record_it_cannot_read() {
         .success());
     // Newer than any real record, and not one.
     std::fs::write(
-        runs_dir(&f).join(".comic-renamer.99999999999.1.0.record"),
+        runs_dir(&f).join(".comic-renamer.9000000000000000000.1.0.record"),
         b"not a record",
     )
     .unwrap();
@@ -1164,7 +1177,7 @@ fn undo_with_no_argument_steps_over_a_record_it_cannot_read() {
 
     let listed = run_in(&f, &["undo", "--list"], "");
     assert!(listed.status.success(), "{}", stderr(&listed));
-    assert!(!stdout(&listed).contains("99999999999"), "{}", stdout(&listed));
+    assert!(!stdout(&listed).contains("9000000000000000000"), "{}", stdout(&listed));
 }
 
 #[test]
