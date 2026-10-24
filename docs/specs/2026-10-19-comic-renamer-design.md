@@ -634,7 +634,7 @@ from, which is the one state no recovery can reason about.
 "bprd_1948.pdf","B.P.R.D/B.P.R.D 1948.pdf","rename","done"
 ```
 
-`comic-renamer undo <manifest>` reverses it in reverse order. The manifest is
+`comic-renamer undo <manifest>` (superseded 2026-10-24: `undo [<run>]`, D56) reverses it in reverse order. The manifest is
 also an audit trail a user can read in any editor without the tool.
 
 > **Amended 2026-10-24 (D54–D57).** The record is no longer a file beside the
@@ -802,7 +802,7 @@ would otherwise leave hanging.
 comic-renamer scan <source> --dest <dir> --preset komga
                   [--move|--copy] [-o plan.json]
 comic-renamer apply plan.json
-comic-renamer undo plan.jsonl
+comic-renamer undo plan.jsonl     # superseded 2026-10-24 (D56): now `undo [--list] [<run>]`
 ```
 
 **The mode flag belongs on `scan`, not `apply`.** §6.10 selects a per-row

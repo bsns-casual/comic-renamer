@@ -92,8 +92,9 @@ which is the same reasoning that lets a test seam take a path. A run id is also
 not a path: it selects from records the tool wrote and enumerated.
 
 **Both surfaces stay**, as Mole has them: `comic-renamer` with no arguments opens
-a menu, and `scan`, `map`, `apply` and `undo` remain subcommands with `--yes`
-for scripting.
+a menu, and `scan`, `map`, `apply` and `undo` remain subcommands. Only `apply`
+takes `--yes`, for scripting; `scan` and `map` have no prompt, and `undo` has none
+to skip (D56).
 
 ### Invariant 11 (now in `CLAUDE.md`)
 
