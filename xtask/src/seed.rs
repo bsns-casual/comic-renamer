@@ -25,10 +25,13 @@ fn marketplace_rows(text: &str) -> Result<BTreeMap<String, Vec<MappingRow>>, Str
         let [market, title, stem] = f[..f.len().min(3)] else {
             return Err(format!("bad marketplace row {line:?}"));
         };
+        // Column 5, the confirmed series, is optional and overrides the
+        // parser's split. Only rows the maintainer has ruled on carry it.
+        let series = f.get(4).map(|s| s.trim()).filter(|s| !s.is_empty());
         by_market
             .entry(market.to_string())
             .or_default()
-            .push(build_row(title, stem, market)?);
+            .push(build_row(title, stem, market, series)?);
     }
     Ok(by_market)
 }
@@ -41,6 +44,35 @@ mod tests {
     fn a_short_marketplace_line_is_an_error_not_a_panic() {
         let text = "marketplace\ttitle\tstem\tformats\nFanatical\tOnly a title\n";
         assert!(marketplace_rows(text).is_err());
+    }
+
+    /// `DIE: Loaded` and `Glarien: Origins` are their own series, which the
+    /// parser cannot know: the same colon is a subtitle boundary in
+    /// `Harbinger, Vol. 2: Renegades`. The fifth column is the maintainer's
+    /// ruling, and without it the parser files both as arcs within `DIE` and
+    /// `Glarien`.
+    #[test]
+    fn a_confirmed_series_overrides_the_parsers_colon() {
+        let rows = marketplace_rows(MARKETPLACE).unwrap();
+        let sweet = &rows["Sweet Shop"];
+        let die = sweet.iter().find(|r| r.key == "dieloadedissue1").expect("the DIE row");
+        assert_eq!(die.series, "DIE: Loaded");
+        assert_eq!(die.subtitle.as_deref(), Some("#1"));
+        assert_eq!(die.volume, None, "#1 is an issue, not a volume");
+
+        let g = sweet.iter().find(|r| r.key == "glarienoriginsissue1").expect("the Glarien row");
+        assert_eq!(g.series, "Glarien: Origins");
+        assert_eq!(g.subtitle.as_deref(), Some("#1"));
+
+        // Left to the parser, the colon splits and both become arcs.
+        assert_eq!(build_row("DIE: Loaded #1", "d", "x", None).unwrap().series, "DIE");
+    }
+
+    /// A series that is not a prefix of its own title means one of the two is
+    /// wrong, and only a human knows which.
+    #[test]
+    fn a_confirmed_series_that_is_not_a_prefix_is_an_error() {
+        assert!(build_row("DIE: Loaded #1", "d", "x", Some("Glarien")).is_err());
     }
 
     #[test]
@@ -68,7 +100,10 @@ pub fn seed() -> Result<(), String> {
             rejected.entry("short line".into()).or_default().push(line.to_string());
             continue;
         };
-        let row = match build_row(title, stem, bundle) {
+        // No confirmed column here: the Humble table is the parser's guess by
+        // construction, and its 14.7% of known-bad splits are what the review
+        // in a `map` session is for.
+        let row = match build_row(title, stem, bundle, None) {
             Ok(row) => row,
             Err(e) => {
                 // The error names the title; group by what follows it.
@@ -113,14 +148,43 @@ pub fn seed() -> Result<(), String> {
     Ok(())
 }
 
-fn build_row(title: &str, stem: &str, bundle: &str) -> Result<MappingRow, String> {
+/// The confirmed series and whatever the title leaves after it. A strip, not a
+/// guess: the series is always a prefix of the verified title, so anything
+/// after it is the rest of that title and the separator between them is
+/// punctuation the preset would render anyway. Refuses rather than guesses if
+/// the series is not a prefix, because then one of the two is wrong and only a
+/// human knows which.
+fn confirmed_split(title: &str, series: &str) -> Result<(String, Option<String>), String> {
+    let rest = title
+        .strip_prefix(series)
+        .ok_or_else(|| format!("{series:?} is not how {title:?} starts"))?
+        .trim_start_matches([' ', ':', '-', ','])
+        .trim();
+    Ok((series.to_string(), (!rest.is_empty()).then(|| rest.to_string())))
+}
+
+fn build_row(
+    title: &str,
+    stem: &str,
+    bundle: &str,
+    confirmed: Option<&str>,
+) -> Result<MappingRow, String> {
     let key = key(stem).ok_or_else(|| format!("{stem:?} has no key"))?;
     let parsed = parse_title(&strip_promo(title));
+    // A confirmed series replaces the split whole, volume included: the
+    // parser's volume came from reading the title the other way.
+    let (series, subtitle, volume) = match confirmed {
+        Some(c) => {
+            let (s, sub) = confirmed_split(&strip_promo(title), c)?;
+            (s, sub, None)
+        }
+        None => (parsed.series, parsed.subtitle, parsed.volume),
+    };
     let row = MappingRow {
         key,
-        series: parsed.series,
-        volume: parsed.volume,
-        subtitle: parsed.subtitle,
+        series,
+        volume,
+        subtitle,
         lang: LANG.to_string(),
         volume_count: None,
         bundle: bundle.to_string(),

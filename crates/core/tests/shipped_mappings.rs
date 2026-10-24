@@ -13,8 +13,11 @@ const EXPECTED: [(&str, &str, &str, Option<u32>, Option<&str>); 12] = [
     ("Fanatical", "Moonshine Vol. 1", "Moonshine", Some(1), None),
     ("Global Comix", "hammer-head-1_release-0001_978-1-5458-3063-5", "Hammer Head", None, Some("#1")),
     ("Global Comix", "toxic-man_release-0001", "Toxic Man", None, None),
-    ("Sweet Shop", "die-loaded-issue-1", "DIE", None, Some("Loaded #1")),
-    ("Sweet Shop", "glarien-origins-issue-1", "Glarien", None, Some("Origins #1")),
+    // Its own series, not an arc within `DIE` (maintainer's ruling,
+    // 2026-10-24). The colon is part of the name, which is why the fixture
+    // carries a confirmed series and the parser is not asked to guess.
+    ("Sweet Shop", "die-loaded-issue-1", "DIE: Loaded", None, Some("#1")),
+    ("Sweet Shop", "glarien-origins-issue-1", "Glarien: Origins", None, Some("#1")),
     ("Sweet Shop", "minotaur-issue-1", "Minotaur", None, Some("#1")),
     ("Sweet Shop", "the-spawn-of-venus-and-other-stories-anthology", "The Spawn of Venus and Other Stories", None, None),
     ("Sweet Shop", "young-shadow-the-watchdogs-graphicnovel", "Young Shadow", None, Some("The Watchdogs")),
