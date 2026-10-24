@@ -572,22 +572,28 @@ fn a_destination_that_changes_during_the_stream_back_is_not_unlinked() {
         "the watcher never saw a .partial, so the stream-back never ran and this \
          test proved nothing"
     );
-    assert_ne!(
-        std::fs::symlink_metadata(&placed)
-            .map(|m| m.mtime())
-            .unwrap_or(placed_before),
-        placed_before,
-        "the mtime bump did not land, so the re-check had nothing to see"
-    );
+    // Outcome first, diagnosis after. The mtime check below is a statement
+    // about the *fixture* — whether the watcher's bump landed in the window —
+    // and if it runs first it answers a question nobody asked yet: delete the
+    // re-check and the destination is gone, so reading its mtime fails and
+    // any fallback reads as "the bump did not land". The real failure is a
+    // library file deleted, and it has to be the one the reader is told about.
     assert_eq!(report.restored, 0, "{report:?}");
+    assert!(placed.exists(), "a destination that changed under the restore was unlinked");
     assert!(
         report.refused.iter().any(|r| r.contains("changed while it was being restored")),
         "{report:?}"
     );
-    assert!(placed.exists(), "a destination that changed under the restore was unlinked");
     assert!(
         source.path().join("mazebook.pdf").exists(),
         "the stream-back's copy was discarded, so the file now exists nowhere it is named"
+    );
+    // `unwrap`, not a fallback: the assertion above established the file is
+    // there, so a failure here is a failure to stat it and should say so.
+    assert_ne!(
+        std::fs::symlink_metadata(&placed).unwrap().mtime(),
+        placed_before,
+        "the mtime bump did not land, so the re-check had nothing to see"
     );
     let _ = std::fs::remove_dir_all(&dest);
 }
