@@ -110,6 +110,15 @@ pub fn list(dir: &Path) -> io::Result<Vec<PathBuf>> {
 ///
 /// A record `summarise` cannot read is left alone: this cannot tell whose it
 /// is.
+///
+/// So is an **interrupted** record that still has rows to put back. A new run
+/// over the same pair does not make the old one accounted for, and the menu
+/// promises in so many words that `l` keeps it ("this stays here until you
+/// deal with it"): crash, re-scan the same bundle, re-apply, and the rows the
+/// crashed run had already placed would stop being reversible. The
+/// rows-to-put-back half is what keeps that from becoming unbounded growth —
+/// a run abandoned before it created anything has nothing to lose, so a
+/// bundle that fails on its first row does not leave one record per attempt.
 pub fn supersede(
     dir: &Path,
     keep: &Path,
@@ -125,6 +134,9 @@ pub fn supersede(
             continue;
         };
         if summary.source_root != source_root || summary.dest_root != dest_root {
+            continue;
+        }
+        if summary.interrupted && summary.reversible > 0 {
             continue;
         }
         if is_live(&path)? {

@@ -217,16 +217,31 @@ fn a_run_refused_at_the_pre_flight_keeps_the_previous_runs_record() {
     assert!(record.exists(), "the first run stopped being reversible");
 }
 
+/// And it says so. The count `supersede` returns was discarded, so a user who
+/// re-imported a bundle lost the earlier run's undo without a word — they
+/// would find out by running `undo` and being told there was nothing to do.
 #[test]
-fn a_second_real_run_supersedes_the_first() {
+fn a_second_real_run_supersedes_the_first_and_says_so() {
     let f = two_plans_one_root_pair();
     let lock = Lock::library(&f.records, &f.dest_root).unwrap();
     let a = apply(&lock, &f.header_a, &f.rows_a, &f.records, false, &mut |_| {}).unwrap();
-    let b = apply(&lock, &f.header_b, &f.rows_b, &f.records, false, &mut |_| {}).unwrap();
+    // `total: 0` is how core marks a message rather than a count.
+    let mut said: Vec<String> = Vec::new();
+    let b = apply(&lock, &f.header_b, &f.rows_b, &f.records, false, &mut |p| {
+        if p.total == 0 {
+            said.push(p.current.clone());
+        }
+    })
+    .unwrap();
     let (a, b) = (a.record.unwrap(), b.record.unwrap());
     assert_ne!(a, b, "two runs wrote one record");
     assert!(!a.exists(), "the superseded record survived");
     assert!(b.exists(), "the run's own record was swept");
+    assert!(
+        said.iter()
+            .any(|m| m == "1 earlier run(s) of this bundle can no longer be undone"),
+        "the sweep took a record in silence: {said:?}"
+    );
 }
 
 /// A record for another library is not this run's to delete, whatever order

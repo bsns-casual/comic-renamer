@@ -811,8 +811,15 @@ fn no_such_run(id: &str) -> String {
 /// enumerates. It is never joined onto the store: that would make any relative
 /// path a run id, and a path is what the record store exists to stop accepting.
 ///
-/// With no id, the newest record that no run holds and that can be read; one
-/// unreadable file must not make every other run unreversible.
+/// With no id, the newest record that no run holds, that can be read, and that
+/// has a row to put back — the most recent *reversible* run, as D56 words it,
+/// and the same gate the menu's offer uses. One unreadable file must not make
+/// every other run unreversible, and nor must a run whose first row failed:
+/// `reverse` skips its `failed` row in silence, so picking it deleted the stub
+/// and reported success while the run the user meant stayed where it was.
+///
+/// A named id is not gated. The user chose that run, and reversing an empty
+/// record is a no-op that tidies it away.
 fn pick_record(records: &Path, run: Option<&str>) -> Result<Option<PathBuf>, String> {
     // A store that was never created holds no runs.
     if !records.exists() {
@@ -825,9 +832,10 @@ fn pick_record(records: &Path, run: Option<&str>) -> Result<Option<PathBuf>, Str
             .find(|path| path.file_name().is_some_and(|n| n == id))
             .map(Some)
             .ok_or_else(|| no_such_run(id)),
-        None => Ok(found
-            .into_iter()
-            .find(|path| !record::is_live(path).unwrap_or(true) && undo::summarise(path).is_ok())),
+        None => Ok(found.into_iter().find(|path| {
+            !record::is_live(path).unwrap_or(true)
+                && undo::summarise(path).is_ok_and(|s| s.reversible > 0)
+        })),
     }
 }
 
@@ -1182,5 +1190,61 @@ mod tests {
         assert_eq!(size(4096), "4.0 KiB");
         assert_eq!(size(5 * (1 << 20)), "5.0 MiB");
         assert_eq!(size(31 * GIB + GIB / 5), "31.2 GiB");
+    }
+
+    /// One record in `store`, newer the later the `secs`. `done` is a run that
+    /// placed its row; otherwise the row is `failed`, which is what `apply`
+    /// writes when the very first row is refused — a record with nothing in
+    /// it to put back.
+    fn a_run(store: &Path, secs: u64, done: bool) -> PathBuf {
+        let source = store.join("bundle");
+        std::fs::create_dir_all(&source).unwrap();
+        let file = source.join("a.pdf");
+        std::fs::write(&file, b"x").unwrap();
+        let path = store.join(record::basename(
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs),
+        ));
+        let mut writer =
+            undo::UndoWriter::create(&path, &source, &store.join("library"), "komga", 1).unwrap();
+        let seq = writer
+            .record_pending(
+                Path::new("a.pdf"), Path::new("A/A - Vol. 01.pdf"), Mechanism::Rename, Mode::Move,
+                &file, "A", Some(1), None, 1, "pdf",
+            )
+            .unwrap();
+        if done {
+            writer.record_done(seq).unwrap();
+        } else {
+            writer.record_failed(seq).unwrap();
+        }
+        path
+    }
+
+    /// D56: `undo` reverses the most recent **reversible** run. The menu gates
+    /// its offer on a record with rows to put back and this did not, so a run
+    /// whose first row failed was picked ahead of the run the user meant:
+    /// `reverse` skips a `failed` row, nothing is refused, so the stub is
+    /// deleted and `undo` exits 0 reporting "0 restored" — while the record
+    /// that could put their library back sits unreached until they run `undo`
+    /// again.
+    #[test]
+    fn undo_picks_the_newest_reversible_run_not_the_newest_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("runs");
+        std::fs::create_dir_all(&store).unwrap();
+        let reversible = a_run(&store, 1_793_000_000, true);
+        let empty = a_run(&store, 1_793_000_100, false);
+        assert_eq!(
+            record::list(&store).unwrap().first(),
+            Some(&empty),
+            "the empty record must be the newer one for this to mean anything"
+        );
+
+        assert_eq!(pick_record(&store, None).unwrap(), Some(reversible));
+
+        // Named explicitly it is still reachable: the user chose that run, and
+        // reversing it is a no-op that tidies the stub away.
+        let id = empty.file_name().unwrap().to_str().unwrap().to_owned();
+        assert_eq!(pick_record(&store, Some(&id)).unwrap(), Some(empty));
     }
 }

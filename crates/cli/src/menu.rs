@@ -71,6 +71,29 @@ fn date(t: SystemTime) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
+/// The screen's two inputs, derived in one place so they cannot disagree: the
+/// records to offer, less this session's own run, and whether item 4 has a run
+/// behind it.
+///
+/// Item 4 owns this session's run. Offering the same record above it as well
+/// called this session's `apply` "an earlier run", and `k` on it deleted the
+/// record item 4 still pointed at — after which `4` reached a file that was
+/// gone. Taking the exclusion and the flag from one argument is what makes
+/// that second state unreachable rather than merely unlikely. Pure, so both
+/// halves are tested without a terminal.
+fn offers(
+    waiting: Vec<(PathBuf, Summary)>,
+    session_run: Option<&Path>,
+) -> (Vec<(PathBuf, Summary)>, bool) {
+    (
+        waiting
+            .into_iter()
+            .filter(|(path, _)| Some(path.as_path()) != session_run)
+            .collect(),
+        session_run.is_some(),
+    )
+}
+
 fn first_interrupted(waiting: &[(PathBuf, Summary)]) -> Option<&(PathBuf, Summary)> {
     waiting.iter().find(|(_, s)| s.interrupted)
 }
@@ -216,8 +239,9 @@ pub fn run(records: &Path) -> Result<(), String> {
     // The record `apply` made from this menu, if it did. Item 4 exists for it.
     let mut session: Option<PathBuf> = None;
     loop {
-        let waiting = waiting(records).map_err(|e| e.to_string())?;
-        print!("\n{}", render(&waiting, session.is_some()));
+        let (waiting, mine) =
+            offers(waiting(records).map_err(|e| e.to_string())?, session.as_deref());
+        print!("\n{}", render(&waiting, mine));
         let choice = ask("choose", None)?;
         let Some(typed) = choice.chars().next() else { continue };
         let Some(key) = dispatch(typed, &waiting) else {
@@ -307,8 +331,11 @@ mod tests {
     }
 
     fn completed(placed: u32) -> Summary {
-        // One row more than was placed: a clean run can still have skipped a file.
-        summary(placed + 1, placed, false, DAY - 86_400)
+        // `planned` counts the rows `apply` was about to attempt, not the
+        // plan's rows, so a clean run's placed count reaches it exactly. A
+        // fixture where it did not would be an *interrupted* record wearing
+        // the wrong label — which is the whole of finding 1.
+        summary(placed, placed, false, DAY - 86_400)
     }
 
     #[test]
@@ -518,5 +545,41 @@ mod tests {
     fn a_store_that_was_never_created_holds_nothing() {
         let dir = tempfile::tempdir().unwrap();
         assert!(waiting(&dir.path().join("runs")).unwrap().is_empty());
+    }
+
+    /// Item 4 owns this session's run, and the offers above it must not claim
+    /// it too. The same record in both places called this session's own
+    /// `apply` "an earlier run", and let `k` delete the record `4` still
+    /// pointed at — after which `4` reached a file that was gone.
+    #[test]
+    fn this_sessions_run_is_not_also_offered_as_an_earlier_one() {
+        let mine = p("session");
+        let w = vec![(mine.clone(), completed(2)), (p("older"), completed(3))];
+
+        let (shown, item_four) = offers(w.clone(), Some(&mine));
+        assert_eq!(
+            shown.iter().map(|(path, _)| path.clone()).collect::<Vec<_>>(),
+            vec![p("older")]
+        );
+        // The record was taken out of the offers, so item 4 has to be in: the
+        // two come from one argument precisely so this cannot be false here.
+        assert!(item_four);
+        // So no key can reach it: `u` and `k` land on the other record.
+        assert!(matches!(dispatch('u', &shown), Some(Key::Reverse(x)) if x == p("older")));
+        assert!(matches!(dispatch('k', &shown), Some(Key::Decline(x)) if x == p("older")));
+
+        // With nothing else waiting the offer disappears rather than naming it,
+        // and `4` is the only way to reach the run.
+        let (alone, item_four) = offers(vec![(mine.clone(), completed(2))], Some(&mine));
+        assert!(alone.is_empty());
+        let screen = render(&alone, item_four);
+        assert!(!screen.contains("An earlier run"), "{screen}");
+        assert!(screen.contains("  4  "), "{screen}");
+        assert_eq!(dispatch('k', &alone), None);
+
+        // And with no session run, every record is offered and item 4 is not.
+        let (all, item_four) = offers(w, None);
+        assert_eq!(all.len(), 2);
+        assert!(!item_four);
     }
 }

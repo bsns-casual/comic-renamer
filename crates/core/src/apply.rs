@@ -212,13 +212,23 @@ fn apply_inner(
     // something other than check-then-act on exactly that file.
     let written = match &record {
         Some(open) => {
-            crate::record::supersede(
+            let swept = crate::record::supersede(
                 records,
                 &open.path,
                 &header.source_root,
                 &header.dest_root,
             )
             .map_err(|e| ApplyError::Records(format!("{}: {e}", records.display())))?;
+            // Said, not discarded. A re-import takes the earlier run's only
+            // way back, and the user would otherwise learn that by running
+            // `undo` and being told there was nothing to do.
+            if swept > 0 {
+                progress(Progress {
+                    done: 0,
+                    total: 0,
+                    current: format!("{swept} earlier run(s) of this bundle can no longer be undone"),
+                });
+            }
             Some(open.path.clone())
         }
         None => None,

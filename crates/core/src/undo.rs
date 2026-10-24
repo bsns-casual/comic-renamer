@@ -36,7 +36,10 @@ pub struct Summary {
     /// a rename, which records `done` and never `placed`, so counting only
     /// `placed` would read 0 for every run in the default mode.
     pub reversible: u32,
-    /// Some row reached neither `placed`, `done` nor `failed`.
+    /// This record does not account for everything its run planned, so the
+    /// library it names may be inconsistent right now. `done` is the only
+    /// status that says a row finished, and `planned` is how many rows the run
+    /// was about to attempt — see `summarise` for which states reach this.
     pub interrupted: bool,
     pub started: std::time::SystemTime,
 }
@@ -279,7 +282,30 @@ pub fn summarise(manifest: &Path) -> Result<Summary, UndoError> {
         .iter()
         .filter(|r| matches!(r.status, Status::Placed | Status::Done))
         .count() as u32;
-    let interrupted = m.rows.iter().any(|r| r.status == Status::Pending);
+    // `interrupted` means "this record does not account for everything it
+    // planned", which is not the same as "some row is `pending`". `apply`
+    // abandons the run on the first row that fails, and that row is written
+    // `failed`, or left at `placed` when its destination landed and the unlink
+    // failed — **neither leaves a `pending` row**. Reading only `pending`
+    // therefore called an aborted run a completed one, and the menu offered to
+    // forget the only record of a half-migrated library.
+    //
+    // Two signals, each reaching a state the other cannot see:
+    //
+    // - A row that is not `done` is a row that did not finish: `pending` (the
+    //   process died mid-operation), `failed` (refused at the syscall), or
+    //   `placed` with no `done` (the copy landed, the unlink did not). The
+    //   last of those is why the count alone is not enough — it can be the
+    //   final planned row, and then `reversible == planned`.
+    // - Fewer finished rows than `planned`: a crash during a `record_pending`
+    //   write loses that row's line entirely, so no row is left to be
+    //   not-`done`. This is also the only signal that survives a torn record,
+    //   whose unreadable lines `Summary` does not carry.
+    //
+    // The first is independent of `planned`, which a hand-edited or
+    // short roots row can leave at 0.
+    let done = m.rows.iter().filter(|r| r.status == Status::Done).count() as u32;
+    let interrupted = done < m.planned || m.rows.iter().any(|r| r.status != Status::Done);
     Ok(Summary {
         source_root: m.source_root,
         dest_root: m.dest_root,

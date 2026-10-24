@@ -1,4 +1,5 @@
 use comic_renamer_core::record::{basename, hold, is_live, list, lock_name, supersede};
+use comic_renamer_core::types::{Mechanism, Mode};
 use comic_renamer_core::undo::UndoWriter;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -102,9 +103,53 @@ fn at(secs: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(secs)
 }
 
+/// A **finished** run's record: planned one row, and that row is done.
+///
+/// The row matters. A header-only record is a shape nothing writes — creation
+/// is lazy, so a record always planned at least the row that made it — and
+/// since `summarise` learned to read an abandoned run it would also be an
+/// *interrupted* record, which `supersede` now keeps. Without the row these
+/// fixtures would be swept for having nothing to lose rather than for being
+/// finished, and the retention tests below would stop meaning what they say.
 fn write_record(dir: &Path, secs: u64, source_root: &Path, dest_root: &Path) -> PathBuf {
+    write_run(dir, secs, source_root, dest_root, 1, true)
+}
+
+/// A run that placed one row of two and then died: interrupted, and with a row
+/// still to put back. This is the record the menu's `l` promises to keep.
+fn write_interrupted(dir: &Path, secs: u64, source_root: &Path, dest_root: &Path) -> PathBuf {
+    write_run(dir, secs, source_root, dest_root, 2, true)
+}
+
+/// A run abandoned at its only row, before anything was created: interrupted,
+/// and with nothing to put back.
+fn write_failed(dir: &Path, secs: u64, source_root: &Path, dest_root: &Path) -> PathBuf {
+    write_run(dir, secs, source_root, dest_root, 1, false)
+}
+
+fn write_run(
+    dir: &Path,
+    secs: u64,
+    source_root: &Path,
+    dest_root: &Path,
+    planned: u32,
+    done: bool,
+) -> PathBuf {
     let path = dir.join(basename(at(secs)));
-    UndoWriter::create(&path, source_root, dest_root, "komga", 1).unwrap();
+    let file = source_root.join("a.pdf");
+    std::fs::write(&file, b"x").unwrap();
+    let mut writer = UndoWriter::create(&path, source_root, dest_root, "komga", planned).unwrap();
+    let seq = writer
+        .record_pending(
+            Path::new("a.pdf"), Path::new("A/A - Vol. 01.pdf"), Mechanism::Rename, Mode::Move,
+            &file, "A", Some(1), None, 1, "pdf",
+        )
+        .unwrap();
+    if done {
+        writer.record_done(seq).unwrap();
+    } else {
+        writer.record_failed(seq).unwrap();
+    }
     path
 }
 
@@ -156,6 +201,35 @@ fn supersede_keeps_a_different_root_pairs_record() {
     let c = write_record(&f.dir, 1_793_000_300, &f.source_root, &other_dest);
     assert_eq!(supersede(&f.dir, &c, &f.source_root, &other_dest).unwrap(), 0);
     assert!(f.older.exists() && f.newer.exists());
+}
+
+/// The menu says of an interrupted run, in these words, "l leave it for now;
+/// this stays here until you deal with it". The ordinary recovery sequence —
+/// crash, re-scan the same bundle, re-apply into the same library — went
+/// straight through that promise: `supersede` saw only the root pair, deleted
+/// the crashed run's record, and the rows it had already placed stopped being
+/// reversible.
+#[test]
+fn supersede_keeps_an_interrupted_record_with_rows_still_to_put_back() {
+    let f = two_records_for_one_root_pair();
+    let crashed = write_interrupted(&f.dir, 1_793_000_050, &f.source_root, &f.dest_root);
+
+    assert_eq!(supersede(&f.dir, &f.newer, &f.source_root, &f.dest_root).unwrap(), 1);
+    assert!(crashed.exists(), "the only way back from a half-migrated library");
+    assert!(!f.older.exists(), "and a finished run for the same pair is still superseded");
+}
+
+/// The other half of the same gate, and why it is not just "interrupted".
+/// A run abandoned before it created anything has nothing to put back, so
+/// keeping its record would only let a bundle that fails on its first row
+/// accumulate one record per attempt — which is the unbounded growth D57
+/// exists to stop.
+#[test]
+fn supersede_still_sweeps_an_interrupted_record_with_nothing_to_put_back() {
+    let f = two_records_for_one_root_pair();
+    let empty = write_failed(&f.dir, 1_793_000_050, &f.source_root, &f.dest_root);
+    assert_eq!(supersede(&f.dir, &f.newer, &f.source_root, &f.dest_root).unwrap(), 2);
+    assert!(!empty.exists() && !f.older.exists());
 }
 
 /// A record `summarise` refuses cannot be attributed to a root pair, so it is

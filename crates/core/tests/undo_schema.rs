@@ -253,3 +253,83 @@ fn a_deleted_bundle_folder_is_not_rebuilt_when_the_library_is_gone_too() {
     assert!(!report.refused.is_empty());
     assert!(!dir.path().join("source").exists());
 }
+
+/// One record per `statuses`, written through `UndoWriter` exactly as `apply`
+/// writes them, with `planned` set the way `apply` sets it: the number of rows
+/// the run was about to attempt.
+fn run_of(planned: u32, statuses: &[&str]) -> (TempDir, PathBuf) {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    let file = source.join("Hellboy_v01.pdf");
+    std::fs::write(&file, b"bytes").unwrap();
+    let record = dir.path().join("run.record");
+    let mut w =
+        UndoWriter::create(&record, &source, &dir.path().join("library"), "komga", planned).unwrap();
+    for status in statuses {
+        let seq = w
+            .record_pending(
+                Path::new("Hellboy_v01.pdf"), &dest_for(), Mechanism::Stream, Mode::Move, &file,
+                "Hellboy", Some(1), None, 3, "pdf",
+            )
+            .unwrap();
+        match *status {
+            "done" => w.record_done(seq).unwrap(),
+            "failed" => w.record_failed(seq).unwrap(),
+            "placed" => w.record_placed(seq, (5, 42, 1)).unwrap(),
+            "pending" => {}
+            other => panic!("no such status {other:?}"),
+        }
+    }
+    (dir, record)
+}
+
+/// `apply` abandons the run on the first row that fails, and a row that failed
+/// before creating anything is written `failed` — so an aborted run leaves no
+/// `pending` row at all. Reading only `pending` called this a *completed* run,
+/// and the menu then offered `k`: forget the only record of a half-migrated
+/// library.
+#[test]
+fn a_run_abandoned_at_a_failed_row_is_interrupted() {
+    let (_dir, record) = run_of(3, &["done", "failed"]);
+    let s = summarise(&record).unwrap();
+    assert_eq!((s.reversible, s.planned), (1, 3));
+    assert!(s.interrupted, "an abandoned run is not a completed one");
+}
+
+/// The half the counts cannot see. The last planned row's destination landed
+/// and its unlink failed, so `apply` leaves the row at `placed` on purpose —
+/// `reversible` reaches `planned` while the run still aborted and a duplicate
+/// sits in the library.
+#[test]
+fn a_placed_row_that_never_finished_is_interrupted_even_at_the_full_count() {
+    let (_dir, record) = run_of(1, &["placed"]);
+    let s = summarise(&record).unwrap();
+    assert_eq!((s.reversible, s.planned), (1, 1), "the counts alone cannot tell");
+    assert!(s.interrupted);
+}
+
+/// The half the rows cannot see. A crash during a `record_pending` write loses
+/// that row's line, so every row the record still holds is `done` and only the
+/// planned count knows one is missing.
+#[test]
+fn a_record_holding_fewer_rows_than_it_planned_is_interrupted() {
+    let (_dir, record) = run_of(2, &["done"]);
+    let s = summarise(&record).unwrap();
+    assert_eq!((s.reversible, s.planned), (1, 2));
+    assert!(s.interrupted);
+}
+
+/// And the half `planned` cannot be trusted for. A roots row with no count
+/// parses as `planned: 0`, which no record this build writes can be — creation
+/// is lazy, so a record always planned at least the row that made it — but a
+/// record is a file a human can edit, which is what invariant 1 exists for.
+/// With `planned` understated, the rows are the only evidence left, and
+/// `failed` is evidence as much as `pending` is.
+#[test]
+fn a_record_that_understates_what_it_planned_is_still_read_from_its_rows() {
+    let (_dir, record) = run_of(0, &["done", "failed"]);
+    let s = summarise(&record).unwrap();
+    assert_eq!((s.reversible, s.planned), (1, 0), "the count vouches for nothing here");
+    assert!(s.interrupted);
+}
