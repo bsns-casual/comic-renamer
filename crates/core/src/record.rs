@@ -19,19 +19,27 @@ pub fn basename(now: SystemTime) -> String {
 }
 
 /// The lock filename for a library: a hash of its canonical root, so a root
-/// that is a long or odd path is still one filename, and `Hellboy/` and
-/// `hellboy/` (invariant 7) share a lock. Canonicalisation failure is an
-/// error, never a fallback that could give one library two locks.
+/// that is a long or odd path is still one filename. Canonicalisation failure
+/// is an error, never a fallback that could give one library two locks.
 pub fn lock_name(dest_root: &Path) -> Result<String, io::Error> {
+    // Canonicalisation is the whole normalisation: macOS returns the on-disk
+    // form, so every spelling of one directory (case, NFC/NFD, symlinks)
+    // collapses to one string. Case is deliberately not folded: on a
+    // case-sensitive volume `Hellboy` and `hellboy` are two real libraries.
     let canonical = dest_root.canonicalize()?;
-    let key = crate::normalize::collision_key(&canonical.to_string_lossy());
-    Ok(format!("{}.lock", crate::corpus::sha256_hex(key.as_bytes())))
+    Ok(format!(
+        "{}.lock",
+        crate::corpus::sha256_hex(canonical.to_string_lossy().as_bytes())
+    ))
 }
 
 /// Whether some process still holds `path`'s write lock. Opens read-only, so
 /// a read-only record answers "not live" instead of failing; only a genuine
 /// `EWOULDBLOCK` means live.
 pub fn is_live(path: &Path) -> io::Result<bool> {
+    // When not held, this briefly takes the lock itself, so a `hold` starting
+    // at that instant gets `WouldBlock`: a narrow window, and the failure is a
+    // refused run, not data loss.
     let file = File::open(path)?;
     Ok(!crate::fsops::flock_nb(&file)?)
 }

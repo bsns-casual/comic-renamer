@@ -22,18 +22,20 @@ fn a_lock_name_is_one_filename_whatever_the_root_looks_like() {
     }
 }
 
-/// Invariant 7 reaches the lock. Both paths must exist, or the test passes
-/// through `lock_name`'s error arm and proves nothing.
+/// Two different strings for one directory give one name; two directories give
+/// two. A symlink is the way to get a second spelling on any filesystem.
 #[test]
-fn one_library_is_one_lock_whatever_its_case_or_composition() {
+fn a_lock_name_is_a_pure_function_of_the_canonical_path() {
     let dir = tempfile::tempdir().unwrap();
-    let nfc = dir.path().join("Caf\u{e9}");
-    std::fs::create_dir(&nfc).unwrap();
-    let nfd = dir.path().join("Cafe\u{301}"); // same directory on APFS
-    assert_eq!(lock_name(&nfc).unwrap(), lock_name(&nfd).unwrap());
+    let real = dir.path().join("Comics");
+    std::fs::create_dir(&real).unwrap();
+    let link = dir.path().join("alias");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    assert_ne!(real.to_string_lossy(), link.to_string_lossy());
+    assert_eq!(lock_name(&real).unwrap(), lock_name(&link).unwrap());
     let other = dir.path().join("Hellboy");
     std::fs::create_dir(&other).unwrap();
-    assert_ne!(lock_name(&nfc).unwrap(), lock_name(&other).unwrap());
+    assert_ne!(lock_name(&real).unwrap(), lock_name(&other).unwrap());
 }
 
 #[test]
