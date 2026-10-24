@@ -100,9 +100,11 @@ One file per run under `config_dir()?.join("runs")`, created on first use
 `XDG_CONFIG_HOME`, refuses a relative or empty `HOME`, and is Application
 Support rather than Caches so the system does not reclaim it (D42).
 
-Names follow `temp_basename`'s pid-plus-counter *shape* rather than calling it:
-a dotfile with a wall-clock stamp, so the menu can say when the run happened and
-a partial file is not mistaken for a comic. Uniqueness matters because the lock
+Names follow `temp_basename`'s pid-plus-counter *shape* rather than calling it,
+plus a wall-clock stamp so the menu can say when the run happened. The builder
+check suggested a `.partial` suffix as well; that reason does not survive the
+move, because the records directory is under `config_dir()` and is never a
+folder `scan` walks, so nothing here can be mistaken for a comic. Uniqueness matters because the lock
 is per-library and two terminals can legitimately apply two different plans into
 two different libraries at once.
 
@@ -203,10 +205,17 @@ the confirmation, execute from the same copy.
 
 **The first draft called this "the natural shape rather than a change", which
 understated it.** `check` and `apply` each take `&Path` and acquire the lock
-internally; the builder check counted 39 call sites. Moving to "caller reads and
-holds, callee takes the held plan" is a core API change across `apply.rs`,
-`main.rs` and the test suite, and the plan for this work must budget for it
-rather than treating it as a side effect.
+internally, so moving to "caller reads and holds, callee takes the held plan"
+changes a public signature, not a call.
+
+The builder check put this at 39 call sites. **Counted, it is 7, across 3
+files:** `apply`, `check`, `undo` and `undo_path` are called at
+`apply_refusals.rs:339,342,348` and `main.rs:370,420,430,751`, and the
+`undo.rs:205` hit is a doc comment. The check's substance stands — it is a core
+API change and the first draft's §7 listed only `undo.rs`'s tests — but the
+scope is small enough to do in one pass rather than something a plan has to
+budget around. The CLI's own integration tests drive the binary and are
+unaffected.
 
 Holding the lock across the prompt is still worth doing — it stops a second
 `apply` interleaving — but it does *not* close the finding on its own, because
