@@ -25,6 +25,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub enum Key {
     Reverse(PathBuf),
     Decline(PathBuf),
+    /// `l`: leave the interrupted run for now. Nothing is deleted.
+    Leave,
     Map,
     Scan,
     Apply,
@@ -111,13 +113,15 @@ pub fn render(waiting: &[(PathBuf, Summary)], session_run: bool) -> String {
     out
 }
 
-/// A keystroke to an intent. `l` on an interrupted offer returns `None` on
-/// purpose: leaving a half-migrated library declines nothing, so its record
-/// stays. Declining a *completed* run (`k`) is a decision to forget it.
+/// A keystroke to an intent. `l` is `Leave`, which does nothing on purpose:
+/// leaving a half-migrated library declines nothing, so its record stays.
+/// Declining a *completed* run (`k`) is a decision to forget it. Neither ends
+/// the session; only `q` does.
 pub fn dispatch(key: char, waiting: &[(PathBuf, Summary)]) -> Option<Key> {
     match key.to_ascii_lowercase() {
         'r' => first_interrupted(waiting).map(|(p, _)| Key::Reverse(p.clone())),
         'u' => first_completed(waiting).map(|(p, _)| Key::Reverse(p.clone())),
+        'l' => first_interrupted(waiting).map(|_| Key::Leave),
         'k' => first_completed(waiting).map(|(p, _)| Key::Decline(p.clone())),
         '1' => Some(Key::Map),
         '2' => Some(Key::Scan),
@@ -147,18 +151,18 @@ pub fn decline(declined: &[PathBuf], session_run: Option<&Path>) -> std::io::Res
     Ok(gone)
 }
 
-/// What leaving the menu on `key` deletes: the record declined with `k`, if
-/// that was the key, plus this session's own run. `None` for a key that does
-/// not leave. Pure, so what each exit reaches `decline` with is testable.
-fn exit_deletes<'a>(key: &Key, session_run: Option<&'a Path>) -> Option<(Vec<PathBuf>, Option<&'a Path>)> {
+/// What a key deletes: `k` the record it declined, `q` this session's own run,
+/// nothing else. The session's run is not touched by `k`, which does not end
+/// the session. Pure, so what each key reaches `decline` with is testable.
+fn deletes<'a>(key: &Key, session_run: Option<&'a Path>) -> (Vec<PathBuf>, Option<&'a Path>) {
     match key {
-        Key::Quit => Some((Vec::new(), session_run)),
-        Key::Decline(record) => Some((vec![record.clone()], session_run)),
-        _ => None,
+        Key::Quit => (Vec::new(), session_run),
+        Key::Decline(record) => (vec![record.clone()], None),
+        _ => (Vec::new(), None),
     }
 }
 
-/// The quit path, shared by `q` and `k`. Says so when it deletes anything.
+/// Runs `decline` for a key. Says so when it deletes anything.
 fn leave(declined: &[PathBuf], session_run: Option<&Path>) -> Result<(), String> {
     let gone = decline(declined, session_run).map_err(|e| e.to_string())?;
     if gone > 0 {
@@ -216,19 +220,20 @@ pub fn run(records: &Path) -> Result<(), String> {
         print!("\n{}", render(&waiting, session.is_some()));
         let choice = ask("choose", None)?;
         let Some(typed) = choice.chars().next() else { continue };
-        // Leaving declines nothing: the interrupted record stays.
-        if typed.eq_ignore_ascii_case(&'l') {
-            return Ok(());
-        }
         let Some(key) = dispatch(typed, &waiting) else {
             println!("not an option here");
             continue;
         };
-        if let Some((declined, session_run)) = exit_deletes(&key, session.as_deref()) {
-            return leave(&declined, session_run);
-        }
+        let (declined, session_run) = deletes(&key, session.as_deref());
+        leave(&declined, session_run)?;
         let done = match key {
-            Key::Quit | Key::Decline(_) => unreachable!("handled by exit_deletes"),
+            Key::Quit => return Ok(()),
+            // Both redraw. `k` was deleted just above; `l` deletes nothing.
+            Key::Decline(_) => continue,
+            Key::Leave => {
+                println!("left as it is; it stays until you deal with it");
+                continue;
+            }
             Key::Reverse(record) => crate::reverse_path(records, &record),
             Key::ReverseSession => match session.take() {
                 Some(record) => crate::reverse_path(records, &record),
@@ -362,7 +367,8 @@ mod tests {
         assert!(matches!(dispatch('r', &w), Some(Key::Reverse(x)) if x == p("a")));
         assert!(matches!(dispatch('u', &w), Some(Key::Reverse(x)) if x == p("b")));
         assert!(matches!(dispatch('k', &w), Some(Key::Decline(x)) if x == p("b")));
-        assert!(dispatch('l', &w).is_none(),"leaving an interrupted run declines nothing");
+        assert_eq!(dispatch('l', &w), Some(Key::Leave));
+        assert_eq!(dispatch('l', &[(p("b"), completed(4))]), None);
     }
 
     #[test]
@@ -462,7 +468,7 @@ mod tests {
     fn an_interrupted_record_is_not_declined_by_quitting() {
         let (_d, a, b, _c) = three_records();
         let w = vec![(a.clone(), interrupted(1, 4)), (b.clone(), completed(4))];
-        assert_eq!(dispatch('l', &w), None);
+        assert_eq!(dispatch('l', &w), Some(Key::Leave));
         let declined: Vec<PathBuf> = match dispatch('k', &w) {
             Some(Key::Decline(p)) => vec![p],
             other => panic!("{other:?}"),
@@ -482,22 +488,21 @@ mod tests {
     #[test]
     fn q_deletes_only_this_sessions_run() {
         let run = p("run");
-        assert_eq!(exit_deletes(&Key::Quit, Some(&run)), Some((vec![], Some(run.as_path()))));
-        assert_eq!(exit_deletes(&Key::Quit, None), Some((vec![], None)));
+        assert_eq!(deletes(&Key::Quit, Some(&run)), (vec![], Some(run.as_path())));
+        assert_eq!(deletes(&Key::Quit, None), (vec![], None));
     }
 
     #[test]
-    fn k_deletes_the_declined_record_and_this_sessions_run_and_nothing_displayed() {
+    fn k_deletes_the_declined_record_and_leaves_this_sessions_run_alone() {
         let (b, run) = (p("b"), p("run"));
-        let got = exit_deletes(&Key::Decline(b.clone()), Some(&run));
-        assert_eq!(got, Some((vec![b], Some(run.as_path()))));
+        assert_eq!(deletes(&Key::Decline(b.clone()), Some(&run)), (vec![b], None));
     }
 
     #[test]
-    fn keys_that_do_not_leave_delete_nothing() {
+    fn keys_that_decline_nothing_delete_nothing_even_with_a_session_run() {
         let run = p("run");
-        for key in [Key::Map, Key::Scan, Key::Apply, Key::ReverseSession, Key::Reverse(p("a"))] {
-            assert_eq!(exit_deletes(&key, Some(&run)), None, "{key:?}");
+        for key in [Key::Leave, Key::Map, Key::Scan, Key::Apply, Key::ReverseSession, Key::Reverse(p("a"))] {
+            assert_eq!(deletes(&key, Some(&run)), (vec![], None), "{key:?}");
         }
     }
 
