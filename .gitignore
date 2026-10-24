@@ -14,3 +14,8 @@ corpus/cache/
 
 # superpowers execution scratch (ledger, briefs, review packages)
 .superpowers/
+
+# Harness-created worktrees live here. Not ignored until 2026-10-24, when a
+# `git status` on `main` during a worktree session listed the whole tree as
+# untracked -- one `git add -A` from committing a copy of the repo into itself.
+.claude/worktrees/

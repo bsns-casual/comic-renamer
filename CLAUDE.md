@@ -145,6 +145,10 @@ rebuilt around a recorded filename→title mapping.** The rebuild is
 Phase 1 plan's Task 14 (the gate) is superseded by it; its Task 15 (Homebrew) is
 not, and is still open.
 
+**The rebuild is merged.** 60 commits, fast-forwarded onto `main` and pushed on
+2026-10-24 at `1eb028a`, after five adversarial review seats, a 16-item fix wave
+and a mutation re-review of that wave. CI run 40061195019 is green.
+
 `scan`, `map`, `apply` and `undo` all run from the CLI. **`map` is the primary
 command for a bundle the tool has not seen**: it needs a terminal, shows each
 unmapped filename beside a guess, and writes a plan only from rows the user
@@ -209,8 +213,14 @@ macOS job, which downloads the pinned release, checks its sha256 **and**
 on a RAM disk, because a same-volume move is a rename and the streamed path, the
 `placed` state and abort-on-failure are otherwise unreachable. This is read
 from the workflow file. The four corpus tests were run locally against the pinned
-release at the end of the rebuild (green, 54 s). No run on GitHub was observed
-when this was written.
+release at the end of the rebuild (green, 54 s).
+
+**Observed on GitHub at last**, when the rebuild merged to `main` on 2026-10-24:
+run 40061195019, all six jobs green, including the first ever execution of
+`rust-corpus` ("corpus tests against the real release") and `mappings`
+("mapping caps (rows per PR, file size)"). Both had existed only on an unpushed
+branch until then. **The green `mappings` job in that run did not check the row
+count** — see the PR-only caveat above; it was a push to `main`.
 
 - `COMIC_RENAMER_TEST_ZIP=<gcd-*.zip>` — four tests against the real corpus
   release: install-and-open, coverage rates, and the publisher hint's effect
