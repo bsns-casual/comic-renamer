@@ -74,8 +74,22 @@ therefore describes the **menu**, not the subcommands. The first draft applied i
 uniformly and the builder check was right that this silently removed undo from
 an interactive `comic-renamer apply` where the user had typed `MOVE`.
 
+**D56 — `undo` stays a subcommand, keyed on a run rather than a plan.** D55
+keeps a subcommand's record, so there has to be a non-interactive way to reach
+it; `comic-renamer undo` reverses the most recent reversible run,
+`undo --list` names them, and `undo <run-id>` picks one. `--yes` applies as it
+does to `apply`.
+
+An argument is safe here *because* of D54. The first draft removed `undo`'s
+argument on the theory that accepting one was the danger. It was not — the
+danger was the record being the authority. Once the filesystem check decides
+whether a deletion is permitted, naming a record cannot authorise anything,
+which is the same reasoning that lets a test seam take a path. A run id is also
+not a path: it selects from records the tool wrote and enumerated.
+
 **Both surfaces stay**, as Mole has them: `comic-renamer` with no arguments opens
-a menu, and `scan`, `map`, `apply` remain subcommands with `--yes` for scripting.
+a menu, and `scan`, `map`, `apply` and `undo` remain subcommands with `--yes`
+for scripting.
 
 ### Proposed invariant 11
 
@@ -184,6 +198,20 @@ survive.
 | subcommand exits | kept (D55) |
 | process dies | survives, `flock` released by the kernel |
 | a later launch finds one | `flock`-tested, then offered if non-empty |
+| a new run supersedes it | the older record for the same root pair is deleted |
+
+**D57 — a kept record is retained as the most recent per
+`(source_root, dest_root)` pair.** Nothing in the first draft pruned a
+subcommand's record, so the directory grew without bound. Keying retention to the
+root pair means two different bundles into one library each keep their undo,
+because they touch disjoint files and reversing either is safe; re-running the
+same bundle into the same library supersedes its own previous record, which is
+the case where reversing the older one out of order would be a footgun. Records
+are a few tens of kilobytes, so one per bundle ever imported is not a storage
+concern.
+
+*This is the one policy in this round the owner may well want different* — a
+retention age, or a count, are both defensible alternatives.
 
 ### What verification costs, and when it is skipped
 
@@ -235,6 +263,9 @@ needs `Option<Command>`; the menu refuses without a TTY exactly as `map` does.
   A run was interrupted on 2026-10-24 (312 of 400 rows placed).
     r  reverse it      l  leave it
 
+  comic-renamer apply placed 400 files on 2026-10-23.
+    u  undo it         k  keep it
+
   1  map a new bundle        — pick a folder, approve each row
   2  scan a mapped folder    — plan without saving anything
   3  apply a plan
@@ -242,9 +273,17 @@ needs `Option<Command>`; the menu refuses without a TTY exactly as `map` does.
   q  quit
 ```
 
-- The interrupted-run offer appears only for a non-empty record no live process
-  holds, above everything else, because it is the one item about a library that
-  is currently half-migrated.
+- Two kinds of record can be waiting, and the menu must not describe them in the
+  same words. An **interrupted** run died mid-way and left a library
+  half-migrated; it comes first, because it is the only item about a library that
+  is currently inconsistent. A **completed** run from an earlier subcommand
+  invocation is intact and merely still reversible. The first draft had one
+  offer worded "a run was interrupted", which would have described a clean
+  `apply --yes` from yesterday as a crash.
+- Either offer appears only for a non-empty record no live process holds.
+- Declining a completed run's offer (`k`) is the decline D55 keys on, so that
+  record is deleted. Declining the interrupted one (`l`) is not: a
+  half-migrated library stays reversible until someone fixes it.
 - Item 4 appears only when this session has a run to reverse, and quitting
   deletes it with one line saying so rather than silently.
 - The record's path is never printed. Today's `apply` prints it; availability is
@@ -264,8 +303,9 @@ forgot about.
   its premise is void once the record is tool-written, but its lock consequence
   is live and is answered in §3, not dropped. "Unnecessary rather than wrong",
   as the first draft put it, was half right.
-- **`comic-renamer undo <plan>` goes away**, replaced by a menu item and a
-  launch-time offer. Pre-release, so no migration is owed.
+- **`comic-renamer undo <plan>` changes shape rather than going away** (D56):
+  the subcommand survives, keyed on a run instead of a plan path. Pre-release, so
+  no migration is owed.
 - **The roots cross-check** (`undo.rs:216-221`) becomes `x == x` once the record
   supplies both sides, so it and its test are deleted rather than inverted.
 - **CLAUDE.md** needs invariant 11, the `undo` entry under State, and a revisit
