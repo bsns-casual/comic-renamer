@@ -6,7 +6,7 @@ identifies each file, shows a reviewable plan, and changes nothing until the use
 approves it.
 
 **Read `docs/specs/2026-10-19-comic-renamer-design.md` before changing anything.**
-Its §13 decision log records every call and why; D1–D53. If you think a decision
+Its §13 decision log records every call and why; D1–D57. If you think a decision
 is wrong, read its entry first — most have survived an adversarial review and the
 reasoning is written down. Say what's wrong with the reasoning rather than
 re-deciding silently.
@@ -15,6 +15,12 @@ re-deciding silently.
 derives a title by resolving a filename against a corpus; it looks the filename up
 in a recorded mapping. That design supersedes parts of the first (its §2 lists
 which), and its decisions, D39–D53, are folded into the first document's §13.
+
+**Then read `docs/specs/2026-10-24-session-scoped-undo-and-startup-menu.md`.**
+The record of what a run did is now a file the tool writes into a directory it
+owns, `undo` is keyed on a run rather than a plan, and no record is the
+authority for a deletion. Its decisions, D54–D57, are folded into §13 and
+amend D38.
 
 ---
 
@@ -68,6 +74,11 @@ without changing the spec first.**
     "just drop `_hd`": deciding which parts of a filename are noise is inference,
     and a token that looks like noise in one marketplace is a title in another.
     (rebuild §5.3, D40)
+11. **A record never authorises its own deletion.** Reversing a copy removes a
+    library file; the record may say *which* file, never *that it is safe to
+    remove*. That is verified against the filesystem — the source it was copied
+    from must still be there, with the same content. A record is a map, not a
+    warrant. (session-scoped-undo §2, D54)
 
 Also load-bearing, though not numbered: **nothing is stored without a keystroke.**
 A guess is a typing aid. The mapping session writes only rows the user approved,
@@ -174,6 +185,39 @@ done   R1-R14  the rebuild: frozen key and TSV I/O, §6.11 validation, the
 todo   T15  Homebrew — see below
 ```
 
+### Session-scoped undo and the startup menu
+
+Done on branch `worktree-session-scoped-undo`, 9 tasks, planned in
+`docs/plans/2026-10-24-session-scoped-undo.md`. What it changed, each read from
+the code or run on 2026-10-24:
+
+- **The record is tool-written.** One file per run in
+  `<config_dir>/runs` (`~/Library/Application Support/comic-renamer/runs`, or
+  under `$XDG_CONFIG_HOME`), named `.comic-renamer.<unix-nanos>.<pid>.<seq>.record`
+  and created on the first row that executes. It carries what a preset needs to
+  rebuild each destination (series, volume, subtitle, run, extension), plus the
+  preset id and the planned row count, so `reverse` needs no plan. The library
+  lock is a file in the same directory named from a hash of the canonical
+  destination root; it stays after the run ends.
+- **`undo` is keyed on a run, not a plan** (D56). `comic-renamer undo` reverses
+  the most recent run that no process still holds, `undo --list` shows them, and
+  `undo <run-id>` picks one. Passing the plan path is a hard error (exit 1),
+  which a test pins. `undo` has **no `--yes`**: it has no prompt to skip, and
+  `clap` rejects the flag (exit 2).
+- **`apply` no longer prints the record's path.** It prints that `undo` puts
+  the run back. A printed path invites being handed back in.
+- **`comic-renamer` with no arguments opens a menu**, and refuses without a
+  terminal exactly as `map` does. Keys: `k` declines a completed run's record
+  and redraws, `l` leaves an interrupted run's record and redraws, and **`q`
+  is the only key that ends the session and the only one that declines this
+  session's run** (D55). An earlier cut let `l` and `k` exit, which gave `k` the
+  power to delete a session run and left `l` unable to.
+- **`Trust::InSession` was cut during planning.** The design promised a fast
+  reverse within the writing session. Verification is unconditional instead.
+  See the 2026-10-24 design's §3.
+- **Retention is one record per `(source_root, dest_root)` pair** (D57), and
+  that is the policy the owner may want different.
+
 ### What ships, and what does not
 
 **Shipped mapping coverage is 12 rows**, in `data/mappings/fanatical.tsv` (5),
@@ -202,14 +246,19 @@ agreed. The other 14.7% are known-bad decompositions, such as
 subtitle "Before the Fall Vol. 9" and no volume. Review them in a `map` session
 before any of this is committed.
 
-**Tests:** `cargo test --workspace` runs 409 and ignores 7 (counted 2026-10-23,
-after the rebuild's final review and its fix wave; 380 before them),
-with no compiler warnings. The seven `#[ignore]`d tests need real hardware or the
-real corpus release, and **CI runs all seven**. That claim was false until the
+**Tests:** `cargo test --workspace` runs 500 and ignores 9 (counted 2026-10-24
+by summing the `test result:` lines: 500 passed, 0 failed, 9 ignored; 409 and 7
+before session-scoped undo), with no compiler warnings. The nine `#[ignore]`d
+tests need real hardware or the real corpus release, and **CI runs all nine**:
+five are volume-gated (`COMIC_RENAMER_TEST_VOLUME`; four in `apply_exec.rs`,
+one in `cli.rs`) and four are corpus tests (`COMIC_RENAMER_TEST_ZIP`, in
+`corpus.rs`). The workflow sweeps `--ignored` over each of those three
+binaries wholesale (`verify.yml` lines 67, 71 and 115), so no workflow change is
+owed for the split. The seven-test claim was false until the
 rebuild's Task 13: the workflow ran the three volume-gated tests, and its own
 comment said the four corpus tests were not run. Task 13 added the `rust-corpus`
 macOS job, which downloads the pinned release, checks its sha256 **and**
-`sizeBytes`, and runs those four. The three volume tests run in the `rust` job
+`sizeBytes`, and runs those four. The five volume tests run in the `rust` job
 on a RAM disk, because a same-volume move is a rename and the streamed path, the
 `placed` state and abort-on-failure are otherwise unreachable. This is read
 from the workflow file. The four corpus tests were run locally against the pinned
@@ -225,7 +274,7 @@ count** — see the PR-only caveat above; it was a push to `main`.
 - `COMIC_RENAMER_TEST_ZIP=<gcd-*.zip>` — four tests against the real corpus
   release: install-and-open, coverage rates, and the publisher hint's effect
   on real titles. Run by the `rust-corpus` job.
-- `COMIC_RENAMER_TEST_VOLUME=<mount on another device>` — three tests that need
+- `COMIC_RENAMER_TEST_VOLUME=<mount on another device>` — five tests that need
   a genuine second volume. A 1.3 GiB HFS+ RAM disk works:
   `hdiutil attach -nomount ram://2726297` then
   `diskutil eraseVolume "HFS+" CRTEST <dev>`. **Under ~1.1 GiB every run is
@@ -239,12 +288,16 @@ formatted, and do not assume CI will catch a style or lint regression.
 - `rustfmt` is not installed in the maintainer's toolchain: `cargo fmt` fails
   with "'cargo-fmt' is not installed for the toolchain" (checked 2026-10-23), and
   the tree has never been through it.
-- `cargo clippy --workspace --all-targets` reports 10 warnings across three
-  crates (checked 2026-10-23, clippy on rustc 1.99.1): two `i64`→`i64` casts and
-  one `u64`→`u64` cast in `fsops.rs` and `apply.rs`; "items after a test module"
-  in `apply.rs` and `xtask/src/seed.rs`; three needless `clone` calls in
-  `crates/core/tests`; and a "very complex type" in each of
-  `crates/cli/src/map/mod.rs` and `crates/core/tests/shipped_mappings.rs`.
+- `cargo clippy --workspace --all-targets` reports 9 warnings across three
+  crates (checked 2026-10-24; it was 10 on 2026-10-23, and the difference is a
+  deleted test that held one of the three needless-`clone` warnings): two
+  `i64`→`i64` casts and one `u64`→`u64` cast in `fsops.rs` and `apply.rs`;
+  "items after a test module" in `apply.rs` and `xtask/src/seed.rs`; two
+  needless `clone` calls in `crates/core/tests/mapping.rs`; and a "very complex
+  type" in each of `crates/cli/src/map/mod.rs` and
+  `crates/core/tests/shipped_mappings.rs`. **Count the lint lines, not
+  `grep -c '^warning'`**: that reports 16, because seven of those lines are
+  `generated N warnings` summaries.
 - `cargo fmt` would reformat files under `crates/core/src/preset/`, which the
   rebuild's briefs forbade touching. Adding a format gate means reformatting the
   whole tree in the same change, or CI goes red on arrival.
@@ -367,9 +420,19 @@ prevent, one line below it. The guard's test looked for the literal string
 disclosure and asserts some command accepts it, and `scan` takes `--move` and
 `--copy` as §6.13 writes them.
 
-`undo` takes the **plan** path, per D38. The Phase 1 plan's Task 13 still
-writes `undo <undo-manifest.csv>`; D38 reversed that and the plan document was
-never updated.
+**The README's `undo comic-renamer-plan.jsonl` was the third instance of that
+defect class**, found 2026-10-24 when session-scoped undo made the binary reject
+a plan path, with a test passing that exact string and asserting a non-zero
+exit. The first two were `--copy` and the `--hardlink` guard. The third was
+found by running every command the README shows, not by editing the line that
+was known to be wrong; do that whenever a command's shape changes. The README's
+claim that `map` refuses without a terminal was also too broad: with every file
+already mapped it ran with stdout piped, and it refuses only when a file needs
+a name.
+
+Phase 1 history: `undo` took the **plan** path, per D38, and the Phase 1 plan's
+Task 13 still writes `undo <undo-manifest.csv>`. D56 has since reversed D38:
+`undo` takes a run id, and a plan path is rejected.
 
 ### The rebuild's final review, and what it found
 
@@ -398,22 +461,23 @@ not raise it to meet a measurement.
 `docs/research/2026-10-23-two-pre-existing-data-safety-findings.md`: `undo` can
 delete a library file no run ever placed and report success, and `apply`'s typed
 confirmation gates a plan it re-reads afterwards. `undo.rs` is untouched by the
-rebuild, so both are reachable on `main` today. The first was reproduced and
-executed. See "Pick up here".
+rebuild, so both were reachable on `main` at the time. The first was reproduced
+and executed. **Both are closed by session-scoped undo**, in the section of that
+name above.
 
 ### Pick up here
 
-**0. Two pre-existing data-safety findings.** Read
-`docs/research/2026-10-23-two-pre-existing-data-safety-findings.md`. The first
-is a data-loss path: a hand-written manifest beside a forged plan makes `undo`
-delete a library file no run placed, because both of `reverse_one`'s defences
-read from attacker-supplied data — the destination is recomputed from the plan,
-which invariant 2 already treats as untrusted, and the identity comes from the
-manifest, which arrives by naming convention in the same directory. Fixing it
-changes D38's manifest contract, which is why it waits for the owner rather
-than for a subagent. The second needs no adversary: a second terminal running
-`scan` substitutes a plan under a confirmation already given, because nothing
-holds the lock across the prompt.
+**0. Two data-safety findings, closed on a branch that has not merged.**
+`docs/research/2026-10-23-two-pre-existing-data-safety-findings.md` describes
+both. The first was a data-loss path: a hand-written manifest beside a forged
+plan made `undo` delete a library file no run placed. The second needed no
+adversary: a second terminal running `scan` substituted a plan under a
+confirmation already given. Session-scoped undo addresses them with invariant 11
+(D54) and by reading the plan once and executing from that copy. Both were
+tested on the branch, but **no run on GitHub has been observed for it**. The
+design's §7 left one question open that was deliberately not planned: sweeping
+records written by an install that predates the sweep. No release has shipped,
+so none exists.
 
 Then, two things that gate a release but block no development.
 
@@ -529,7 +593,7 @@ visible instead of becoming folklore.
 
 ### Where ponytail does not apply
 
-**The nine invariants above are not subject to minimisation, and neither is the
+**The eleven invariants above are not subject to minimisation, and neither is the
 test discipline around them.** This is the one place where the simplest change
 that passes the tests is the wrong change, and the failure is not hypothetical —
 a safety review of this project's own implementation plan found exactly it.

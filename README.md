@@ -6,7 +6,7 @@ Point it at a folder, pick your app, and it identifies each file and shows you
 every proposed rename. Nothing moves until you approve the plan. Files it cannot
 identify are flagged for review rather than guessed at.
 
-**Status: `map`, `scan`, `apply` and `undo` work. Komga is the only preset, and
+**Status: `map`, `scan`, `apply`, `undo` and a startup menu work. Komga is the only preset, and
 there is no Homebrew formula yet** — install from source, which is three
 commands. See [`docs/specs/`](docs/specs/) for the design and
 [`docs/research/`](docs/research/) for the measurements behind it.
@@ -75,8 +75,15 @@ $EDITOR comic-renamer-plan.jsonl
 # Move the files. Discloses the cost, then asks you to type MOVE.
 comic-renamer apply comic-renamer-plan.jsonl
 
-# Changed your mind.
-comic-renamer undo comic-renamer-plan.jsonl
+# Changed your mind. Reverses the most recent run.
+comic-renamer undo
+
+# Or see the runs that can be reversed, and pick one by the name shown.
+comic-renamer undo --list
+comic-renamer undo <run>
+
+# With no arguments, open a menu that offers all of the above.
+comic-renamer
 ```
 
 `map` is the command for a bundle the tool has not seen. It looks every
@@ -85,8 +92,8 @@ shows the filename, a guess, and a field for the name you approve. Nothing is
 saved until you approve it. Approved names persist in
 `~/Library/Application Support/comic-renamer` (or `$XDG_CONFIG_HOME/comic-renamer`).
 At the end it writes a plan and hands it to `apply`, and offers to prepare a
-contribution of your approved mappings (see below). It refuses to run when
-stdout is not a terminal.
+contribution of your approved mappings (see below). When any file needs a name
+from you, it refuses to run unless stdout is a terminal.
 
 `scan` is the non-interactive path. It plans the files the table knows, lists
 the ones it does not along with a guess for each, and saves nothing. A file with
@@ -125,6 +132,19 @@ assistant or attach to a pull request.
 | `--komga-url <url>` | `apply` | Refuses unless your Komga can survive a rename. Token from `COMIC_RENAMER_KOMGA_TOKEN`. |
 | `--yes` | `apply` | Skips the typed confirmation. The disclosure still prints. |
 | `--allow-cloud-move` | `apply` | Permits a move out of a cloud-sync folder, where it is a server-side delete. |
+
+`undo` takes a run, not a plan. Passing it a plan path is an error. A run is
+recorded as it goes, in a directory the tool keeps for itself, and `undo` reads
+only that directory. When a run copied files in, `undo`
+removes a library file only if the file it was copied from is still where it
+was, with the same content. If you deleted the bundle folder after a copy,
+`undo` refuses and says so, because the library file would be the last copy.
+It takes no `--yes`; it has nothing to confirm.
+
+`comic-renamer` with no arguments opens a menu and needs a terminal. If an
+earlier run was interrupted, or a finished one is still reversible, the menu
+offers to reverse it first. Press `q` to quit. Quitting declines the undo of a
+run you started in that session, and it is deleted.
 
 **Moving is the default, and it is destructive by design** — a same-volume move
 is a `rename`, which costs nothing and cannot truncate a multi-gigabyte PDF

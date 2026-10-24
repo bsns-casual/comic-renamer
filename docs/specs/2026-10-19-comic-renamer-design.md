@@ -11,6 +11,12 @@
 > silent-false-positive gate is dissolved (D50). Its §2 lists exactly what
 > changed. Its decisions, D39–D53, are folded into §13 below.
 
+> **Amended 2026-10-24.** `2026-10-24-session-scoped-undo-and-startup-menu.md`
+> moves the record of a run into a directory the tool owns, keys `undo` on a run
+> instead of a plan, and takes away the record's authority to authorise a
+> deletion. It supersedes D38 and the undo paragraphs of §6.10 and §6.13, which
+> are annotated below. Its decisions, D54–D57, are folded into §13.
+
 Supersedes `2026-10-19-comic-renamer-design-v1-superseded.md`, whose resolver
 architecture was wrong. Why, and the evidence that replaced it:
 `docs/research/2026-10-19-adversarial-review-findings.md` and
@@ -631,6 +637,12 @@ from, which is the one state no recovery can reason about.
 `comic-renamer undo <manifest>` reverses it in reverse order. The manifest is
 also an audit trail a user can read in any editor without the tool.
 
+> **Amended 2026-10-24 (D54–D57).** The record is no longer a file beside the
+> plan. It lives in the tool's own `runs` directory, carries the fields a preset
+> needs to rebuild each destination, and `undo` takes a run id (`undo --list`
+> shows them), not a path. The columns above are the Phase 1 sketch; the shipped
+> ones are in `2026-10-21-undo-and-reverse-design.md`.
+
 **Quoting is not optional.** Comic titles contain commas — the GCD lists
 *Hellboy, the Corpse and the Iron Shoes* — so rows are RFC 4180 quoted with
 embedded quotes doubled. A leading `=`, `+`, `-` or `@` is prefixed to defuse
@@ -799,6 +811,11 @@ an earlier draft had the flag on `apply` and the selection at `scan`, which
 cannot both be true. So `scan` takes the mode, records `--dest` and the per-row
 mechanism in the plan, and `apply` takes no mode flag at all. That is what makes
 `apply` reproducible from the plan alone.
+
+> **Superseded 2026-10-24 by D54–D56.** The text below records D38's design.
+> `undo` no longer reads a plan at all: the record carries its own roots, preset
+> id and per-row fields, and the filesystem, not the record, authorises a
+> deletion.
 
 **`undo` reads the manifest for what happened and the plan for what to trust**
 (amended by D38). The two remain different artifacts, and the reasoning that
@@ -1402,6 +1419,14 @@ manifest's own `roots` record as a cross-check. It also makes `apply` and
 lock files silently defeated. Full design:
 `docs/specs/2026-10-21-undo-and-reverse-design.md`.
 
+*Amended 2026-10-24 (D54, D56).* D38's reasoning stands, and it applied equally
+to the plan: whoever edits it supplies the roots and the identities, so moving
+the anchor from the manifest to the plan relocated the defect without removing
+it. Its premise is void once the tool writes the record itself. Its lock
+consequence was not dropped: the lock moved from `<plan>.lock` to the library,
+a file named from a hash of the canonical destination root in the records
+directory.
+
 **D37 — Volume numbers are zero-padded after all, to a per-series width.**
 Owner's call, reversing the earlier unpadded choice. Komga genuinely does not
 need it — its comparator reads digit runs numerically — but `ls`, Finder, every
@@ -1443,7 +1468,9 @@ be derived from a growing table without renaming files already placed.**
 
 **D45 — The mapping session writes a plan and delegates to `apply`; it never
 touches the filesystem itself, and the plan is not written to a temp
-directory because D38 makes it the undo anchor.**
+directory because D38 makes it the undo anchor.** *(Amended 2026-10-24: D38 no
+longer makes the plan the undo anchor, so that reason is void. The plan is
+still written beside the user's work, as the reviewable artifact.)*
 
 **D46 — A user may type a sentence; the parse is shown with its rendered
 destination before acceptance.**
@@ -1472,3 +1499,40 @@ Humble-derived titles is open and gates release, not development.
 **D53 — The guess source dispatches on marketplace.** The corpus is one
 strategy; for Fanatical, title-casing the stem beats it, because the
 filename is already the title modulo sanitisation.
+
+### Decisions D54–D57, from session-scoped undo
+
+Added 2026-10-24. The reasoning is in
+`docs/specs/2026-10-24-session-scoped-undo-and-startup-menu.md`; section numbers
+below refer to that document.
+
+**D54 — A record locates files; it never authorises deleting one.** Reversing a
+copy removes a library file only when a regular file still sits at the recorded
+source and holds the same bytes, which makes the removal a de-duplication. A
+planted record cannot make the tool delete anything the planter did not already
+hold a copy of. Reversing a move renames the destination back through
+`renamex_np(RENAME_EXCL)`. This is invariant 11. Both unlink sites that act on
+record-supplied source data go through the one gate. The design's §3 promised an
+exemption for a reverse within the writing session (`Trust::InSession`); it was
+cut in planning and verification is unconditional.
+
+**D55 — The record's lifetime is keyed to whether undo was offered and declined,
+not to the process.** Quitting the menu is declining the undo it showed, so the
+menu deletes its records on quit. A subcommand `apply` keeps its record. Only
+`q` ends the menu session and declines this session's run; `k` declines a
+completed run's record and redraws, and `l` leaves an interrupted run's record
+and redraws.
+
+**D56 — `undo` stays a subcommand, keyed on a run rather than a plan.** `undo`
+reverses the most recent run that is not still going, `undo --list` names them,
+and `undo <run-id>` picks one. A plan path is a hard error. An argument is safe
+because of D54: a run id selects from records the tool wrote, and naming a
+record cannot authorise anything. *Reconciled 2026-10-24:* the design said
+"`--yes` applies as it does to `apply`", and the plan cut that correctly.
+`undo` has no prompt to skip, so it takes no `--yes`.
+
+**D57 — A kept record is retained as the most recent per
+`(source_root, dest_root)` pair.** Two bundles into one library each keep their
+undo, because they touch disjoint files. Re-running the same bundle into the
+same library supersedes its own previous record. The owner may want a retention
+age or a count instead.

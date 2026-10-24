@@ -1,8 +1,11 @@
 # Session-scoped undo, and a startup menu
 
-Status: **proposed**, 2026-10-24. Revised the same day after a builder check,
-which found five blocking defects in the first draft; this version records what
-it changed. Owner's decisions are marked. Not yet planned or built.
+Status: **built**, 2026-10-24, on branch `worktree-session-scoped-undo`.
+Revised the same day after a builder check, which found five blocking defects in
+the first draft. Planned in `docs/plans/2026-10-24-session-scoped-undo.md`, which
+departs from this document in two places, both recorded where they arise:
+`Trust` was cut (§3), and the menu's keys are specified (§5). D54–D57 are folded
+into the first design's §13.
 
 Supersedes D38 and §6.13's amendment. Reference for the interaction model:
 [Mole](https://github.com/tw93/Mole).
@@ -77,8 +80,9 @@ an interactive `comic-renamer apply` where the user had typed `MOVE`.
 **D56 — `undo` stays a subcommand, keyed on a run rather than a plan.** D55
 keeps a subcommand's record, so there has to be a non-interactive way to reach
 it; `comic-renamer undo` reverses the most recent reversible run,
-`undo --list` names them, and `undo <run-id>` picks one. `--yes` applies as it
-does to `apply`.
+`undo --list` names them, and `undo <run-id>` picks one. ~~`--yes` applies as it
+does to `apply`.~~ *Cut in planning:* `undo` has no prompt to skip, so it takes
+no `--yes`.
 
 An argument is safe here *because* of D54. The first draft removed `undo`'s
 argument on the theory that accepting one was the danger. It was not — the
@@ -91,7 +95,7 @@ not a path: it selects from records the tool wrote and enumerated.
 a menu, and `scan`, `map`, `apply` and `undo` remain subcommands with `--yes`
 for scripting.
 
-### Proposed invariant 11
+### Invariant 11 (now in `CLAUDE.md`)
 
 > **A record never authorises its own deletion.** Reversing a copy removes a
 > library file; the record may say *which* file, never *that it is safe to
@@ -213,16 +217,21 @@ concern.
 *This is the one policy in this round the owner may well want different* — a
 retention age, or a count, are both defensible alternatives.
 
-### What verification costs, and when it is skipped
+### What verification costs
 
 Content-verifying both sides of every copied row means reading two files per row.
 For a 300-file bundle that is real time, and it is the right price for an
 explicit recovery action rather than a hot path.
 
-It is skipped for a reverse **within the session that wrote the record**, where
-the in-memory copy is trustworthy and today's identity check is sufficient. Only
-a record read back from disk needs the filesystem check, which keeps the common
-case — "I just ran this and want it undone" — as fast as it is now.
+**Cut during planning: the in-session exemption.** This section originally
+skipped the check for a reverse within the session that wrote the record,
+through a `Trust::InSession` parameter, to keep "I just ran this and want it
+undone" fast. The plan removed it, and verification is unconditional. Two
+reasons. The exemption had one call site and no test exercised it. And a
+single miswired `InSession`, passed where the record had been read back from
+disk, would reopen the finding with a green suite, because nothing would fail
+when the check was skipped. The cost is paid on every copy reverse, including
+the one just after a run. Nothing in the code carries a trust level.
 
 ---
 
@@ -296,6 +305,13 @@ needs `Option<Command>`; the menu refuses without a TTY exactly as `map` does.
   half-migrated library stays reversible until someone fixes it.
 - Item 4 appears only when this session has a run to reverse, and quitting
   deletes it with one line saying so rather than silently.
+- **Which keys end the session.** The screen above does not say, and the
+  ambiguity produced a defect: an earlier build made `l` and `k` exit, which
+  gave `k` the power to delete a session run and left `l` unable to. The rule is
+  now fixed. **`k` declines its own record and redraws. `l` leaves its own
+  record and redraws. `q` is the only key that ends the session, and the only
+  one that declines this session's run.** An offer's key acts on that offer and
+  returns to the menu.
 - The record's path is never printed. Today's `apply` prints it; availability is
   what the user can act on, and a printed path invites being passed back in.
 
@@ -315,7 +331,7 @@ forgot about.
   as the first draft put it, was half right.
 - **`comic-renamer undo <plan>` changes shape rather than going away** (D56):
   the subcommand survives, keyed on a run instead of a plan path. Pre-release, so
-  no migration is owed.
+  no migration is owed. A plan path is now a hard error.
 - **The roots cross-check** (`undo.rs:216-221`) becomes `x == x` once the record
   supplies both sides, so it and its test are deleted rather than inverted.
 - **CLAUDE.md** needs invariant 11, the `undo` entry under State, and a revisit

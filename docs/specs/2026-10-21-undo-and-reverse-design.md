@@ -8,6 +8,40 @@ first draft assumed primitives that do not exist.
 `docs/plans/2026-10-20-phase-1-implementation.md`, which is kept for its
 `O_EXCL`, append-only and RFC 4180 requirements — all three survive.
 
+> **Amended 2026-10-24 by `2026-10-24-session-scoped-undo-and-startup-menu.md`,
+> which reverses this document's anchor decision.** `undo.rs` still points
+> here for its invariants, and most survive. The ones that changed:
+>
+> - **Invariant 8, the anchor, is reversed.** This document anchored on the
+>   plan. The plan is as untrusted as the manifest, so that moved the defect
+>   instead of removing it (D38 was wrong about the remedy). `reverse` now takes
+>   the record alone, which carries its own roots, preset id and per-row
+>   fields. The roots cross-check is deleted, because it would compare a value
+>   with itself.
+> - **Invariant 1 narrows.** A record is still untrusted input, but it is now
+>   written by the tool into the tool's own directory, and it is reached by
+>   enumeration rather than by a name beside the plan. Neither makes it
+>   trustworthy; the new invariant 11 is what bounds it: a record never
+>   authorises a deletion (D54).
+> - **Step 6 and the `placed` duplicate branch of step 7 gain a gate.** Before
+>   the destination is removed, a regular file must still sit at the recorded
+>   source with the same bytes. Identity (invariant 4) still applies, but it
+>   compares against numbers the record supplies, so it cannot be the
+>   authority.
+> - **Invariant 7, the lock, moved** from `<plan>.lock` to a lock named from the
+>   canonical destination root, in the records directory. Two plans targeting
+>   one library now serialise.
+> - **Step 10 deletes the record** after a reverse with no refusals, instead of
+>   renaming it to `<plan>.undo.csv.reversed`. The rename existed because the
+>   record was named after the plan and `O_EXCL` then refused that plan forever.
+> - **The record format has more columns.** `series,volume,subtitle,run,extension`
+>   per row, and the preset id and planned count on the roots row. See
+>   `COLUMNS` in `crates/core/src/undo.rs`.
+>
+> `undo <plan>` no longer exists: the subcommand takes a run id (D56). The text
+> below is otherwise left as written, so the reasoning that produced it stays
+> readable.
+
 ---
 
 ## Why this document exists

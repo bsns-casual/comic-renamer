@@ -5,6 +5,11 @@ review of the mapping-first rebuild. **Neither is caused by that branch.**
 `crates/core/src/undo.rs` is untouched by its 44 commits, and both paths are
 reachable on `main` today.
 
+**Update 2026-10-24:** both are addressed by
+`docs/specs/2026-10-24-session-scoped-undo-and-startup-menu.md` (D54–D57,
+invariant 11), on a branch that has not merged. The text below describes the
+code as it was.
+
 They are recorded here rather than fixed in that branch because the first one's
 fix changes D38's manifest contract, which is the owner's call, and because
 folding a data-loss fix into a 46-file rebuild diff is how a careful fix becomes
