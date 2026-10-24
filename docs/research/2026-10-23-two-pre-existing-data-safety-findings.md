@@ -87,8 +87,9 @@ version that *reports* the substitution rather than silently preferring one read
 
 ---
 
-## Not a finding, but the maintainer's call
+## Not a finding, and now decided
 
 Whether `DIE: Loaded` and `Glarien: Origins` are their own series or arcs within
-`DIE` and `Glarien`. The mapping table can record either; nothing in the code
-prefers one.
+`DIE` and `Glarien`. **Ruled on 2026-10-24: both are their own series.** The
+fixture carries a confirmed series for each, since the parser cannot tell this
+colon from the genuine subtitle boundary in `Harbinger, Vol. 2: Renegades`.
