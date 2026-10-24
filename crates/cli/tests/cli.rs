@@ -326,7 +326,7 @@ fn the_help_does_not_cite_the_spec_at_the_user() {
 
 #[test]
 fn undo_rejects_a_mode_flag_too() {
-    let out = run(&["undo", "plan.jsonl", "--move"], "");
+    let out = run(&["undo", "--move"], "");
     assert!(!out.status.success());
 }
 
@@ -423,7 +423,7 @@ fn the_typed_word_moves_the_file_and_undo_puts_it_back() {
         "D37: padded to the series width"
     );
 
-    let out = run_in(&f, &["undo", f.plan.to_str().unwrap()], "");
+    let out = run_in(&f, &["undo"], "");
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(original.exists(), "undo did not restore the original");
     assert!(!f.placed.exists(), "undo left the file in the library");
@@ -687,7 +687,7 @@ fn undo_with_no_manifest_is_not_an_error() {
     // Idempotent: never applied, or already fully reversed.
     let f = fixture(Mode::Move);
     let before = listing(&[&f.source, &f.dest]);
-    let out = run_in(&f, &["undo", f.plan.to_str().unwrap()], "");
+    let out = run_in(&f, &["undo"], "");
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stdout(&out).contains("0 restored"), "{}", stdout(&out));
     assert_eq!(before, listing(&[&f.source, &f.dest]));
@@ -861,7 +861,7 @@ fn undo_exits_non_zero_when_a_row_cannot_be_reversed() {
     // run put there and reversing it would move a stranger's file.
     std::fs::write(&f.placed, b"a different file entirely").unwrap();
 
-    let out = run_in(&f, &["undo", f.plan.to_str().unwrap()], "");
+    let out = run_in(&f, &["undo"], "");
     assert!(
         !out.status.success(),
         "a refusal exited zero, so a script would read the undo as clean:\nstdout: {}\nstderr: {}",
@@ -918,4 +918,279 @@ fn map_with_nothing_unmapped_needs_no_terminal_and_writes_the_plan() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stdout(&out).contains("nothing needed mapping"), "{}", stdout(&out));
     assert!(f.source.parent().unwrap().join("comic-renamer-plan.jsonl").exists());
+}
+
+// ---------------------------------------------------------------------------
+// undo names a run
+// ---------------------------------------------------------------------------
+
+/// The record store the binary writes into for this fixture.
+fn runs_dir(f: &Fixture) -> PathBuf {
+    f.config.join("comic-renamer").join("runs")
+}
+
+fn record_files(f: &Fixture) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(runs_dir(f))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n.ends_with(".record"))
+        .collect();
+    names.sort();
+    names
+}
+
+/// A second bundle and library, applied under the same record store.
+struct Second {
+    original: PathBuf,
+    placed: PathBuf,
+}
+
+/// Applies the fixture's own plan, then a second library's. A record's name
+/// sorts by start second, so the gap between them is what makes the second
+/// the newer run; two applies inside one second are ordered by pid.
+fn two_runs(f: &Fixture) -> Second {
+    assert!(run_in(f, &["apply", f.plan.to_str().unwrap(), "--yes"], "")
+        .status
+        .success());
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+
+    let root = f._dir.path().canonicalize().unwrap().join("two");
+    let source = root.join("bundle");
+    let dest = root.join("library");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::create_dir_all(&dest).unwrap();
+    let original = source.join("hellboy_vol1.pdf");
+    std::fs::File::create(&original).unwrap();
+    let plan = write_plan(&root, &source, &dest, Mode::Move, Mechanism::Rename, &original);
+    let relative = f.placed.strip_prefix(&f.dest).unwrap();
+    let out = run_in(f, &["apply", plan.to_str().unwrap(), "--yes"], "");
+    assert!(out.status.success(), "{}", stderr(&out));
+    Second {
+        original,
+        placed: dest.join(relative),
+    }
+}
+
+fn listed_ids(out: &Output) -> Vec<String> {
+    stdout(out)
+        .lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn undo_list_names_each_run_without_reversing_anything() {
+    let f = fixture(Mode::Move);
+    let second = two_runs(&f);
+    let before = listing(&[&f.source, &f.dest]);
+    let records_before = record_files(&f);
+    assert_eq!(records_before.len(), 2);
+
+    let out = run_in(&f, &["undo", "--list"], "");
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let mut ids = listed_ids(&out);
+    ids.sort();
+    assert_eq!(ids, records_before, "{}", stdout(&out));
+    assert!(f.placed.exists() && second.placed.exists());
+    assert_eq!(before, listing(&[&f.source, &f.dest]));
+    assert_eq!(records_before, record_files(&f), "--list removed a record");
+}
+
+#[test]
+fn undo_list_is_newest_first_and_names_no_path() {
+    let f = fixture(Mode::Move);
+    two_runs(&f);
+    let out = run_in(&f, &["undo", "--list"], "");
+    let ids = listed_ids(&out);
+    let mut sorted = ids.clone();
+    sorted.sort();
+    sorted.reverse();
+    assert_eq!(ids, sorted, "newest first: {}", stdout(&out));
+    for id in &ids {
+        assert!(!id.contains('/'), "an id that is a path: {id}");
+    }
+    let said = stdout(&out) + &stderr(&out);
+    for leak in ["/runs", "Application Support", f.config.to_str().unwrap()] {
+        assert!(!said.contains(leak), "--list names {leak:?}:
+{said}");
+    }
+}
+
+#[test]
+fn undo_with_no_argument_reverses_the_most_recent_run() {
+    let f = fixture(Mode::Move);
+    let second = two_runs(&f);
+
+    let out = run_in(&f, &["undo"], "");
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(second.original.exists(), "the newest run was not reversed");
+    assert!(!second.placed.exists());
+    assert!(f.placed.exists(), "the older run was reversed too");
+    assert_eq!(record_files(&f).len(), 1, "the older record must remain");
+}
+
+#[test]
+fn undo_by_run_id_reverses_that_run_and_not_the_newest() {
+    let f = fixture(Mode::Move);
+    let second = two_runs(&f);
+    let ids = listed_ids(&run_in(&f, &["undo", "--list"], ""));
+    let older = ids.last().unwrap();
+
+    let out = run_in(&f, &["undo", older], "");
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(f.source.join("hellboy_vol1.pdf").exists(), "the named run was not reversed");
+    assert!(!f.placed.exists());
+    assert!(second.placed.exists(), "the newest run was reversed instead");
+}
+
+#[test]
+fn a_run_id_is_a_name_and_never_a_path() {
+    let f = fixture(Mode::Move);
+    assert!(run_in(&f, &["apply", f.plan.to_str().unwrap(), "--yes"], "")
+        .status
+        .success());
+    let record = runs_dir(&f).join(&record_files(&f)[0]);
+    let before = listing(&[&f.source, &f.dest]);
+
+    // The last two are real: the plan, and the record's own absolute path.
+    // Both name something undo could act on, and neither is a run id.
+    for bad in [
+        "../../etc/passwd",
+        "/etc/passwd",
+        "comic-renamer-plan.jsonl",
+        f.plan.to_str().unwrap(),
+        record.to_str().unwrap(),
+    ] {
+        let out = run_in(&f, &["undo", bad], "");
+        assert!(!out.status.success(), "{bad}: {}", stdout(&out));
+        assert!(stderr(&out).contains("no run named"), "{bad}: {}", stderr(&out));
+    }
+    assert_eq!(before, listing(&[&f.source, &f.dest]), "a bad id moved a file");
+    assert!(record.exists(), "a bad id removed the record");
+}
+
+#[test]
+fn undo_works_after_the_bundle_folder_is_deleted() {
+    // The common case: move a bundle in, delete the emptied folder, change
+    // your mind. Roots come from the record, so the missing folder is not
+    // something the lookup needs.
+    for by_id in [true, false] {
+        let f = fixture(Mode::Move);
+        assert!(run_in(&f, &["apply", f.plan.to_str().unwrap(), "--yes"], "")
+            .status
+            .success());
+        std::fs::remove_dir(&f.source).unwrap();
+
+        let id = record_files(&f).remove(0);
+        let args: Vec<&str> = if by_id { vec!["undo", &id] } else { vec!["undo"] };
+        let out = run_in(&f, &args, "");
+        assert!(out.status.success(), "by_id={by_id}: {}", stderr(&out));
+        assert!(
+            f.source.join("hellboy_vol1.pdf").exists(),
+            "by_id={by_id}: not restored"
+        );
+        assert!(!f.placed.exists(), "by_id={by_id}");
+    }
+}
+
+#[test]
+fn undo_prints_no_record_path_and_leaves_no_trace_of_one() {
+    let f = fixture(Mode::Move);
+    assert!(run_in(&f, &["apply", f.plan.to_str().unwrap(), "--yes"], "")
+        .status
+        .success());
+    // A refused row exercises the error path as well as the report.
+    std::fs::write(&f.placed, b"a different file entirely").unwrap();
+
+    let out = run_in(&f, &["undo"], "");
+    assert!(!out.status.success());
+    let said = stdout(&out) + &stderr(&out);
+    for leak in [
+        ".record",
+        "/runs",
+        "Application Support",
+        f.config.to_str().unwrap(),
+    ] {
+        assert!(!said.contains(leak), "undo names {leak:?}:
+{said}");
+    }
+}
+
+#[test]
+fn undo_rejects_a_run_together_with_list() {
+    let out = run(&["undo", "--list", "some-run"], "");
+    assert!(!out.status.success());
+}
+
+#[test]
+fn undo_with_no_argument_skips_a_run_that_is_still_going() {
+    let f = fixture(Mode::Move);
+    let second = two_runs(&f);
+    let newest = runs_dir(&f).join(record_files(&f).last().unwrap());
+    // What a live `apply` does to its own record.
+    let _held = comic_renamer_core::record::hold(&newest).unwrap();
+
+    let listed = stdout(&run_in(&f, &["undo", "--list"], ""));
+    let line_for = |id: &str| listed.lines().find(|l| l.starts_with(id)).unwrap().to_string();
+    let ids = record_files(&f);
+    assert!(line_for(&ids[1]).contains("running"), "{listed}");
+    assert!(!line_for(&ids[0]).contains("running"), "{listed}");
+
+    let out = run_in(&f, &["undo"], "");
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(second.placed.exists(), "reversed a record a live run holds");
+    assert!(!f.placed.exists(), "the older run was not reversed instead");
+    assert!(newest.exists());
+}
+
+#[test]
+fn undo_with_no_argument_steps_over_a_record_it_cannot_read() {
+    let f = fixture(Mode::Move);
+    assert!(run_in(&f, &["apply", f.plan.to_str().unwrap(), "--yes"], "")
+        .status
+        .success());
+    // Newer than any real record, and not one.
+    std::fs::write(
+        runs_dir(&f).join(".comic-renamer.99999999999.1.0.record"),
+        b"not a record",
+    )
+    .unwrap();
+
+    let out = run_in(&f, &["undo"], "");
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(f.source.join("hellboy_vol1.pdf").exists());
+
+    let listed = run_in(&f, &["undo", "--list"], "");
+    assert!(listed.status.success(), "{}", stderr(&listed));
+    assert!(!stdout(&listed).contains("99999999999"), "{}", stdout(&listed));
+}
+
+#[test]
+fn undo_refuses_while_the_library_is_locked() {
+    let f = fixture(Mode::Move);
+    assert!(run_in(&f, &["apply", f.plan.to_str().unwrap(), "--yes"], "")
+        .status
+        .success());
+    let _lock = comic_renamer_core::apply::Lock::library(&runs_dir(&f), &f.dest).unwrap();
+    let before = listing(&[&f.source, &f.dest]);
+
+    let out = run_in(&f, &["undo"], "");
+    assert!(!out.status.success(), "{}", stdout(&out));
+    assert_eq!(before, listing(&[&f.source, &f.dest]));
+}
+
+#[test]
+fn undo_does_not_rebuild_a_bundle_folder_when_the_library_is_gone() {
+    let f = fixture(Mode::Move);
+    assert!(run_in(&f, &["apply", f.plan.to_str().unwrap(), "--yes"], "")
+        .status
+        .success());
+    std::fs::remove_dir(&f.source).unwrap();
+    std::fs::remove_dir_all(&f.dest).unwrap();
+
+    let out = run_in(&f, &["undo", &record_files(&f)[0]], "");
+    assert!(!out.status.success(), "{}", stdout(&out));
+    assert!(!f.source.exists(), "recreated a folder with nothing to put in it");
 }

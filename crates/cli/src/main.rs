@@ -19,7 +19,7 @@ use comic_renamer_core::overrides::Overrides;
 use comic_renamer_core::preset::{preset_by_id, Preset};
 use comic_renamer_core::resolve::{context_for, suggest_with};
 use comic_renamer_core::types::{
-    human_bytes as size, Collision, Mechanism, Mode, PlanHeader, PlanRow, Progress, ScanOpts,
+    human_bytes as size, Collision, Mechanism, Mode, PlanRow, Progress, ScanOpts,
     Status,
     UndoReport,
 };
@@ -144,11 +144,14 @@ enum Command {
         komga_url: Option<String>,
     },
 
-    /// Put a plan's files back where they came from.
+    /// Put a run's files back where they came from.
     Undo {
-        /// The same plan you passed to `apply`. It names the library; the
-        /// record of what happened is kept by the tool.
-        plan: PathBuf,
+        /// The run to reverse, as `--list` shows it. Without one, the most
+        /// recent run that is not still going.
+        run: Option<String>,
+        /// Show the runs that can be reversed, and reverse nothing.
+        #[arg(long, conflicts_with = "run")]
+        list: bool,
     },
 }
 
@@ -199,7 +202,7 @@ fn main() -> ExitCode {
             yes,
             komga_url,
         } => run_apply(&plan, allow_cloud_move, yes, komga_url.as_deref()),
-        Command::Undo { plan } => run_undo(&plan),
+        Command::Undo { run, list } => run_undo(run.as_deref(), list),
     };
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
@@ -769,23 +772,93 @@ fn confirm(mode: Mode) -> Result<(), String> {
 // undo
 // ---------------------------------------------------------------------------
 
-fn run_undo(path: &Path) -> Result<(), String> {
-    let (header, ..) = plan::read_allowing_edits(path).map_err(|e| e.to_string())?;
+fn run_undo(run: Option<&str>, list: bool) -> Result<(), String> {
     let records = records_dir()?;
-    // Before the lookup, and the same lock `apply` runs under: a record being
-    // written by a live run must not be read as a run to reverse.
-    let lock = apply::Lock::library(&records, &header.dest_root).map_err(|e| e.to_string())?;
-
-    let report = match record_for(&records, &header)? {
-        Some(record) => apply::reverse_run(&lock, &record).map_err(|e| e.to_string())?,
-        // Never applied, or already reversed. Idempotent, not an error.
-        None => UndoReport::default(),
+    if list {
+        return list_runs(&records);
+    }
+    let Some(record) = pick_record(&records, run)? else {
+        // Nothing to reverse: never applied, or already reversed. Idempotent,
+        // not an error.
+        return print_report(&UndoReport::default());
     };
+    // The record names its own library. The same lock `apply` runs under, so
+    // a record being written by a live run is not reversed under it.
+    let summary = undo::summarise(&record).map_err(|e| e.to_string())?;
+    let lock = apply::Lock::library(&records, &summary.dest_root).map_err(|e| e.to_string())?;
+    let report = apply::reverse_run(&lock, &record).map_err(|e| e.to_string())?;
+    print_report(&report)
+}
+
+fn no_such_run(id: &str) -> String {
+    format!("no run named {id}; `comic-renamer undo --list` shows them")
+}
+
+/// A run id is a record's file name, matched against what `record::list`
+/// enumerates. It is never joined onto the store: that would make any relative
+/// path a run id, and a path is what the record store exists to stop accepting.
+///
+/// With no id, the newest record that no run holds and that can be read; one
+/// unreadable file must not make every other run unreversible.
+fn pick_record(records: &Path, run: Option<&str>) -> Result<Option<PathBuf>, String> {
+    // A store that was never created holds no runs.
+    if !records.exists() {
+        return run.map_or(Ok(None), |id| Err(no_such_run(id)));
+    }
+    let found = record::list(records).map_err(|e| e.to_string())?;
+    match run {
+        Some(id) => found
+            .into_iter()
+            .find(|path| path.file_name().is_some_and(|n| n == id))
+            .map(Some)
+            .ok_or_else(|| no_such_run(id)),
+        None => Ok(found
+            .into_iter()
+            .find(|path| !record::is_live(path).unwrap_or(true) && undo::summarise(path).is_ok())),
+    }
+}
+
+fn list_runs(records: &Path) -> Result<(), String> {
+    let found = if records.exists() {
+        record::list(records).map_err(|e| e.to_string())?
+    } else {
+        Vec::new()
+    };
+    let mut shown = 0;
+    for path in found {
+        let Ok(summary) = undo::summarise(&path) else {
+            continue;
+        };
+        let Some(id) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let state = if record::is_live(&path).unwrap_or(true) {
+            "running"
+        } else if summary.interrupted {
+            "interrupted"
+        } else {
+            "finished"
+        };
+        println!(
+            "{id}  {state}  {} of {} reversible  {}",
+            summary.reversible,
+            summary.planned,
+            summary.dest_root.display()
+        );
+        shown += 1;
+    }
+    if shown == 0 {
+        println!("no runs to reverse");
+    }
+    Ok(())
+}
+
+fn print_report(report: &UndoReport) -> Result<(), String> {
     let UndoReport {
         restored,
         skipped,
         refused,
-    } = &report;
+    } = report;
     println!("{restored} restored · {skipped} skipped · {} refused", refused.len());
     if refused.is_empty() {
         return Ok(());
@@ -796,30 +869,6 @@ fn run_undo(path: &Path) -> Result<(), String> {
         eprintln!("  refused: {why}");
     }
     Err(format!("{} rows could not be reversed", refused.len()))
-}
-
-/// The newest record written for the library this plan names.
-///
-/// The plan is a handle, not an anchor: it supplies the pair of roots to match
-/// against and nothing else. A record names its own roots, and a record whose
-/// summary cannot be read is skipped rather than fatal — one unreadable file
-/// in the store must not make every other run unreversible.
-fn record_for(records: &Path, header: &PlanHeader) -> Result<Option<PathBuf>, String> {
-    let canonical = |path: &Path| {
-        std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))
-    };
-    let source_root = canonical(&header.source_root)?;
-    let dest_root = canonical(&header.dest_root)?;
-    // Newest first, so a library run more than once reverses the last run.
-    for path in record::list(records).map_err(|e| e.to_string())? {
-        let Ok(summary) = undo::summarise(&path) else {
-            continue;
-        };
-        if summary.source_root == source_root && summary.dest_root == dest_root {
-            return Ok(Some(path));
-        }
-    }
-    Ok(None)
 }
 
 // ---------------------------------------------------------------------------

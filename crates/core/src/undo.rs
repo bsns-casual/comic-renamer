@@ -312,6 +312,13 @@ pub fn reverse(manifest: &Path) -> Result<UndoReport, UndoError> {
     let mut report = UndoReport::default();
     report.refused.extend(m.unreadable);
 
+    // The bundle folder is where the files go back to, and a user who deleted
+    // it once it emptied has not made them unrestorable. Only with the library
+    // still there: a record whose destination is gone has nothing to anchor.
+    // A failure here is left for the canonicalisation below to report.
+    if m.dest_root.is_dir() && !m.source_root.exists() {
+        let _ = ensure_root(&m.source_root);
+    }
     let (source_root, dest_root) = match (
         std::fs::canonicalize(&m.source_root),
         std::fs::canonicalize(&m.dest_root),

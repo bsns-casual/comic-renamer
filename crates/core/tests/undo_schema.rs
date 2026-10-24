@@ -228,3 +228,28 @@ fn an_extension_is_prefixed_like_every_other_text_field() {
     let text = std::fs::read_to_string(&record).unwrap();
     assert!(text.contains(",'=cmd,"), "{text}");
 }
+
+/// The common case: the user deleted the emptied bundle folder, and the
+/// library is still there. The record names the folder, so the files go back.
+#[test]
+fn a_deleted_bundle_folder_is_rebuilt_and_the_file_goes_back() {
+    let (dir, record) = written(true, false);
+    std::fs::remove_dir(dir.path().join("source")).unwrap();
+    let report = reverse(&record).unwrap();
+    assert_eq!(report.refused, Vec::<String>::new());
+    assert_eq!(report.restored, 1);
+    assert!(dir.path().join("source").join("Hellboy_v01.pdf").exists());
+}
+
+/// With the library gone as well there is nothing to anchor, so nothing is
+/// created: the rebuild is for restoring, not for conjuring directories.
+#[test]
+fn a_deleted_bundle_folder_is_not_rebuilt_when_the_library_is_gone_too() {
+    let (dir, record) = written(true, false);
+    std::fs::remove_dir(dir.path().join("source")).unwrap();
+    std::fs::remove_dir_all(dir.path().join("library")).unwrap();
+    let report = reverse(&record).unwrap();
+    assert_eq!(report.restored, 0);
+    assert!(!report.refused.is_empty());
+    assert!(!dir.path().join("source").exists());
+}
