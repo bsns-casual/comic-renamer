@@ -200,10 +200,19 @@ the code or run on 2026-10-24:
   lock is a file in the same directory named from a hash of the canonical
   destination root; it stays after the run ends.
 - **`undo` is keyed on a run, not a plan** (D56). `comic-renamer undo` reverses
-  the most recent run that no process still holds, `undo --list` shows them, and
-  `undo <run-id>` picks one. Passing the plan path is a hard error (exit 1),
-  which a test pins. `undo` has **no `--yes`**: it has no prompt to skip, and
-  `clap` rejects the flag (exit 2).
+  the most recent run that no process still holds **and that has a row to put
+  back** — the same gate the menu's offer uses. `undo --list` shows them, and
+  `undo <run-id>` picks one, ungated: the user chose that run. Passing the plan
+  path is a hard error (exit 1), which a test pins. `undo` has **no `--yes`**:
+  it has no prompt to skip, and `clap` rejects the flag (exit 2).
+- **"Interrupted" means the record does not account for everything it
+  planned**, which is deliberately *not* "some row is `pending`". `apply`
+  abandons the run on the first row that fails and writes that row `failed`, or
+  leaves it `placed` when the destination landed and the unlink did not, so the
+  likeliest real failure leaves no `pending` row. Two signals, in
+  `undo::summarise`: a row that is not `done`, and fewer finished rows than
+  `planned`. Neither subsumes the other; the comment there says which state
+  each one reaches.
 - **`apply` no longer prints the record's path.** It prints that `undo` puts
   the run back. A printed path invites being handed back in.
 - **`comic-renamer` with no arguments opens a menu**, and refuses without a
@@ -211,12 +220,22 @@ the code or run on 2026-10-24:
   and redraws, `l` leaves an interrupted run's record and redraws, and **`q`
   is the only key that ends the session and the only one that declines this
   session's run** (D55). An earlier cut let `l` and `k` exit, which gave `k` the
-  power to delete a session run and left `l` unable to.
+  power to delete a session run and left `l` unable to. **Item 4 owns this
+  session's run alone** — that record is excluded from the two offers above, or
+  the completed offer called this session's own `apply` "an earlier run" and
+  `k` deleted what item 4 still pointed at.
 - **`Trust::InSession` was cut during planning.** The design promised a fast
   reverse within the writing session. Verification is unconditional instead.
   See the 2026-10-24 design's §3.
 - **Retention is one record per `(source_root, dest_root)` pair** (D57), and
-  that is the policy the owner may want different.
+  that is the policy the owner may want different. One exception: an
+  *interrupted* record that still has rows to put back is never superseded,
+  because the menu's `l` promises it stays. One with nothing to put back is
+  swept, so a bundle failing on its first row leaves one record, not one per
+  attempt. `apply` prints how many earlier runs the sweep made unreversible.
+- **Both `apply` and `reverse_run` check that the `&Lock` they hold names the
+  library they are about to touch.** `reverse_run` did not, which made the
+  obligation a convention on exactly the path a reverse mutates a library from.
 
 ### What ships, and what does not
 
@@ -246,9 +265,10 @@ agreed. The other 14.7% are known-bad decompositions, such as
 subtitle "Before the Fall Vol. 9" and no volume. Review them in a `map` session
 before any of this is committed.
 
-**Tests:** `cargo test --workspace` runs 500 and ignores 9 (counted 2026-10-24
-by summing the `test result:` lines: 500 passed, 0 failed, 9 ignored; 409 and 7
-before session-scoped undo), with no compiler warnings. The nine `#[ignore]`d
+**Tests:** `cargo test --workspace` runs 510 and ignores 9 (counted 2026-10-24
+by summing the `test result:` lines: 510 passed, 0 failed, 9 ignored; 500 before
+the whole-branch review's fix wave, 409 and 7 before session-scoped undo), with
+no compiler warnings. The nine `#[ignore]`d
 tests need real hardware or the real corpus release, and **CI runs all nine**:
 five are volume-gated (`COMIC_RENAMER_TEST_VOLUME`; four in `apply_exec.rs`,
 one in `cli.rs`) and four are corpus tests (`COMIC_RENAMER_TEST_ZIP`, in

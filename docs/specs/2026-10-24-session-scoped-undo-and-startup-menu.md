@@ -63,9 +63,17 @@ cannot make the tool delete anything the planter did not already hold a copy of.
 Reversing a *move* needs no such check. It renames the destination back, through
 `renamex_np(RENAME_EXCL)`, which refuses rather than clobbering (invariant 6).
 The residual exposure from a forged record is therefore bounded to *relocating*
-one file from the library into the source folder under a name of the forger's
-choosing, both roots being the user's own, and `plain_relative` plus
-`single_component` keep it to a single component inside `source_root`.
+one file the user already had. **Only the library end is bounded to something
+real:** `dest_root` has to exist and canonicalise, and the row's destination has
+to be one the preset still produces. The other end is the forger's: `source_root`
+is whatever the record names, and `ensure_root` is `create_dir_all`, so the file
+can land in any directory the user can write, created on demand, under any
+single component `plain_relative` and `single_component` admit. What stays out of
+reach is the file's *content* — it is one the user already held — which is what
+makes this a relocation primitive and not an injection one.
+
+*Corrected on 2026-10-24.* This sentence said "both roots being the user's own",
+which reads as a bound on both ends and is only true of one.
 
 **D55 — The record's lifetime is keyed to whether undo was offered and
 declined, not to the process.** Quitting the menu is declining the undo you were
@@ -135,6 +143,13 @@ behaviour is kept and the launch offer is gated on a non-empty record, so a run
 that placed nothing produces no offer. The first draft's lifecycle table said
 "`apply` starts | created" and silently reverted this.
 
+Lazy creation does not make the gate unnecessary, which is why `comic-renamer
+undo` with no id takes the same one. The record is created before the first
+runnable row *executes*, so a run whose very first row fails writes roots plus
+one `failed` row — a record with nothing in it to put back. Picking that one
+reversed nothing, deleted it and exited 0 while the run the user meant stayed
+where it was.
+
 ### The schema has to grow
 
 **This is the blocking defect in the first draft.** `reverse` takes
@@ -197,13 +212,14 @@ survive.
 |---|---|
 | first row that executes | created, `flock` taken, roots row fsynced |
 | each row | `pending` → `placed`/`failed` → `done`, fsynced per transition |
-| run ends, menu session continues | kept; undo offered in the menu |
+| run ends, menu session continues | kept; offered as item 4, and **not** also as an earlier run |
+| run aborts at a row failure | kept, and read as interrupted — no `pending` row is involved |
 | user reverses it | reversed, then deleted |
 | quit the menu | deleted — quitting is declining (D55) |
 | subcommand exits | kept (D55) |
 | process dies | survives, `flock` released by the kernel |
-| a later launch finds one | `flock`-tested, then offered if non-empty |
-| a new run supersedes it | the older record for the same root pair is deleted |
+| a later launch finds one | `flock`-tested, then offered if it has rows to put back |
+| a new run supersedes it | the older record for the same root pair is deleted, unless it is interrupted with rows still to put back |
 
 **D57 — a kept record is retained as the most recent per
 `(source_root, dest_root)` pair.** Nothing in the first draft pruned a
@@ -217,6 +233,18 @@ concern.
 
 *This is the one policy in this round the owner may well want different* — a
 retention age, or a count, are both defensible alternatives.
+
+**One exception, added after the whole-branch review of 2026-10-24.** An
+*interrupted* record that still has rows to put back is not superseded. The
+menu's `l` says of one, in these words, "this stays here until you deal with
+it", and the ordinary recovery sequence — crash, re-scan the same bundle,
+re-apply into the same library — walked straight through that promise: the
+crashed run's record went, and the rows it had already placed stopped being
+reversible. An interrupted record with *nothing* to put back is still swept,
+which is what keeps the exception from becoming the unbounded growth this
+decision exists to stop: a bundle that fails on its first row would otherwise
+leave one record per attempt. The count is reported rather than discarded —
+`apply` says how many earlier runs can no longer be undone.
 
 ### What verification costs
 
@@ -300,12 +328,29 @@ needs `Option<Command>`; the menu refuses without a TTY exactly as `map` does.
   invocation is intact and merely still reversible. The first draft had one
   offer worded "a run was interrupted", which would have described a clean
   `apply --yes` from yesterday as a crash.
-- Either offer appears only for a non-empty record no live process holds.
+- **"Interrupted" means the record does not account for everything it planned**,
+  and that is not the same as "some row is `pending`". `apply` abandons the run
+  on the first row that fails, writing that row `failed` — or leaving it at
+  `placed`, when its destination landed and the unlink did not — so **the most
+  likely way a real run goes wrong leaves no `pending` row at all**. Read as
+  `pending` alone, every such record was offered as a *completed* run, which
+  handed `k` the power the bullet below takes away from it. Two signals say it
+  instead: a row that is not `done`, and fewer finished rows than `planned`.
+  Neither subsumes the other — a `placed` final row makes the counts agree while
+  the run still aborted, and a crash during a `record_pending` write leaves no
+  row to be not-`done`.
+- Either offer appears only for a record no live process holds that has rows to
+  put back.
 - Declining a completed run's offer (`k`) is the decline D55 keys on, so that
   record is deleted. Declining the interrupted one (`l`) is not: a
-  half-migrated library stays reversible until someone fixes it.
+  half-migrated library stays reversible until someone fixes it. Nothing else
+  may delete one either — see D57's exception.
 - Item 4 appears only when this session has a run to reverse, and quitting
-  deletes it with one line saying so rather than silently.
+  deletes it with one line saying so rather than silently. **Item 4 owns that
+  record alone:** it is excluded from the two offers above, which otherwise
+  called this session's own `apply` "an earlier run" and let `k` delete the
+  record item 4 still pointed at. The exclusion and item 4's own appearance are
+  taken from one value, so the two cannot disagree.
 - **Which keys end the session.** The screen above does not say, and the
   ambiguity produced a defect: an earlier build made `l` and `k` exit, which
   gave `k` the power to delete a session run and left `l` unable to. The rule is
