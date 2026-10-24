@@ -225,6 +225,30 @@ impl Entry {
         }
     }
 
+    /// SHA-256 of this entry's contents, hex, read through the same directory
+    /// descriptor the identity check used.
+    ///
+    /// Not `sha256_of` on a rebuilt path: this hash is what authorises an
+    /// unlink, so it is the one read that must not be able to see a different
+    /// file from the one `remove` then deletes. Refuses a non-regular file for
+    /// the reason `sha256_of` does.
+    pub fn sha256(&self) -> io::Result<String> {
+        use std::os::fd::FromRawFd;
+        // SAFETY: `parent` is an open directory we own, `leaf` outlives the
+        // call, and the descriptor is adopted immediately.
+        let raw = unsafe {
+            libc::openat(
+                std::os::fd::AsRawFd::as_raw_fd(&self.destination.parent),
+                self.destination.leaf.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+            )
+        };
+        if raw < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        sha256_of_fd(unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) })
+    }
+
     /// Renames out of this entry's own directory, no-clobber.
     pub fn rename_into(&self, to_root: &Path, to_relative: &Path) -> io::Result<()> {
         let to = resolve_destination(to_root, to_relative)?;
@@ -344,7 +368,7 @@ pub fn clone_excl(src: &Path, dest_root: &Path, relative: &Path) -> io::Result<(
     // CLONE_NOFOLLOW_ANY then trips on `/var`, which is a symlink on macOS.
     // `fclonefileat` takes a source descriptor, so the flag constrains only
     // the destination — which is a single leaf under a verified directory.
-    let source = open_nofollow(src)?;
+    let source = open_nofollow(src, 0)?;
     // SAFETY: `source` is an open descriptor we own, `parent` likewise, and
     // `leaf` outlives the call.
     let rc = unsafe {
@@ -364,7 +388,12 @@ pub fn clone_excl(src: &Path, dest_root: &Path, relative: &Path) -> io::Result<(
 
 /// Opens a file refusing to follow a final symlink. Paired with
 /// `refuse_symlink_source` so the check and the open cannot disagree.
-fn open_nofollow(path: &Path) -> io::Result<std::os::fd::OwnedFd> {
+///
+/// `extra` carries flags only one caller wants: `sha256_of` passes
+/// `O_NONBLOCK`, because a path it is handed may be a FIFO and `open` on one
+/// blocks until a writer appears. Left at `0` the flag is not added for
+/// callers that have already established their source is a regular file.
+fn open_nofollow(path: &Path, extra: libc::c_int) -> io::Result<std::os::fd::OwnedFd> {
     use std::os::fd::FromRawFd;
     let name = cstring(path)?;
     // SAFETY: `name` is a valid NUL-terminated path for the call; the
@@ -372,7 +401,7 @@ fn open_nofollow(path: &Path) -> io::Result<std::os::fd::OwnedFd> {
     let raw = unsafe {
         libc::open(
             name.as_ptr(),
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | extra,
         )
     };
     if raw < 0 {
@@ -404,7 +433,7 @@ pub fn stream_verified(src: &Path, dest_root: &Path, relative: &Path) -> io::Res
     // stat above and the open have to agree about which file this is, which is
     // what that helper's doc comment claims and what `clone_excl` already did.
     // Losing the race here reads the wrong bytes into the library.
-    let mut input = std::fs::File::from(open_nofollow(src)?);
+    let mut input = std::fs::File::from(open_nofollow(src, 0)?);
     io::copy(&mut input, &mut file)?;
     file.sync_all()?;
 
@@ -557,6 +586,30 @@ fn hash_open_file(file: &mut std::fs::File) -> io::Result<(u64, String)> {
         hasher.update(&buffer[..read]);
     }
     Ok((total, hex(&hasher.finalize())))
+}
+
+/// SHA-256 of a **regular** file, hex, without following a final symlink.
+///
+/// Refuses anything that is not a regular file. A FIFO at a path a record
+/// names would otherwise block in `open` until a writer appeared, and `undo`
+/// holds the library's lock while it waits — so the one command that could
+/// recover the library would be the thing the record took away. `O_NONBLOCK`
+/// is what makes the open return; the `fstat` behind it is what refuses.
+pub fn sha256_of(path: &Path) -> io::Result<String> {
+    sha256_of_fd(open_nofollow(path, libc::O_NONBLOCK)?)
+}
+
+/// The half `sha256_of` and `Entry::sha256` share: refuse a non-regular file,
+/// then hash what the descriptor holds.
+fn sha256_of_fd(fd: std::os::fd::OwnedFd) -> io::Result<String> {
+    let mut file = std::fs::File::from(fd);
+    if !file.metadata()?.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    hash_open_file(&mut file).map(|(_, hash)| hash)
 }
 
 fn hex(bytes: &[u8]) -> String {

@@ -7,7 +7,7 @@
 //! reasonable-looking shortcut.
 
 use crate::fsops::{
-    ensure_root, prune_empty_dirs, resolve_at, stat_at, stream_verified,
+    ensure_root, prune_empty_dirs, resolve_at, sha256_of, stat_at, stream_verified, Entry,
 };
 use crate::preset::preset_by_id;
 use crate::types::{Mechanism, Mode, Resolved, Status as MapStatus, UndoError, UndoReport};
@@ -487,11 +487,13 @@ fn reverse_one(
                     "the original {} is not what this run copied from",
                     source_name.display()
                 )),
-                Ok(_) => {
-                    entry.remove().map_err(|e| e.to_string())?;
-                    prune_empty_dirs(dest_root, &row.dest_relative).map_err(|e| e.to_string())?;
-                    Ok(true)
-                }
+                Ok(_) => remove_with_a_copy_at_the_source(
+                    &entry,
+                    source_root,
+                    source_name,
+                    dest_root,
+                    &row.dest_relative,
+                ),
             }
         }
         Mode::Move => match &source {
@@ -505,9 +507,13 @@ fn reverse_one(
             Ok(actual) if row.status == Status::Placed
                 && row.source_identity == Some(*actual) =>
             {
-                entry.remove().map_err(|e| e.to_string())?;
-                prune_empty_dirs(dest_root, &row.dest_relative).map_err(|e| e.to_string())?;
-                Ok(true)
+                remove_with_a_copy_at_the_source(
+                    &entry,
+                    source_root,
+                    source_name,
+                    dest_root,
+                    &row.dest_relative,
+                )
             }
             Ok(actual) if row.source_identity == Some(*actual) => Ok(false),
             Ok(_) => Err(format!("{} is occupied", source_name.display())),
@@ -549,6 +555,18 @@ fn reverse_one(
                                 ))
                             }
                         }
+                        // Deliberately *not*
+                        // `remove_with_a_copy_at_the_source`. The copy at the
+                        // source is one this run streamed back a moment ago,
+                        // not one the record claims was always there, and
+                        // `stream_verified` compared its SHA-256 on the way —
+                        // then the identity above re-checked the destination
+                        // through the held descriptor. Hashing the source
+                        // again would re-read the payload for a comparison
+                        // that has already been made against the same bytes.
+                        // The asymmetry is the point: the gate exists for
+                        // sources a record vouches for, and this one the tool
+                        // wrote itself.
                         match entry.remove() {
                             Ok(()) => {
                                 prune_empty_dirs(dest_root, &row.dest_relative)
@@ -570,6 +588,56 @@ fn reverse_one(
             Err(e) => Err(format!("cannot examine the original: {e}")),
         },
     }
+}
+
+/// The one gate on every unlink whose authority comes from a record.
+///
+/// The identity check above compares the destination against the size, inode
+/// and mtime the record carries — numbers whoever wrote the record chose, and
+/// chose the file they are compared against. A reviewer executed that: a
+/// hand-written record deleted a file no run had placed, and the report said
+/// `restored: 1, refused: []`. A better identity check cannot close it,
+/// because the record is still both sides of the comparison.
+///
+/// So the filesystem decides instead. The destination goes only when a
+/// regular file still sits at the recorded source and holds the same bytes,
+/// which makes the removal a de-duplication rather than a deletion. Someone
+/// who plants a record cannot then make the tool delete anything they did not
+/// already hold a copy of.
+///
+/// Both unlink sites that act on record-supplied source data call this —
+/// `Mode::Copy`, and `Mode::Move`'s `placed` branch removing the duplicate a
+/// failed unlink left. Guarding one and not the other only moves the finding
+/// to the other door.
+///
+/// The source is hashed first: it is the record-claimed side, so it is where a
+/// refusal is expected, and reading it cannot hydrate a library file that is
+/// about to be refused anyway.
+fn remove_with_a_copy_at_the_source(
+    entry: &Entry,
+    source_root: &Path,
+    source_name: &Path,
+    dest_root: &Path,
+    dest_relative: &Path,
+) -> Result<bool, String> {
+    let source = sha256_of(&source_root.join(source_name))
+        .map_err(|e| format!("cannot read the original {}: {e}", source_name.display()))?;
+    // Reading a cloud placeholder here hydrates it, which costs the download
+    // of a file that is then removed. D23 already accepts that cost on the
+    // way in, and the alternative is a hash the record supplies.
+    let placed = entry
+        .sha256()
+        .map_err(|e| format!("cannot read {}: {e}", dest_relative.display()))?;
+    if source != placed {
+        return Err(format!(
+            "the original {} does not hold the contents of {}; it was left in place",
+            source_name.display(),
+            dest_relative.display()
+        ));
+    }
+    entry.remove().map_err(|e| e.to_string())?;
+    prune_empty_dirs(dest_root, dest_relative).map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 fn plain_relative(path: &Path) -> Result<(), String> {
