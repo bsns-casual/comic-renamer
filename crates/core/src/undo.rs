@@ -142,7 +142,7 @@ impl UndoWriter {
             field(&format!("'{series}")),
             volume.map(|v| v.to_string()).unwrap_or_default(),
             subtitle.map(|t| field(&format!("'{t}"))).unwrap_or_default(),
-            field(extension),
+            field(&format!("'{extension}")),
         )?;
         self.file.sync_all()
             .map(|()| self.seq)
@@ -324,7 +324,13 @@ pub fn summarise(manifest: &Path) -> Result<Summary, UndoError> {
     let m = read_manifest(manifest)?;
     let started = match m.started {
         Some(t) => t,
-        None => std::fs::metadata(manifest)?.modified()?,
+        None => {
+            let meta = std::fs::metadata(manifest)?;
+            // Birth time is when the record was created. `modified()` is the
+            // last append, which is when the run *ended*: the wrong end, kept
+            // only for filesystems with no birth time.
+            meta.created().or_else(|_| meta.modified())?
+        }
     };
     let reversible = m
         .rows
@@ -378,7 +384,7 @@ pub fn reverse_from(manifest: &Path) -> Result<UndoReport, UndoError> {
     // Equal roots would let a content check hash one inode against itself and
     // agree, deleting the only copy.
     if source_root.starts_with(&dest_root) || dest_root.starts_with(&source_root) {
-        return Err(UndoError::NoRoot);
+        return Err(UndoError::RootsOverlap);
     }
 
     for row in m.rows.into_iter().rev() {
@@ -597,7 +603,7 @@ fn pending_fields(columns: &[String]) -> Option<Fields> {
             t => Some(unprefix(t).to_string()),
         },
         run: get(12)?.parse().ok()?,
-        extension: get(13)?.to_string(),
+        extension: unprefix(get(13)?).to_string(),
     })
 }
 
@@ -709,7 +715,7 @@ fn read_manifest(manifest: &Path) -> Result<Manifest, UndoError> {
                     dest_relative: PathBuf::from(unprefix(&columns[5])),
                     source_identity: identity,
                     placed_identity: None,
-                    fields: pending_fields(&columns),
+                    fields: pending_fields(columns),
                 });
             }
             // Last status wins per seq; a status row with no pending is

@@ -338,6 +338,8 @@ pub enum UndoError {
     Locked,
     #[error("manifest records no destination root")]
     NoRoot,
+    #[error("the source and destination folders overlap; one sits inside the other")]
+    RootsOverlap,
     #[error("{0} is outside the manifest's destination root")]
     OutsideRoot(PathBuf),
     #[error("line {line}: {message}")]

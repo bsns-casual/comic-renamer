@@ -92,13 +92,6 @@ fn a_record_whose_roots_are_gone_refuses_every_row() {
     assert!(report.refused.iter().any(|r| r.contains("library")), "{:?}", report.refused);
 }
 
-/// Review Focus 5.
-#[test]
-fn a_record_whose_roots_canonicalise_equal_is_refused() {
-    let (_dir, record) = written(false, true);
-    assert!(matches!(reverse_from(&record), Err(UndoError::NoRoot) | Err(UndoError::Parse { .. })));
-}
-
 /// The naming trap: a same-volume move records `done` and never `placed`.
 #[test]
 fn a_move_run_is_reversible_even_though_no_row_is_placed() {
@@ -139,4 +132,71 @@ fn an_edited_destination_is_not_a_destination_the_preset_produces() {
     let report = reverse_from(&record).unwrap();
     assert_eq!(report.restored, 0);
     assert!(!report.refused.is_empty());
+}
+
+/// Equal roots are only one half of the check: `||` becomes `&&` and equal
+/// roots still refuse, because both halves are true. Nesting tells them apart.
+#[test]
+fn nested_roots_are_refused_in_both_directions() {
+    let (dir, record) = a_written_record();
+    let text = std::fs::read_to_string(&record).unwrap();
+    let source = dir.path().join("source").canonicalize().unwrap();
+    let library = dir.path().join("library").canonicalize().unwrap();
+
+    // Library inside the bundle folder.
+    let inner = source.join("library");
+    std::fs::create_dir_all(&inner).unwrap();
+    let a = dir.path().join("a.record");
+    std::fs::write(&a, text.replace(&format!("'{}", library.display()), &format!("'{}", inner.display()))).unwrap();
+    assert!(matches!(reverse_from(&a), Err(UndoError::RootsOverlap)));
+
+    // Bundle folder inside the library.
+    let inner = library.join("source");
+    std::fs::create_dir_all(&inner).unwrap();
+    let b = dir.path().join("b.record");
+    std::fs::write(&b, text.replace(&format!("'{}", source.display()), &format!("'{}", inner.display()))).unwrap();
+    assert!(matches!(reverse_from(&b), Err(UndoError::RootsOverlap)));
+
+    let msg = UndoError::RootsOverlap.to_string();
+    assert!(msg.contains("overlap") && !msg.contains("no destination root"), "{msg}");
+}
+
+#[test]
+fn equal_roots_name_the_overlap_not_a_missing_root() {
+    let (_dir, record) = written(false, true);
+    assert!(matches!(reverse_from(&record), Err(UndoError::RootsOverlap)));
+}
+
+#[test]
+fn started_falls_between_two_clock_readings() {
+    let before = std::time::SystemTime::now();
+    let (_dir, record) = a_written_record();
+    let after = std::time::SystemTime::now();
+    let started = summarise(&record).unwrap().started;
+    assert!(before <= started && started <= after, "{before:?} {started:?} {after:?}");
+}
+
+/// Without the extend, a row the parser dropped leaves a file in the library
+/// while the report says the undo was clean.
+#[test]
+fn an_unreadable_row_is_reported_by_reverse_from() {
+    let (_dir, record) = a_written_record();
+    let mut text = std::fs::read_to_string(&record).unwrap();
+    text.push_str("not-a-number,done,,,,,,,,,,,,,,\n");
+    std::fs::write(&record, text).unwrap();
+    let report = reverse_from(&record).unwrap();
+    assert_eq!(report.restored, 1);
+    assert!(report.refused.iter().any(|r| r.contains("not a number")), "{:?}", report.refused);
+}
+
+#[test]
+fn an_extension_is_prefixed_like_every_other_text_field() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("f.pdf");
+    std::fs::write(&file, b"x").unwrap();
+    let record = dir.path().join("r.record");
+    let mut w = UndoWriter::create_with(&record, dir.path(), dir.path(), "komga", 1).unwrap();
+    w.record_pending_with(Path::new("f.pdf"), Path::new("a/b"), Mechanism::Clone, Mode::Copy, &file, "S", None, None, 0, "=cmd").unwrap();
+    let text = std::fs::read_to_string(&record).unwrap();
+    assert!(text.contains(",'=cmd,"), "{text}");
 }
