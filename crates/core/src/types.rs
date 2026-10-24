@@ -182,11 +182,15 @@ pub struct UndoReport {
     pub refused: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ApplyResult {
     pub executed: usize,
     pub skipped: usize,
     pub failed: usize,
+    /// The record this run wrote, or `None` when it placed nothing. The record
+    /// is created lazily on the first row that executes, so a run that refused
+    /// every row has nothing to reverse and nothing to name.
+    pub record: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -304,6 +308,10 @@ pub enum ScanError {
 pub enum ApplyError {
     #[error("another run holds the lock")]
     Locked,
+    /// The record store is unusable, so the run cannot be recorded — which
+    /// means it does not happen. Raised before the first row.
+    #[error("the record store is unusable: {0}")]
+    Records(String),
     #[error("source {0} changed since the scan")]
     SourceChanged(PathBuf),
     #[error("need {}, only {} available after the reserve", human_bytes(*required), human_bytes(*available))]

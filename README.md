@@ -128,8 +128,8 @@ assistant or attach to a pull request.
 
 **Moving is the default, and it is destructive by design** — a same-volume move
 is a `rename`, which costs nothing and cannot truncate a multi-gigabyte PDF
-halfway. Every run writes an undo manifest beside the plan as it goes, so an
-interrupted run is still reversible.
+halfway. Every run records what it did as it goes, in a directory the tool
+keeps for itself, so an interrupted run is still reversible.
 
 ### Before you point it at a Komga library
 

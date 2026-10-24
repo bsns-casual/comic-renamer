@@ -6,7 +6,7 @@
 
 mod common;
 
-use comic_renamer_core::apply::{check, lock_path};
+use comic_renamer_core::apply::check;
 use comic_renamer_core::mapping::Mappings;
 use comic_renamer_core::types::{ApplyError, PlanHeader, PlanRow, ScanOpts, Status};
 use comic_renamer_core::{plan, scan};
@@ -90,8 +90,16 @@ impl Fixture {
     }
 }
 
+/// `check` takes the plan as read, so reading it is the test's job now — and
+/// `read_allowing_edits` is deliberately the reader, because §6.9's edited
+/// plan has to reach the pre-flight rather than being rejected by a checksum.
 fn run(f: &Fixture) -> Result<comic_renamer_core::types::ApplyResult, ApplyError> {
-    check(&f.plan, false, &mut |_| {})
+    run_with(f, false)
+}
+
+fn run_with(f: &Fixture, allow_cloud_move: bool) -> Result<comic_renamer_core::types::ApplyResult, ApplyError> {
+    let (header, rows, _edited) = plan::read_allowing_edits(&f.plan)?;
+    check(&header, &rows, allow_cloud_move, &mut |_| {})
 }
 
 #[test]
@@ -142,40 +150,18 @@ fn a_refused_run_moves_zero_files() {
     }
 }
 
+/// The three lock tests this file used to hold are now in `apply_record.rs`:
+/// the lock is per library and held by the caller, so `check` — which writes
+/// nothing — neither takes it nor needs it. That it *does not* is a claim
+/// worth keeping here, because a pre-flight that quietly took a lock the
+/// caller already held would deadlock every run.
 #[test]
-fn refuses_a_lock_held_by_another_run() {
-    let c = gcd();
-    let f = Fixture::new(&["mazebook.pdf"], &c);
-    // Held the way a concurrent run holds it: an flock on the descriptor,
-    // not merely the existence of a file.
-    let held = comic_renamer_core::apply::Lock::acquire(&f.plan).unwrap();
-    let _guard = TreeGuard::new(&f.roots());
-    assert!(matches!(run(&f), Err(ApplyError::Locked)));
-    drop(held);
-    run(&f).unwrap();
-}
-
-#[test]
-fn a_lock_file_left_by_a_killed_run_does_not_block() {
-    // flock, not O_EXCL: the kernel releases the lock when its owner dies.
-    // An O_EXCL lock file survived a SIGKILL and had to be deleted by hand —
-    // and a crash is exactly when undo is needed, so the stale lock blocked
-    // the one recovery path.
-    let c = gcd();
-    let f = Fixture::new(&["mazebook.pdf"], &c);
-    std::fs::write(lock_path(&f.plan), b"leftover from a killed run").unwrap();
-    let _guard = TreeGuard::new(&f.roots());
-    run(&f).unwrap();
-}
-
-#[test]
-fn the_lock_is_released_when_the_run_ends() {
+fn check_takes_no_lock_of_its_own() {
     let c = gcd();
     let f = Fixture::new(&["mazebook.pdf"], &c);
     let _guard = TreeGuard::new(&f.roots());
+    // Twice in a row, in one process, with nothing dropped in between.
     run(&f).unwrap();
-    // A second run proves release; the file itself may persist, which is
-    // what makes a killed run recoverable.
     run(&f).unwrap();
 }
 
@@ -244,15 +230,15 @@ fn an_edited_plan_is_revalidated_not_rejected() {
     std::fs::write(&f.plan, lines.join("\n")).unwrap();
 
     let _guard = TreeGuard::new(&f.roots());
-    let mut saw_notice = false;
-    let r = check(&f.plan, false, &mut |p| {
-        if p.current.contains("edited") {
-            saw_notice = true;
-        }
-    })
-    .unwrap();
+    // The edit is reported by the reader, which is where the caller learns of
+    // it: `check` is handed rows and has nothing to compare a checksum
+    // against. The disclosure carries the notice to the user (`disclose`'s
+    // `edited` paragraph, pinned in the CLI's own tests).
+    let (header, rows, edited) = plan::read_allowing_edits(&f.plan).unwrap();
+    assert!(edited, "the edit was not reported");
+    // And the plan is revalidated rather than rejected: the row still runs.
+    let r = check(&header, &rows, false, &mut |_| {}).unwrap();
     assert_eq!(r.executed, 1);
-    assert!(saw_notice, "the edit was not reported");
 }
 
 #[test]
@@ -263,7 +249,7 @@ fn a_cloud_source_move_is_allowed_with_the_override() {
     // Without the override this is CloudSourceMove; with it the run proceeds
     // and the rows are judged on their own merits.
     assert!(matches!(run(&f), Err(ApplyError::CloudSourceMove(_))));
-    let r = check(&f.plan, true, &mut |_| {}).unwrap();
+    let r = run_with(&f, true).unwrap();
     assert_eq!(r.executed, 1);
 }
 
@@ -292,10 +278,7 @@ fn an_edited_plan_cannot_move_a_file_from_outside_the_source_root() {
     });
 
     let _guard = TreeGuard::new(&[f.source.as_path(), f.dest.as_path(), elsewhere.path()]);
-    assert!(matches!(
-        check(&f.plan, false, &mut |_| {}),
-        Err(ApplyError::OutsideSourceRoot(_, _))
-    ));
+    assert!(matches!(run(&f), Err(ApplyError::OutsideSourceRoot(_, _))));
     assert!(victim.exists(), "the victim was taken");
 }
 
@@ -308,10 +291,7 @@ fn an_edited_plan_cannot_repoint_the_destination_root() {
     let f = Fixture::new(&["mazebook.pdf"], &c);
     f.rewrite(|header, _| header.dest_root = PathBuf::from("/"));
     let _guard = TreeGuard::new(&[f.source.as_path(), f.dest.as_path()]);
-    assert!(matches!(
-        check(&f.plan, false, &mut |_| {}),
-        Err(ApplyError::RootsOverlap)
-    ));
+    assert!(matches!(run(&f), Err(ApplyError::RootsOverlap)));
 }
 
 #[test]
@@ -320,32 +300,13 @@ fn an_edited_plan_cannot_make_the_roots_overlap() {
     let f = Fixture::new(&["mazebook.pdf"], &c);
     f.rewrite(|header, _| header.dest_root = header.source_root.clone());
     let _guard = TreeGuard::new(&[f.source.as_path(), f.dest.as_path()]);
-    assert!(matches!(
-        check(&f.plan, false, &mut |_| {}),
-        Err(ApplyError::RootsOverlap)
-    ));
+    assert!(matches!(run(&f), Err(ApplyError::RootsOverlap)));
 }
 
-#[test]
-fn a_run_that_executes_nothing_does_not_burn_the_plan() {
-    // The manifest was created before the loop, so refusing every row still
-    // wrote a header-only .undo.csv — and O_EXCL then rejected the plan
-    // forever, so fixing the collision and re-running was impossible.
-    let c = gcd();
-    let f = Fixture::new(&["mazebook.pdf"], &c);
-    std::fs::create_dir(f.dest.join("Mazebook")).unwrap();
-    std::fs::write(f.dest.join("Mazebook/Mazebook.pdf"), b"in the way").unwrap();
-
-    let r = comic_renamer_core::apply::apply(&f.plan, false, &mut |_| {}).unwrap();
-    assert_eq!((r.executed, r.skipped), (0, 1));
-    assert!(
-        !comic_renamer_core::apply::undo_path(&f.plan).exists(),
-        "a run that moved nothing still created a manifest"
-    );
-
-    // The user clears the collision and re-runs the same plan.
-    std::fs::remove_dir_all(f.dest.join("Mazebook")).unwrap();
-    let r = comic_renamer_core::apply::apply(&f.plan, false, &mut |_| {}).unwrap();
-    assert_eq!(r.executed, 1, "the plan was unusable after a refused run");
-}
+// `a_run_that_executes_nothing_does_not_burn_the_plan` moved to
+// `apply_record.rs` as `a_run_that_executes_nothing_writes_no_record`: it is
+// the only test in this file that executed a run, and what it was really
+// about — a refused run leaving no record behind — now belongs beside the
+// store. The plan is no longer burnable at all, because nothing is named
+// after it.
 

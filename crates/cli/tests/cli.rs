@@ -10,7 +10,7 @@ use comic_renamer_core::types::{
     Mechanism, Mode, PlanHeader, PlanRow, Resolved, SourceStat, Status,
 };
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -30,6 +30,11 @@ struct Fixture {
     plan: PathBuf,
     /// Where row 0 lands, absolute.
     placed: PathBuf,
+    /// This fixture's `XDG_CONFIG_HOME`, so the record store the binary
+    /// writes into is this fixture's and not the developer's. Without it the
+    /// suite leaves a record of every test run in `Application Support` —
+    /// measured, not assumed: 7 records and 22 lock files from one run.
+    config: PathBuf,
 }
 
 /// One zero-byte file (invariant 3) resolved to `Hellboy Vol. 01`.
@@ -68,6 +73,7 @@ fn fixture(mode: Mode) -> Fixture {
 
     Fixture {
         placed: dest.join(&relative),
+        config: root.join("config"),
         _dir: dir,
         source,
         dest,
@@ -134,6 +140,22 @@ fn write_plan(
 
 fn run(args: &[&str], stdin: &str) -> Output {
     run_with_env(args, stdin, &[])
+}
+
+/// `apply` and `undo` both reach the record store, which lives under
+/// `config_dir()` — and `apply` reaches it before the prompt, so even a run
+/// the user refuses creates the store and its lock file. Every invocation
+/// that gets past `clap` therefore goes through here, pointed at the
+/// fixture's own directory.
+fn run_in(f: &Fixture, args: &[&str], stdin: &str) -> Output {
+    run_in_with_env(f, args, stdin, &[])
+}
+
+fn run_in_with_env(f: &Fixture, args: &[&str], stdin: &str, env: &[(&str, &str)]) -> Output {
+    let config = f.config.to_str().unwrap();
+    let mut all = vec![("XDG_CONFIG_HOME", config)];
+    all.extend_from_slice(env);
+    run_with_env(args, stdin, &all)
 }
 
 fn run_with_env(args: &[&str], stdin: &str, env: &[(&str, &str)]) -> Output {
@@ -247,7 +269,7 @@ fn every_flag_the_disclosure_advertises_actually_exists() {
     // a CLI that only took `--mode copy`. Scrape the flags out of a real
     // disclosure instead of naming the ones to look for.
     let f = fixture(Mode::Move);
-    let said = stdout(&run(&["apply", f.plan.to_str().unwrap()], "no\n"));
+    let said = stdout(&run_in(&f, &["apply", f.plan.to_str().unwrap()], "no\n"));
     assert!(said.contains("MOVE MODE"), "no disclosure to scrape:\n{said}");
 
     let help: String = ["--help", "scan", "apply", "undo"]
@@ -318,7 +340,7 @@ fn aborting_at_the_prompt_moves_nothing() {
     let before = listing(&[&f.source, &f.dest]);
 
     // "yes" is the reflexive answer the typed word exists to defeat.
-    let out = run(&["apply", f.plan.to_str().unwrap()], "yes\n");
+    let out = run_in(&f, &["apply", f.plan.to_str().unwrap()], "yes\n");
 
     assert!(!out.status.success(), "a refusal must not exit zero");
     assert!(stderr(&out).contains("aborted at the prompt"), "{}", stderr(&out));
@@ -330,7 +352,7 @@ fn aborting_at_the_prompt_moves_nothing() {
 fn an_empty_answer_aborts() {
     let f = fixture(Mode::Move);
     let before = listing(&[&f.source, &f.dest]);
-    let out = run(&["apply", f.plan.to_str().unwrap()], "\n");
+    let out = run_in(&f, &["apply", f.plan.to_str().unwrap()], "\n");
     assert!(!out.status.success());
     assert_eq!(before, listing(&[&f.source, &f.dest]));
 }
@@ -340,7 +362,7 @@ fn eof_aborts_rather_than_consenting() {
     // A non-interactive caller must not be taken as having agreed.
     let f = fixture(Mode::Move);
     let before = listing(&[&f.source, &f.dest]);
-    let out = run(&["apply", f.plan.to_str().unwrap()], "");
+    let out = run_in(&f, &["apply", f.plan.to_str().unwrap()], "");
     assert!(!out.status.success());
     assert!(stderr(&out).contains("--yes"), "{}", stderr(&out));
     assert_eq!(before, listing(&[&f.source, &f.dest]));
@@ -351,7 +373,7 @@ fn the_wrong_word_aborts() {
     // Typing COPY at a move prompt is a user who misread the mode.
     let f = fixture(Mode::Move);
     let before = listing(&[&f.source, &f.dest]);
-    let out = run(&["apply", f.plan.to_str().unwrap()], "COPY\n");
+    let out = run_in(&f, &["apply", f.plan.to_str().unwrap()], "COPY\n");
     assert!(!out.status.success());
     assert_eq!(before, listing(&[&f.source, &f.dest]));
 }
@@ -359,7 +381,7 @@ fn the_wrong_word_aborts() {
 #[test]
 fn the_disclosure_prints_before_the_prompt() {
     let f = fixture(Mode::Move);
-    let out = stdout(&run(&["apply", f.plan.to_str().unwrap()], "no\n"));
+    let out = stdout(&run_in(&f, &["apply", f.plan.to_str().unwrap()], "no\n"));
     let disclosure = out.find("MOVE MODE").expect("no disclosure");
     let prompt = out.find("Type MOVE").expect("no prompt");
     assert!(disclosure < prompt, "the prompt came first:\n{out}");
@@ -377,7 +399,7 @@ fn the_plans_unmapped_count_is_disclosed_by_the_binary() {
     header.unmapped = 7;
     comic_renamer_core::plan::write(&header, &rows, &f.plan).unwrap();
 
-    let out = stdout(&run(&["apply", f.plan.to_str().unwrap()], "no\n"));
+    let out = stdout(&run_in(&f, &["apply", f.plan.to_str().unwrap()], "no\n"));
     assert!(out.contains("left where they are: 7 of 8 rows"), "{out}");
 }
 
@@ -391,7 +413,7 @@ fn the_typed_word_moves_the_file_and_undo_puts_it_back() {
     let original = f.source.join("hellboy_vol1.pdf");
     let before = listing(&[&f.source, &f.dest]);
 
-    let out = run(&["apply", f.plan.to_str().unwrap()], "MOVE\n");
+    let out = run_in(&f, &["apply", f.plan.to_str().unwrap()], "MOVE\n");
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(f.placed.exists(), "{}", stdout(&out));
     assert!(!original.exists(), "a move left the original behind");
@@ -401,17 +423,159 @@ fn the_typed_word_moves_the_file_and_undo_puts_it_back() {
         "D37: padded to the series width"
     );
 
-    let out = run(&["undo", f.plan.to_str().unwrap()], "");
+    let out = run_in(&f, &["undo", f.plan.to_str().unwrap()], "");
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(original.exists(), "undo did not restore the original");
     assert!(!f.placed.exists(), "undo left the file in the library");
     assert_eq!(before, listing(&[&f.source, &f.dest]), "not the tree we started with");
 }
 
+/// Runs `apply` interactively, lets `meddle` change the world between the
+/// disclosure and the confirmation, then types the word. Returns whether the
+/// run succeeded and everything it put on stdout.
+///
+/// That window is the interesting one: the disclosure has told the user what
+/// will happen, and nothing they type afterwards should be able to mean
+/// something else.
+fn apply_through_the_window(f: &Fixture, meddle: impl FnOnce()) -> (bool, String) {
+    let mut child = Command::new(EXE)
+        .env("XDG_CONFIG_HOME", f.config.to_str().unwrap())
+        .args(["apply", f.plan.to_str().unwrap()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // Read until the disclosure is out. The `--copy` line is its last, and by
+    // then the pre-flight has run and every number has been computed — so
+    // everything the user is consenting to is already decided.
+    let mut stdout_pipe = BufReader::new(child.stdout.take().unwrap());
+    let mut said = String::new();
+    loop {
+        let mut line = String::new();
+        let read = stdout_pipe.read_line(&mut line).unwrap();
+        assert!(read > 0, "the disclosure never arrived:\n{said}");
+        said.push_str(&line);
+        if line.contains("--copy") {
+            break;
+        }
+    }
+    assert!(said.contains("MOVE MODE"), "{said}");
+
+    meddle();
+
+    child.stdin.take().unwrap().write_all(b"MOVE\n").unwrap();
+    // Drained before waiting: a child blocked writing to a full pipe never
+    // exits, and a `wait` that never returns reads exactly like a hang.
+    stdout_pipe.read_to_string(&mut said).unwrap();
+    (child.wait().unwrap().success(), said)
+}
+
+/// Finding 2. The plan is rewritten between the disclosure and the
+/// confirmation; what runs is what the user was shown.
+///
+/// The consent the typed word gives is consent to a particular set of files.
+/// A plan re-read after the disclosure makes that consent transferable to
+/// whatever is on disk by the time the word is typed — and the plan is a file
+/// in the bundle folder, which is a folder other things write into.
+#[test]
+fn a_plan_rewritten_after_the_disclosure_does_not_run() {
+    let f = fixture(Mode::Move);
+    let shown = f.source.join("hellboy_vol1.pdf");
+    // The file the swapped-in plan moves instead. Same series, so both plans
+    // name one destination and the only thing that says which plan ran is
+    // *which source is gone*.
+    let decoy = f.source.join("decoy.pdf");
+    std::fs::File::create(&decoy).unwrap();
+
+    let (ok, said) = apply_through_the_window(&f, || {
+        let swapped = write_plan(
+            f.source.parent().unwrap(),
+            &f.source,
+            &f.dest,
+            Mode::Move,
+            Mechanism::Rename,
+            &decoy,
+        );
+        assert_eq!(
+            swapped, f.plan,
+            "the rewrite missed the plan the child was given, so this proves nothing"
+        );
+    });
+    assert!(ok, "{said}");
+
+    assert!(
+        decoy.exists(),
+        "the plan swapped in after the disclosure is the one that ran:\n{said}"
+    );
+    assert!(
+        !shown.exists(),
+        "the plan the user was shown did not run:\n{said}"
+    );
+    assert!(f.placed.exists(), "{said}");
+}
+
+/// The one way a run reaches the end having placed nothing and without
+/// failing: the destination appears inside the window, so the disclosure's
+/// arithmetic counted a row that the run then refuses for a collision.
+///
+/// Worth pinning because of what gets printed. A run that recorded nothing
+/// has nothing to reverse, and offering `comic-renamer undo` after it points
+/// the user at a run that does not exist.
+#[test]
+fn a_run_that_places_nothing_does_not_offer_an_undo() {
+    let f = fixture(Mode::Move);
+    let (ok, said) = apply_through_the_window(&f, || {
+        std::fs::create_dir_all(f.placed.parent().unwrap()).unwrap();
+        std::fs::write(&f.placed, b"it got there first").unwrap();
+    });
+
+    assert!(said.contains("0 placed"), "{said}");
+    assert!(
+        !said.contains("comic-renamer undo"),
+        "an undo was offered for a run that recorded nothing:\n{said}"
+    );
+    // The exit code is zero here, and this test does not assert otherwise.
+    // The non-zero path belongs to the run that is refused *before* the
+    // prompt (`nothing_to_do`); a run that gets consent and then places
+    // nothing has always exited zero, and changing that is not this task's.
+    let _ = ok;
+    // And the file that got there first is untouched.
+    assert_eq!(
+        std::fs::read(&f.placed).unwrap(),
+        b"it got there first",
+        "{said}"
+    );
+}
+
+/// A record is a file the tool owns. The run says it can be reversed and
+/// names no path: a printed path invites being handed back in, and a path the
+/// user supplies is the authority the record store exists to take away.
+#[test]
+fn apply_says_undo_is_available_without_naming_the_record() {
+    let f = fixture(Mode::Move);
+    let out = run_in(&f, &["apply", f.plan.to_str().unwrap(), "--yes"], "");
+    assert!(out.status.success(), "{}", stderr(&out));
+    let said = stdout(&out);
+    assert!(
+        said.contains("comic-renamer undo"),
+        "a run that placed a file did not say it could be reversed:\n{said}"
+    );
+    for leak in [
+        ".record",
+        "/runs",
+        "Application Support",
+        f.config.to_str().unwrap(),
+    ] {
+        assert!(!said.contains(leak), "the run names {leak:?}:\n{said}");
+    }
+}
+
 #[test]
 fn yes_skips_the_prompt_but_not_the_disclosure() {
     let f = fixture(Mode::Move);
-    let out = run(&["apply", f.plan.to_str().unwrap(), "--yes"], "");
+    let out = run_in(&f, &["apply", f.plan.to_str().unwrap(), "--yes"], "");
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(f.placed.exists());
     // The record still has to exist: --yes is consent, not silence.
@@ -422,7 +586,7 @@ fn yes_skips_the_prompt_but_not_the_disclosure() {
 fn a_copy_keeps_the_original() {
     let f = fixture(Mode::Copy);
     let original = f.source.join("hellboy_vol1.pdf");
-    let out = run(&["apply", f.plan.to_str().unwrap(), "--yes"], "");
+    let out = run_in(&f, &["apply", f.plan.to_str().unwrap(), "--yes"], "");
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(f.placed.exists());
     assert!(original.exists(), "a copy must not remove the source");
@@ -432,12 +596,12 @@ fn a_copy_keeps_the_original() {
 #[test]
 fn applying_a_move_twice_refuses_because_the_source_is_gone() {
     let f = fixture(Mode::Move);
-    assert!(run(&["apply", f.plan.to_str().unwrap(), "--yes"], "")
+    assert!(run_in(&f, &["apply", f.plan.to_str().unwrap(), "--yes"], "")
         .status
         .success());
 
     let before = listing(&[&f.source, &f.dest]);
-    let out = run(&["apply", f.plan.to_str().unwrap(), "--yes"], "");
+    let out = run_in(&f, &["apply", f.plan.to_str().unwrap(), "--yes"], "");
 
     // Named, not an either-or: an assertion that accepts two outcomes stops
     // telling you which one happened, and the weaker branch is the one that
@@ -463,7 +627,7 @@ fn applying_a_copy_twice_refuses_and_leaves_the_destination_alone() {
     // reported, the file already in the library is untouched, and the exit
     // code says nothing was placed.
     let f = fixture(Mode::Copy);
-    assert!(run(&["apply", f.plan.to_str().unwrap(), "--yes"], "")
+    assert!(run_in(&f, &["apply", f.plan.to_str().unwrap(), "--yes"], "")
         .status
         .success());
     assert!(f.placed.exists());
@@ -472,7 +636,7 @@ fn applying_a_copy_twice_refuses_and_leaves_the_destination_alone() {
     std::fs::write(&f.placed, b"the file already in the library").unwrap();
     let before = listing(&[&f.source, &f.dest]);
 
-    let out = run(&["apply", f.plan.to_str().unwrap(), "--yes"], "");
+    let out = run_in(&f, &["apply", f.plan.to_str().unwrap(), "--yes"], "");
     assert!(!out.status.success(), "{}", stdout(&out));
     assert_eq!(before, listing(&[&f.source, &f.dest]), "the second run wrote");
     assert_eq!(
@@ -509,7 +673,7 @@ fn a_plan_with_no_ready_row_says_so_and_does_not_exit_zero() {
     .unwrap();
 
     let before = listing(&[&f.source, &f.dest]);
-    let out = run(&["apply", f.plan.to_str().unwrap(), "--yes"], "");
+    let out = run_in(&f, &["apply", f.plan.to_str().unwrap(), "--yes"], "");
     assert!(!out.status.success(), "{}", stdout(&out));
     let said = stdout(&out);
     assert!(said.contains("Nothing to do"), "{said}");
@@ -523,7 +687,7 @@ fn undo_with_no_manifest_is_not_an_error() {
     // Idempotent: never applied, or already fully reversed.
     let f = fixture(Mode::Move);
     let before = listing(&[&f.source, &f.dest]);
-    let out = run(&["undo", f.plan.to_str().unwrap()], "");
+    let out = run_in(&f, &["undo", f.plan.to_str().unwrap()], "");
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stdout(&out).contains("0 restored"), "{}", stdout(&out));
     assert_eq!(before, listing(&[&f.source, &f.dest]));
@@ -570,7 +734,14 @@ fn a_cross_volume_plan_says_so_before_the_prompt() {
     );
 
     let plan = write_plan(dir.path(), &source, &dest, Mode::Move, mechanism, &file);
-    let out = run(&["apply", plan.to_str().unwrap()], "no\n");
+    // The store is reached before the prompt, so even this refusal would
+    // otherwise create one under the developer's own config directory.
+    let config = dir.path().join("config");
+    let out = run_with_env(
+        &["apply", plan.to_str().unwrap()],
+        "no\n",
+        &[("XDG_CONFIG_HOME", config.to_str().unwrap())],
+    );
     let said = stdout(&out);
 
     assert!(!out.status.success());
@@ -603,7 +774,8 @@ fn an_unsafe_komga_library_refuses_and_moves_nothing() {
         let f = fixture(Mode::Move);
         let before = listing(&[&f.source, &f.dest]);
         let url = one_shot_json(body);
-        let out = run_with_env(
+        let out = run_in_with_env(
+            &f,
             &["apply", f.plan.to_str().unwrap(), "--komga-url", &url, "--yes"],
             "",
             &[("COMIC_RENAMER_KOMGA_TOKEN", "test-token")],
@@ -618,7 +790,8 @@ fn an_unsafe_komga_library_refuses_and_moves_nothing() {
 fn a_safe_komga_library_lets_the_run_proceed() {
     let f = fixture(Mode::Move);
     let url = one_shot_json(r#"[{"name":"Comics","hashFiles":true,"emptyTrashAfterScan":false}]"#);
-    let out = run_with_env(
+    let out = run_in_with_env(
+        &f,
         &["apply", f.plan.to_str().unwrap(), "--komga-url", &url, "--yes"],
         "",
         &[("COMIC_RENAMER_KOMGA_TOKEN", "test-token")],
@@ -632,7 +805,8 @@ fn a_komga_url_without_a_token_refuses_rather_than_skipping_the_check() {
     // Silently skipping would turn the flag into decoration.
     let f = fixture(Mode::Move);
     let before = listing(&[&f.source, &f.dest]);
-    let out = run(
+    let out = run_in(
+        &f,
         &["apply", f.plan.to_str().unwrap(), "--komga-url", "http://127.0.0.1:1", "--yes"],
         "",
     );
@@ -646,7 +820,7 @@ fn no_komga_url_skips_the_check_entirely() {
     // Not everyone runs Komga, and the check must not become mandatory by
     // accident. Covered by every other apply test, pinned here on purpose.
     let f = fixture(Mode::Move);
-    assert!(run(&["apply", f.plan.to_str().unwrap(), "--yes"], "")
+    assert!(run_in(&f, &["apply", f.plan.to_str().unwrap(), "--yes"], "")
         .status
         .success());
 }
@@ -663,7 +837,7 @@ fn a_plan_that_will_refuse_refuses_before_disclosing_or_prompting() {
     let f = fixture(Mode::Move);
     std::fs::write(f.source.join("hellboy_vol1.pdf"), b"changed since the scan").unwrap();
 
-    let out = run(&["apply", f.plan.to_str().unwrap()], "MOVE\n");
+    let out = run_in(&f, &["apply", f.plan.to_str().unwrap()], "MOVE\n");
     assert!(!out.status.success());
     assert!(stderr(&out).contains("changed since the scan"), "{}", stderr(&out));
     let said = stdout(&out);
@@ -679,7 +853,7 @@ fn a_plan_that_will_refuse_refuses_before_disclosing_or_prompting() {
 #[test]
 fn undo_exits_non_zero_when_a_row_cannot_be_reversed() {
     let f = fixture(Mode::Move);
-    assert!(run(&["apply", f.plan.to_str().unwrap(), "--yes"], "")
+    assert!(run_in(&f, &["apply", f.plan.to_str().unwrap(), "--yes"], "")
         .status
         .success());
 
@@ -687,7 +861,7 @@ fn undo_exits_non_zero_when_a_row_cannot_be_reversed() {
     // run put there and reversing it would move a stranger's file.
     std::fs::write(&f.placed, b"a different file entirely").unwrap();
 
-    let out = run(&["undo", f.plan.to_str().unwrap()], "");
+    let out = run_in(&f, &["undo", f.plan.to_str().unwrap()], "");
     assert!(
         !out.status.success(),
         "a refusal exited zero, so a script would read the undo as clean:\nstdout: {}\nstderr: {}",

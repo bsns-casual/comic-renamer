@@ -12,7 +12,7 @@ mod common;
 
 use comic_renamer_core::preset::preset_by_id;
 use comic_renamer_core::types::{Mechanism, Mode, Resolved, Status};
-use comic_renamer_core::undo::{reverse_from, UndoWriter};
+use comic_renamer_core::undo::{reverse, UndoWriter};
 use common::{reverse_before, DEADLINE};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -76,10 +76,10 @@ fn planted(mode: Mode) -> Fixture {
     std::fs::write(&library_file, b"a library file no run ever placed").unwrap();
 
     let record = dir.path().join("run.record");
-    let mut w = UndoWriter::create_with(&record, &source, &library, "komga", 1).unwrap();
+    let mut w = UndoWriter::create(&record, &source, &library, "komga", 1).unwrap();
     let recorded_source_identity = identity_of(&source_file);
     let seq = w
-        .record_pending_with(
+        .record_pending(
             Path::new("Hellboy_v01.pdf"),
             &dest_for(),
             Mechanism::Clone,
@@ -108,10 +108,10 @@ fn real_copy() -> Fixture {
     let library_file = library.join(dest_for());
 
     let record = dir.path().join("run.record");
-    let mut w = UndoWriter::create_with(&record, &source, &library, "komga", 1).unwrap();
+    let mut w = UndoWriter::create(&record, &source, &library, "komga", 1).unwrap();
     let recorded_source_identity = identity_of(&source_file);
     let seq = w
-        .record_pending_with(
+        .record_pending(
             Path::new("Hellboy_v01.pdf"),
             &dest_for(),
             Mechanism::Clone,
@@ -139,10 +139,10 @@ fn real_move() -> Fixture {
     let library_file = library.join(dest_for());
 
     let record = dir.path().join("run.record");
-    let mut w = UndoWriter::create_with(&record, &source, &library, "komga", 1).unwrap();
+    let mut w = UndoWriter::create(&record, &source, &library, "komga", 1).unwrap();
     let recorded_source_identity = identity_of(&source_file);
     let seq = w
-        .record_pending_with(
+        .record_pending(
             Path::new("Hellboy_v01.pdf"),
             &dest_for(),
             Mechanism::Rename,
@@ -206,7 +206,7 @@ fn mkfifo(path: &Path) {
 fn a_planted_record_does_not_delete_a_library_file() {
     for mode in [Mode::Copy, Mode::Move] {
         let f = planted(mode);
-        let report = reverse_from(&f.record).unwrap();
+        let report = reverse(&f.record).unwrap();
         assert_eq!(report.restored, 0, "{mode:?}");
         assert!(!report.refused.is_empty(), "{mode:?}: {:?}", report.refused);
         assert!(
@@ -220,7 +220,7 @@ fn a_planted_record_does_not_delete_a_library_file() {
 #[test]
 fn a_real_copy_is_reversed_because_the_source_still_matches() {
     let f = real_copy();
-    let report = reverse_from(&f.record).unwrap();
+    let report = reverse(&f.record).unwrap();
     assert_eq!(report.refused, Vec::<String>::new());
     assert_eq!(report.restored, 1);
     assert!(!f.library_file.exists() && f.source_file.exists());
@@ -247,7 +247,7 @@ fn a_same_size_stranger_with_the_recorded_identity_refuses_the_delete() {
         "the identity check cannot see this, which is the point"
     );
 
-    let report = reverse_from(&f.record).unwrap();
+    let report = reverse(&f.record).unwrap();
     assert_eq!(report.restored, 0);
     assert!(!report.refused.is_empty(), "{:?}", report.refused);
     assert!(f.library_file.exists());
@@ -272,9 +272,9 @@ fn a_fifo_at_the_source_is_refused_rather_than_blocking() {
     std::fs::write(&library_file, b"a library file no run ever placed").unwrap();
 
     let record = dir.path().join("run.record");
-    let mut w = UndoWriter::create_with(&record, &source, &library, "komga", 1).unwrap();
+    let mut w = UndoWriter::create(&record, &source, &library, "komga", 1).unwrap();
     let seq = w
-        .record_pending_with(
+        .record_pending(
             Path::new("Hellboy_v01.pdf"),
             &dest_for(),
             Mechanism::Clone,
@@ -318,9 +318,9 @@ fn a_character_device_at_the_source_is_refused_rather_than_read_forever() {
     let device = Path::new("/dev/zero");
     let recorded = identity_of(device);
     let record = dir.path().join("run.record");
-    let mut w = UndoWriter::create_with(&record, Path::new("/dev"), &library, "komga", 1).unwrap();
+    let mut w = UndoWriter::create(&record, Path::new("/dev"), &library, "komga", 1).unwrap();
     let seq = w
-        .record_pending_with(
+        .record_pending(
             Path::new("zero"),
             &dest_for(),
             Mechanism::Clone,
@@ -363,9 +363,9 @@ fn a_fifo_at_the_destination_is_refused_rather_than_blocking() {
     mkfifo(&library_file);
 
     let record = dir.path().join("run.record");
-    let mut w = UndoWriter::create_with(&record, &source, &library, "komga", 1).unwrap();
+    let mut w = UndoWriter::create(&record, &source, &library, "komga", 1).unwrap();
     let seq = w
-        .record_pending_with(
+        .record_pending(
             Path::new("Hellboy_v01.pdf"),
             &dest_for(),
             Mechanism::Clone,
@@ -393,7 +393,7 @@ fn a_fifo_at_the_destination_is_refused_rather_than_blocking() {
 #[test]
 fn a_move_is_reversed_by_renaming_back_without_a_content_check() {
     let f = real_move();
-    assert_eq!(reverse_from(&f.record).unwrap().restored, 1);
+    assert_eq!(reverse(&f.record).unwrap().restored, 1);
     assert!(f.source_file.exists());
     assert!(!f.library_file.exists());
     assert_eq!(identity_of(&f.source_file), f.recorded_source_identity);

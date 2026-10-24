@@ -1,6 +1,6 @@
 use comic_renamer_core::preset::preset_by_id;
 use comic_renamer_core::types::{Mechanism, Mode, Resolved, Status, UndoError};
-use comic_renamer_core::undo::{reverse_from, summarise, UndoWriter, COLUMNS};
+use comic_renamer_core::undo::{reverse, summarise, UndoWriter, COLUMNS};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use tempfile::{tempdir, TempDir};
@@ -31,10 +31,10 @@ fn written(mv: bool, same_root: bool) -> (TempDir, PathBuf) {
 
     let rel = dest_for();
     let record = dir.path().join("run.record");
-    let mut w = UndoWriter::create_with(&record, &source, &library, "komga", 1).unwrap();
+    let mut w = UndoWriter::create(&record, &source, &library, "komga", 1).unwrap();
     let (mechanism, mode) = if mv { (Mechanism::Rename, Mode::Move) } else { (Mechanism::Clone, Mode::Copy) };
     let seq = w
-        .record_pending_with(
+        .record_pending(
             Path::new("Hellboy_v01.pdf"), &rel, mechanism, mode, &file,
             "Hellboy", Some(1), None, 3, "pdf",
         )
@@ -61,7 +61,7 @@ fn a_record_alone_rebuilds_every_destination() {
     let (dir, record) = a_written_record();
     let s = summarise(&record).unwrap();
     assert_eq!((s.preset.as_str(), s.planned, s.reversible, s.interrupted), ("komga", 1, 1, false));
-    let report = reverse_from(&record).unwrap();
+    let report = reverse(&record).unwrap();
     assert_eq!(report.refused, Vec::<String>::new());
     assert_eq!(report.restored, 1);
     assert!(!dir.path().join("library").join(dest_for()).exists());
@@ -87,7 +87,7 @@ fn a_wrong_header_is_refused_and_a_missing_one_is_not() {
 fn a_record_whose_roots_are_gone_refuses_every_row() {
     let (dir, record) = a_written_record();
     std::fs::remove_dir_all(dir.path().join("library")).unwrap();
-    let report = reverse_from(&record).unwrap();
+    let report = reverse(&record).unwrap();
     assert_eq!(report.restored, 0);
     assert!(report.refused.iter().any(|r| r.contains("library")), "{:?}", report.refused);
 }
@@ -129,7 +129,7 @@ fn an_edited_destination_is_not_a_destination_the_preset_produces() {
     let (_dir, record) = a_written_record();
     let text = std::fs::read_to_string(&record).unwrap();
     std::fs::write(&record, text.replace("Hellboy/", "Elsewhere/")).unwrap();
-    let report = reverse_from(&record).unwrap();
+    let report = reverse(&record).unwrap();
     assert_eq!(report.restored, 0);
     assert!(!report.refused.is_empty());
 }
@@ -148,14 +148,14 @@ fn nested_roots_are_refused_in_both_directions() {
     std::fs::create_dir_all(&inner).unwrap();
     let a = dir.path().join("a.record");
     std::fs::write(&a, text.replace(&format!("'{}", library.display()), &format!("'{}", inner.display()))).unwrap();
-    assert!(matches!(reverse_from(&a), Err(UndoError::RootsOverlap)));
+    assert!(matches!(reverse(&a), Err(UndoError::RootsOverlap)));
 
     // Bundle folder inside the library.
     let inner = library.join("source");
     std::fs::create_dir_all(&inner).unwrap();
     let b = dir.path().join("b.record");
     std::fs::write(&b, text.replace(&format!("'{}", source.display()), &format!("'{}", inner.display()))).unwrap();
-    assert!(matches!(reverse_from(&b), Err(UndoError::RootsOverlap)));
+    assert!(matches!(reverse(&b), Err(UndoError::RootsOverlap)));
 
     let msg = UndoError::RootsOverlap.to_string();
     assert!(msg.contains("overlap") && !msg.contains("no destination root"), "{msg}");
@@ -164,7 +164,7 @@ fn nested_roots_are_refused_in_both_directions() {
 #[test]
 fn equal_roots_name_the_overlap_not_a_missing_root() {
     let (_dir, record) = written(false, true);
-    assert!(matches!(reverse_from(&record), Err(UndoError::RootsOverlap)));
+    assert!(matches!(reverse(&record), Err(UndoError::RootsOverlap)));
 }
 
 #[test]
@@ -179,14 +179,42 @@ fn started_falls_between_two_clock_readings() {
 /// Without the extend, a row the parser dropped leaves a file in the library
 /// while the report says the undo was clean.
 #[test]
-fn an_unreadable_row_is_reported_by_reverse_from() {
+fn an_unreadable_row_is_reported_by_reverse() {
     let (_dir, record) = a_written_record();
     let mut text = std::fs::read_to_string(&record).unwrap();
     text.push_str("not-a-number,done,,,,,,,,,,,,,,\n");
     std::fs::write(&record, text).unwrap();
-    let report = reverse_from(&record).unwrap();
+    let report = reverse(&record).unwrap();
     assert_eq!(report.restored, 1);
     assert!(report.refused.iter().any(|r| r.contains("not a number")), "{:?}", report.refused);
+}
+
+/// A `pending` row short enough to parse but too short to rebuild anything
+/// from. Nothing this build writes produces one — the writer always emits all
+/// sixteen columns — but a record is a file a human can edit, which is what
+/// invariant 1 exists for, and a row nothing can reverse must be *reported*
+/// rather than quietly dropped: a dropped row leaves a file in the library
+/// while the report says the undo was clean.
+#[test]
+fn a_pending_row_too_short_to_rebuild_is_reported_not_dropped() {
+    let (_dir, record) = a_written_record();
+    let mut text = std::fs::read_to_string(&record).unwrap();
+    // Nine columns: enough for the length check and the identity, and three
+    // short of the extension the preset needs.
+    text.push_str("9,pending,move,rename,'f.pdf,'Hellboy/f.pdf,0,1,0\n");
+    std::fs::write(&record, text).unwrap();
+
+    let report = reverse(&record).unwrap();
+    assert!(
+        report
+            .refused
+            .iter()
+            .any(|r| r.contains("carries no fields")),
+        "the row was dropped in silence: {:?}",
+        report.refused
+    );
+    // And the sibling row is untouched by it.
+    assert_eq!(report.restored, 1, "{report:?}");
 }
 
 #[test]
@@ -195,8 +223,8 @@ fn an_extension_is_prefixed_like_every_other_text_field() {
     let file = dir.path().join("f.pdf");
     std::fs::write(&file, b"x").unwrap();
     let record = dir.path().join("r.record");
-    let mut w = UndoWriter::create_with(&record, dir.path(), dir.path(), "komga", 1).unwrap();
-    w.record_pending_with(Path::new("f.pdf"), Path::new("a/b"), Mechanism::Clone, Mode::Copy, &file, "S", None, None, 0, "=cmd").unwrap();
+    let mut w = UndoWriter::create(&record, dir.path(), dir.path(), "komga", 1).unwrap();
+    w.record_pending(Path::new("f.pdf"), Path::new("a/b"), Mechanism::Clone, Mode::Copy, &file, "S", None, None, 0, "=cmd").unwrap();
     let text = std::fs::read_to_string(&record).unwrap();
     assert!(text.contains(",'=cmd,"), "{text}");
 }

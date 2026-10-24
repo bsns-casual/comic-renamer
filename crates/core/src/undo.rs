@@ -60,16 +60,13 @@ pub struct UndoWriter {
 }
 
 impl UndoWriter {
-    /// `O_EXCL`: re-running a plan must not truncate the previous run's
-    /// manifest, the only record of where those files went. (The *lock* uses
-    /// `flock` instead — see `apply::Lock`.)
-    pub fn create(path: &Path, source_root: &Path, dest_root: &Path) -> io::Result<UndoWriter> {
-        Self::create_with(path, source_root, dest_root, "", 0)
-    }
-
-    /// As `create`, with the preset id and planned count a later `reverse_from`
-    /// needs. The roots row's `mtime_ns` column holds the start time.
-    pub fn create_with(
+    /// `O_EXCL`: a record's name is its own, and the open that creates it must
+    /// never land on a name some other run is already writing. (The *lock*
+    /// uses `flock` instead — see `apply::Lock` and `record::hold`.)
+    ///
+    /// Carries the preset id and the planned count a later `reverse` needs.
+    /// The roots row's `mtime_ns` column holds the start time.
+    pub fn create(
         path: &Path,
         source_root: &Path,
         dest_root: &Path,
@@ -99,23 +96,11 @@ impl UndoWriter {
     }
 
     /// About to attempt. Carries the source's identity, which is all that is
-    /// knowable before the operation.
-    pub fn record_pending(
-        &mut self,
-        source_name: &Path,
-        dest_relative: &Path,
-        mechanism: Mechanism,
-        mode: Mode,
-        source: &Path,
-    ) -> io::Result<u64> {
-        self.record_pending_with(source_name, dest_relative, mechanism, mode, source, "", None, None, 0, "")
-    }
-
-    /// `record_pending` plus the fields a preset needs to rebuild
+    /// knowable before the operation, and the fields a preset needs to rebuild
     /// `dest_relative`. Text fields take the same always-on `'` prefix as
     /// paths, so a series named `=cmd` is inert in a spreadsheet.
     #[allow(clippy::too_many_arguments)]
-    pub fn record_pending_with(
+    pub fn record_pending(
         &mut self,
         source_name: &Path,
         dest_relative: &Path,
@@ -234,8 +219,12 @@ struct Row {
     dest_relative: PathBuf,
     source_identity: Option<Identity>,
     placed_identity: Option<Identity>,
-    /// Absent on a row that does not carry them, which cannot be rebuilt.
-    fields: Option<Fields>,
+    /// Never absent: a `pending` row that carries no rebuildable fields is
+    /// reported as unreadable at parse time rather than becoming a row the
+    /// reverse has to refuse later. The two reach the user identically — both
+    /// land in `UndoReport::refused` — and only one of them needs a branch
+    /// nothing this build can write will ever take.
+    fields: Fields,
 }
 
 #[derive(Clone, Debug)]
@@ -272,53 +261,6 @@ impl Row {
     }
 }
 
-/// Reverses a run. Takes the **plan**, deriving the manifest beside it, so it
-/// holds the same lock `apply` does and the plan's roots anchor every path
-/// the manifest names (D38).
-///
-/// Every row is independent, including rows that fail to parse: aborting the
-/// manifest on the first problem left every earlier successful row stranded,
-/// and re-running hit the same row forever.
-/// `apply::undo` is the entry point: it takes the plan, holds the lock,
-/// canonicalises the roots and recomputes the destinations. This is the
-/// manifest-level operation it calls.
-pub fn reverse(
-    manifest: &Path,
-    source_root: &Path,
-    dest_root: &Path,
-    recomputed: &[PathBuf],
-) -> Result<UndoReport, UndoError> {
-    let Manifest {
-        source_root: recorded_source,
-        dest_root: recorded_dest,
-        rows,
-        unreadable,
-        ..
-    } = read_manifest(manifest)?;
-
-    // The manifest's own roots are a cross-check, not the anchor. Exact
-    // identity buys nothing if whoever edits the manifest also supplies the
-    // roots those identities are checked against.
-    if recorded_source != source_root || recorded_dest != dest_root {
-        return Err(UndoError::NoRoot);
-    }
-
-    let mut report = UndoReport::default();
-    // Every row the parser could not read is a refusal, not a silence. A
-    // dropped row means a file stays in the library while the report says
-    // the undo was clean.
-    report.refused.extend(unreadable);
-
-    for row in rows.into_iter().rev() {
-        match reverse_one(&row, source_root, dest_root, recomputed) {
-            Ok(true) => report.restored += 1,
-            Ok(false) => report.skipped += 1,
-            Err(why) => report.refused.push(format!("row {}: {why}", row.seq)),
-        }
-    }
-    Ok(report)
-}
-
 /// Reads a record's own summary: no plan, no filesystem beyond the record.
 pub fn summarise(manifest: &Path) -> Result<Summary, UndoError> {
     let m = read_manifest(manifest)?;
@@ -353,7 +295,14 @@ pub fn summarise(manifest: &Path) -> Result<Summary, UndoError> {
 /// record; every destination is recomputed through the preset and must equal
 /// the one the row names, so an edited record cannot name an arbitrary path
 /// (invariant 2).
-pub fn reverse_from(manifest: &Path) -> Result<UndoReport, UndoError> {
+///
+/// Every row is independent, including rows that fail to parse: aborting on the
+/// first problem left every earlier successful row stranded, and re-running hit
+/// the same row forever.
+///
+/// `apply::reverse_run` is the entry point: it holds the library lock and
+/// deletes the record once nothing was refused.
+pub fn reverse(manifest: &Path) -> Result<UndoReport, UndoError> {
     let m = read_manifest(manifest)?;
     let preset = preset_by_id(&m.preset).ok_or_else(|| UndoError::Parse {
         line: 0,
@@ -388,10 +337,7 @@ pub fn reverse_from(manifest: &Path) -> Result<UndoReport, UndoError> {
     }
 
     for row in m.rows.into_iter().rev() {
-        let Some(f) = &row.fields else {
-            report.refused.push(format!("row {}: the record holds no fields to rebuild it", row.seq));
-            continue;
-        };
+        let f = &row.fields;
         let resolved = Resolved {
             series: f.series.clone(),
             volume: f.volume,
@@ -774,6 +720,15 @@ fn read_manifest(manifest: &Path) -> Result<Manifest, UndoError> {
                     ));
                     continue;
                 };
+                // A row with nothing to rebuild its destination from cannot be
+                // reversed at all, so it is reported here rather than carried
+                // as a row whose every later check has to allow for it.
+                let Some(fields) = pending_fields(columns) else {
+                    unreadable.push(format!(
+                        "line {line}: row {seq} carries no fields to rebuild its destination"
+                    ));
+                    continue;
+                };
                 rows.push(Row {
                     seq,
                     status: Status::Pending,
@@ -783,7 +738,7 @@ fn read_manifest(manifest: &Path) -> Result<Manifest, UndoError> {
                     dest_relative: PathBuf::from(unprefix(&columns[5])),
                     source_identity: identity,
                     placed_identity: None,
-                    fields: pending_fields(columns),
+                    fields,
                 });
             }
             // Last status wins per seq; a status row with no pending is

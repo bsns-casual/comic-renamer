@@ -13,7 +13,7 @@ use tempfile::TempDir;
 /// enough that a broken one is a test failure rather than a dead CI job.
 pub const DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// `reverse_from` on a worker, with a deadline.
+/// `undo::reverse` on a worker, with a deadline.
 ///
 /// Every caller plants something at a path a record names that must not be
 /// opened and read: a FIFO, where a blocking `open` waits for a writer that
@@ -34,11 +34,11 @@ pub fn reverse_before(
     let record = record.to_path_buf();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(comic_renamer_core::undo::reverse_from(&record));
+        let _ = tx.send(comic_renamer_core::undo::reverse(&record));
     });
     rx.recv_timeout(deadline)
         .expect(
-            "reverse_from never returned: the open or the read of a non-regular path \
+            "undo::reverse never returned: the open or the read of a non-regular path \
              was not refused, so either O_NONBLOCK or refuse_non_regular has regressed",
         )
         .unwrap()

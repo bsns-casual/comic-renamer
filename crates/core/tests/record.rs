@@ -88,7 +88,7 @@ fn at(secs: u64) -> SystemTime {
 
 fn write_record(dir: &Path, secs: u64, source_root: &Path, dest_root: &Path) -> PathBuf {
     let path = dir.join(basename(at(secs)));
-    UndoWriter::create_with(&path, source_root, dest_root, "komga", 1).unwrap();
+    UndoWriter::create(&path, source_root, dest_root, "komga", 1).unwrap();
     path
 }
 

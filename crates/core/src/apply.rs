@@ -1,9 +1,12 @@
 //! Recomputes destinations from metadata; never trusts a path string found in
 //! a plan file (invariant 2, D14).
 //!
-//! Task 11 is the pre-flight half. **Nothing here writes to either tree** —
-//! the only file it creates is its own lock, beside the plan. Execution and
-//! the undo manifest are Task 12.
+//! The plan arrives as data the caller has already read, and the library lock
+//! arrives already held. Both were once this module's own business, and both
+//! moved out for the same reason: a function that re-reads the plan it was
+//! asked about can run something other than what the user was shown, and a
+//! function that takes its own lock cannot be called twice in one process
+//! without deadlocking against itself.
 
 use crate::fsops::{
     cstring,
@@ -42,51 +45,49 @@ const CLOUD_MARKERS: [&str; 6] = [
 /// refuse a move off a cloud-sync root without an override (D23). Rows whose
 /// status is not `Ready` are never executed.
 ///
-/// At Task 11 `executed` counts the rows that **passed** pre-flight; nothing
-/// is written, and every test wraps both trees in a guard that proves it.
-/// Task 12 makes the count literal.
+/// The lock the caller holds is the one `reverse_run` holds: one library, one
+/// lock, so a run and a reverse of that library cannot overlap. `records` is
+/// the directory the record is written into, validated before the first row.
+///
+/// An edited plan is revalidated, not rejected (§6.9). Everything here
+/// recomputes from metadata anyway, so the plan's checksum is a report about
+/// what a human touched, not a gate — which is why the caller reads the plan
+/// and this takes what it read.
 // shortcut: per-row re-stat is a pre-flight batch, so a row executing minutes
 // later on a live-syncing tree uses a stale stat; re-stat per operation if it bites
 pub fn apply(
-    plan: &Path,
+    lock: &Lock,
+    header: &PlanHeader,
+    rows: &[PlanRow],
+    records: &Path,
     allow_cloud_move: bool,
     progress: &mut dyn FnMut(Progress),
 ) -> Result<ApplyResult, ApplyError> {
-    apply_inner(plan, allow_cloud_move, false, progress)
+    apply_inner(Some((lock, records)), header, rows, allow_cloud_move, progress)
 }
 
 /// As `apply`, but stops before executing. Everything up to and including the
-/// collision check runs; nothing is written and no manifest is created.
+/// collision check runs; nothing is written and no record is created, so it
+/// needs neither the lock nor the record store.
 pub fn check(
-    plan: &Path,
+    header: &PlanHeader,
+    rows: &[PlanRow],
     allow_cloud_move: bool,
     progress: &mut dyn FnMut(Progress),
 ) -> Result<ApplyResult, ApplyError> {
-    apply_inner(plan, allow_cloud_move, true, progress)
+    apply_inner(None, header, rows, allow_cloud_move, progress)
 }
 
+/// `run` is `None` for `check` and `Some` for `apply`. Carrying the lock and
+/// the record store together is what makes "this call may write" one condition
+/// rather than a flag beside two arguments that only matter when it is set.
 fn apply_inner(
-    plan: &Path,
+    run: Option<(&Lock, &Path)>,
+    header: &PlanHeader,
+    rows: &[PlanRow],
     allow_cloud_move: bool,
-    dry_run: bool,
     progress: &mut dyn FnMut(Progress),
 ) -> Result<ApplyResult, ApplyError> {
-    // The lock comes first: two runs over one plan is the one failure a later
-    // check cannot undo. `undo` takes the same lock (Task 12).
-    let _lock = Lock::acquire(plan)?;
-
-    // An edited plan is revalidated, not rejected (§6.9). Everything below
-    // recomputes from metadata anyway, so the checksum is a report about what
-    // a human touched, not a gate.
-    let (header, rows, edited) = crate::plan::read_allowing_edits(plan)?;
-    if edited {
-        progress(Progress {
-            done: 0,
-            total: rows.len() as u64,
-            current: "plan has been edited since the scan; revalidating".into(),
-        });
-    }
-
     let preset = preset_by_id(&header.preset)
         .ok_or_else(|| ApplyError::UnknownPreset(header.preset.clone()))?;
 
@@ -99,10 +100,14 @@ fn apply_inner(
     if source_root.starts_with(&dest_root) || dest_root.starts_with(&source_root) {
         return Err(ApplyError::RootsOverlap);
     }
+    // Canonical from here down, and that matters past containment: the record
+    // stores these roots and `record::supersede` compares them by exact
+    // equality, so a run reached through a symlinked library must write the
+    // same spelling the next run will compare against.
     let header = PlanHeader {
         source_root: source_root.clone(),
         dest_root,
-        ..header
+        ..header.clone()
     };
 
     if header.mode == Mode::Move && !allow_cloud_move && is_cloud_synced(&header.source_root) {
@@ -126,7 +131,7 @@ fn apply_inner(
     // A destination that is already occupied is a first-class collision and
     // the row is refused — never overwritten, never auto-suffixed (§6.10).
     // Row-level, so it does not abort the run.
-    let collisions = find_collisions(&rows, &header.dest_root, preset.as_ref());
+    let collisions = find_collisions(rows, &header.dest_root, preset.as_ref());
     let colliding: Vec<&str> = collisions
         .iter()
         .flat_map(|c| c.row_ids.iter().map(String::as_str))
@@ -139,19 +144,28 @@ fn apply_inner(
         .collect();
     let skipped = rows.len() - runnable.len();
 
-    if dry_run {
+    // `None` is `check`: everything above has run, and nothing below it
+    // writes. The lock and the record store are only bound when they are
+    // about to be used.
+    let Some((_lock, records)) = run else {
         return Ok(ApplyResult {
             executed: runnable.len(),
             skipped,
             failed: 0,
+            record: None,
         });
-    }
+    };
+
+    // Before the first row, not from it: a run that cannot be recorded does
+    // not happen, and the refusal has to arrive while that is still true.
+    verify_records(records)?;
 
     // Created lazily, on the first row that actually executes. Creating it
     // up front meant a run that refused every row still wrote a header-only
-    // manifest, and `O_EXCL` then rejected the plan forever — so fixing the
-    // collision and re-running was impossible.
-    let mut undo: Option<UndoWriter> = None;
+    // record — and the sweep below would then have taken it as this run's
+    // own and deleted the previous run's, which is the only way back from a
+    // run that did place files.
+    let mut record: Option<Record> = None;
 
     let total = runnable.len() as u64;
     let mut executed = 0usize;
@@ -161,20 +175,14 @@ fn apply_inner(
             total,
             current: row.source.to_string_lossy().into_owned(),
         });
-        let writer = match &mut undo {
-            Some(writer) => writer,
+        let open = match &mut record {
+            Some(open) => open,
             None => {
-                // `O_EXCL`: re-running a plan must not truncate the previous
-                // run's manifest, the only record of where those files went.
-                undo = Some(UndoWriter::create(
-                    &undo_path(plan),
-                    &header.source_root,
-                    &header.dest_root,
-                )?);
-                undo.as_mut().expect("just created")
+                record = Some(Record::create(records, &header, total as u32)?);
+                record.as_mut().expect("just created")
             }
         };
-        execute(row, &header, preset.as_ref(), writer, progress)?;
+        execute(row, &header, preset.as_ref(), &mut open.writer, progress)?;
         executed += 1;
     }
     progress(Progress {
@@ -183,11 +191,86 @@ fn apply_inner(
         current: String::new(),
     });
 
+    // Only when a record was created, and under the lock the caller is
+    // holding. Both halves are load-bearing. `supersede` deletes every record
+    // for this root pair *other than* the one named, so calling it after a run
+    // that recorded nothing names nothing and takes the lot — run `apply`
+    // twice, collide on every row the second time, and 400 placed files stop
+    // being reversible. The lock is what makes `is_live` then `remove_file`
+    // something other than check-then-act on exactly that file.
+    let written = match &record {
+        Some(open) => {
+            crate::record::supersede(
+                records,
+                &open.path,
+                &header.source_root,
+                &header.dest_root,
+            )
+            .map_err(|e| ApplyError::Records(format!("{}: {e}", records.display())))?;
+            Some(open.path.clone())
+        }
+        None => None,
+    };
+
     Ok(ApplyResult {
         executed,
         skipped,
         failed: 0,
+        record: written,
     })
+}
+
+/// This run's record: the writer, its path, and the `flock` that says a run
+/// still owns it. Dropping it closes both, which is how a crashed run leaves
+/// a record that reads as abandoned rather than live.
+struct Record {
+    writer: UndoWriter,
+    path: PathBuf,
+    _held: std::fs::File,
+}
+
+impl Record {
+    fn create(records: &Path, header: &PlanHeader, planned: u32) -> Result<Record, ApplyError> {
+        let path = records.join(crate::record::basename(std::time::SystemTime::now()));
+        let writer = UndoWriter::create(
+            &path,
+            &header.source_root,
+            &header.dest_root,
+            &header.preset,
+            planned,
+        )?;
+        // After the `O_EXCL` create, so the name is already this run's. The
+        // hold is a second descriptor on it: the writer's own is not flocked,
+        // and `record::is_live` asks about the flock.
+        let held = crate::record::hold(&path)
+            .map_err(|e| ApplyError::Records(format!("{}: {e}", path.display())))?;
+        Ok(Record {
+            writer,
+            path,
+            _held: held,
+        })
+    }
+}
+
+/// Review Focus 4. `ensure_root` answers "is there a directory here", which a
+/// read-only one satisfies; the probe answers "can this run write into it",
+/// which is the question. Without the probe the answer arrives from
+/// `Record::create` instead — still before any row executes, but as a bare
+/// `Io` error about a path the user never named.
+fn verify_records(dir: &Path) -> Result<(), ApplyError> {
+    let fail = |e: std::io::Error| ApplyError::Records(format!("{}: {e}", dir.display()));
+    crate::fsops::ensure_root(dir).map_err(fail)?;
+    // Named by pid, so two libraries sharing one store do not probe over each
+    // other, and `record::list` ignores it: it is not a `.record`.
+    let probe = dir.join(format!(".comic-renamer.{}.probe", std::process::id()));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&probe)
+        .map_err(fail)?;
+    std::fs::remove_file(&probe).map_err(fail)?;
+    Ok(())
 }
 
 /// One row. The ordering is the whole point: the destination is in place and
@@ -210,14 +293,23 @@ fn execute(
     let source_name = Path::new(row.source.file_name().unwrap_or_default());
 
     // Pending lands and is fsynced before the operation is attempted. A
-    // manifest entry still sitting in a buffer when the power goes is a file
+    // record entry still sitting in a buffer when the power goes is a file
     // nobody can find again.
+    //
+    // The fields travel with the row because the record reverses without the
+    // plan: `undo::reverse` rebuilds this same `relative` from them and
+    // refuses the row unless the preset produces what the row names.
     let seq = undo.record_pending(
         source_name,
         relative,
         row.mechanism,
         header.mode,
         &row.source,
+        &row.series,
+        row.volume,
+        row.subtitle.as_deref(),
+        row.run,
+        &row.extension,
     )?;
 
     // ensure_parent after record_pending, so a created series directory is
@@ -342,62 +434,39 @@ fn placed(
     Ok(())
 }
 
-/// Reverses a run. Takes the **plan**, not the manifest (D38): the plan's
-/// roots anchor every path the manifest names, the preset decides which
-/// destinations are recognisable, and both share one lock with `apply`.
+/// Reverses one recorded run. Takes the record, not the plan: the record
+/// carries its own roots, preset and per-row fields, so a plan that was edited
+/// or deleted since the run cannot change what gets reversed, and a plan
+/// handed back in cannot name a destination the run never touched.
 ///
-/// The manifest remains the record of what actually happened — only the
-/// anchor moved. Undoing from intent would attempt to reverse operations that
-/// never ran, which §6.13's original reasoning rightly refused.
-pub fn undo(plan: &Path) -> Result<UndoReport, ApplyError> {
-    let _lock = Lock::acquire(plan)?;
-    let (header, rows, _edited) = crate::plan::read_allowing_edits(plan)?;
-    let preset = preset_by_id(&header.preset)
-        .ok_or_else(|| ApplyError::UnknownPreset(header.preset.clone()))?;
-
-    let source_root = canonical_dir(&header.source_root)?;
-    let dest_root = canonical_dir(&header.dest_root)?;
-    if source_root.starts_with(&dest_root) || dest_root.starts_with(&source_root) {
-        return Err(ApplyError::RootsOverlap);
-    }
-
-    // Invariant 9: a row is only recognised if the preset still produces its
-    // destination, which is what stops a hand-written manifest naming an
-    // arbitrary relative path.
-    let recomputed: Vec<PathBuf> = rows
-        .iter()
-        .map(|row| preset.destination(&row.resolved(), &row.extension))
-        .collect();
-
-    let manifest = undo_path(plan);
-    // Idempotent, which Task 12 requires: a manifest that is absent — never
-    // written, or renamed aside by a previous complete reverse — means there
-    // is nothing to undo, not an error.
-    if !manifest.exists() {
+/// `&Lock` is the obligation, not an input: the caller holds the library lock
+/// for as long as this runs, which is the same lock `apply` runs under.
+pub fn reverse_run(lock: &Lock, record: &Path) -> Result<UndoReport, ApplyError> {
+    let _ = lock;
+    // Absent means there is nothing to undo, not an error: never written, or
+    // already reversed and deleted. `undo` is run twice more often than once.
+    if !record.exists() {
         return Ok(UndoReport::default());
     }
-    let report = crate::undo::reverse(&manifest, &source_root, &dest_root, &recomputed)?;
+    let report = crate::undo::reverse(record)?;
 
-    // A fully reversed manifest is renamed aside: the audit trail survives
-    // and the plan becomes runnable again. Left in place, a successful undo
-    // meant O_EXCL refused that plan forever.
+    // Deleted, not renamed aside. The rename existed because the record was
+    // named after the plan and `O_EXCL` then refused that plan forever; a
+    // record the tool names itself has no such tie, and §3's lifecycle table
+    // says a fully reversed record is gone.
+    //
     // Gated on refusals only. `skipped` counts rows that were already
-    // reversed — the normal case on a second pass and after a pruned parent
-    // — so requiring zero of them left the manifest in place and `O_EXCL`
-    // refused the plan forever.
+    // reversed — the normal case on a second pass — so requiring zero of
+    // those would keep every resumed undo's record forever.
+    //
+    // The failure propagates rather than being swallowed: a record that
+    // outlives its reverse is the one the next `undo` picks up, and it would
+    // restore nothing every time while saying so in a report nobody reads as
+    // a problem.
     if report.refused.is_empty() {
-        let mut name = manifest.file_name().unwrap_or_default().to_os_string();
-        name.push(".reversed");
-        let _ = std::fs::rename(&manifest, manifest.with_file_name(name));
+        std::fs::remove_file(record)?;
     }
     Ok(report)
-}
-
-/// Beside the plan, like the lock.
-pub fn undo_path(plan: &Path) -> PathBuf {
-    let mut name = plan.file_name().unwrap_or_default().to_os_string();
-    name.push(".undo.csv");
-    plan.with_file_name(name)
 }
 
 /// §6.9 requires no absolute paths outside the chosen roots, and §6.11 says
@@ -606,37 +675,45 @@ fn is_cloud_synced(path: &Path) -> bool {
     })
 }
 
-/// An advisory `flock(2)` on a file beside the plan.
+/// An advisory `flock(2)` on one file per library, inside the record store.
+///
+/// **Per library, not per plan.** Two plans over one library are two runs that
+/// must not interleave, and a plan is a file a user can copy; the library is
+/// the thing being changed, so it is the thing that gets the lock.
 ///
 /// **`flock`, not `O_EXCL`.** The kernel releases an `flock` when its owner
 /// dies; an `O_EXCL` file survives a `SIGKILL` and has to be deleted by hand
 /// — and a crash is exactly when `undo` is needed, so the stale lock blocked
-/// the only recovery path. `O_EXCL` is still right for the *manifest*, where
-/// its job is refusing to truncate a previous run's record.
+/// the only recovery path. `O_EXCL` is still right for a *record*, where its
+/// job is refusing to land on a name another run already owns.
 ///
-/// `undo` takes this same lock, which Task 11 always required and which two
-/// separate lock files silently defeated.
+/// Held by the caller, so one process can run a pre-flight, a disclosure, a
+/// prompt and then `apply` and `reverse_run` without deadlocking against
+/// itself — which an internal acquire per call could not.
 pub struct Lock {
     /// Held open for the lifetime of the lock: closing it releases the flock.
     _file: std::fs::File,
 }
 
 impl Lock {
-    pub fn acquire(plan: &Path) -> Result<Lock, ApplyError> {
+    pub fn library(records: &Path, dest_root: &Path) -> Result<Lock, ApplyError> {
+        let fail = |e: std::io::Error| ApplyError::Records(format!("{}: {e}", records.display()));
+        crate::fsops::ensure_root(records).map_err(fail)?;
+        // Canonicalises `dest_root` and hashes it, so every spelling of one
+        // library is one lock and a long or odd root is still one filename.
+        let name = crate::record::lock_name(dest_root)
+            .map_err(|e| ApplyError::Records(format!("{}: {e}", dest_root.display())))?;
         let file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(false)
-            .open(lock_path(plan))?;
+            .open(records.join(name))
+            .map_err(fail)?;
+        // Task 1 extracted this so the `unsafe` block exists exactly once;
+        // `record::hold` is its other caller.
         if !crate::fsops::flock_nb(&file)? {
             return Err(ApplyError::Locked);
         }
         Ok(Lock { _file: file })
     }
-}
-
-pub fn lock_path(plan: &Path) -> PathBuf {
-    let mut name = plan.file_name().unwrap_or_default().to_os_string();
-    name.push(".lock");
-    plan.with_file_name(name)
 }

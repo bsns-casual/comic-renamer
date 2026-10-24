@@ -1,0 +1,555 @@
+//! Task 5. The record store: where a run's record goes, what happens to the
+//! records that came before it, and what the library lock covers.
+//!
+//! These are the tests the old per-plan manifest could not have: it was named
+//! after the plan, so "which record is this run's" and "what does a second run
+//! do to the first one's" had no answer to get wrong.
+
+mod common;
+
+use comic_renamer_core::apply::{apply, reverse_run, Lock};
+use comic_renamer_core::mapping::Mappings;
+use comic_renamer_core::types::{ApplyError, Mode, PlanHeader, PlanRow, ScanOpts};
+use comic_renamer_core::{plan, scan};
+use common::{mappings, TreeGuard};
+use std::path::{Path, PathBuf};
+use tempfile::{tempdir, TempDir};
+
+fn gcd() -> Mappings {
+    mappings(&[
+        ("mazebook", "Mazebook", None, Some(5)),
+        ("birdking_vol1", "Birdking", Some(1), Some(3)),
+    ])
+}
+
+/// One source tree, one library, one record store, and the plan over them
+/// already read into memory — which is how `apply` takes it now.
+struct Fixture {
+    dir: TempDir,
+    source_root: PathBuf,
+    dest_root: PathBuf,
+    records: PathBuf,
+    header: PlanHeader,
+    rows: Vec<PlanRow>,
+}
+
+fn fixture() -> Fixture {
+    build(&["mazebook.pdf"], Mode::Move).0
+}
+
+fn build(names: &[&str], mode: Mode) -> (Fixture, Vec<PlanRow>) {
+    let dir = tempdir().unwrap();
+    let source_root = dir.path().join("bundle");
+    let dest_root = dir.path().join("library");
+    let records = dir.path().join("runs");
+    for path in [&source_root, &dest_root, &records] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    for name in names {
+        std::fs::write(source_root.join(name), format!("contents of {name}")).unwrap();
+    }
+    let opts = ScanOpts {
+        source_root: source_root.clone(),
+        dest_root: dest_root.clone(),
+        preset: "komga".into(),
+        mode: Some(mode),
+        lang: "en".into(),
+    };
+    let comic_renamer_core::scan::ScanOutcome { header, rows, .. } =
+        scan::scan(&opts, &gcd(), &mut |_| {}).unwrap();
+    assert_eq!(rows.len(), names.len(), "a name did not resolve: {rows:?}");
+    let all = rows.clone();
+    (
+        Fixture {
+            dir,
+            source_root,
+            dest_root,
+            records,
+            header,
+            rows,
+        },
+        all,
+    )
+}
+
+/// Two plans over one pair of roots: the rows of one scan, split in two. A
+/// plan per file, both naming the same library, which is what `supersede`
+/// keys on.
+struct TwoPlans {
+    _dir: TempDir,
+    dest_root: PathBuf,
+    records: PathBuf,
+    header_a: PlanHeader,
+    rows_a: Vec<PlanRow>,
+    header_b: PlanHeader,
+    rows_b: Vec<PlanRow>,
+}
+
+fn two_plans_one_root_pair() -> TwoPlans {
+    let (f, all) = build(&["mazebook.pdf", "birdking_vol1.pdf"], Mode::Move);
+    let mut rows = all;
+    let second = rows.pop().unwrap();
+    let first = rows.pop().unwrap();
+    TwoPlans {
+        dest_root: f.dest_root.clone(),
+        records: f.records.clone(),
+        header_a: f.header.clone(),
+        rows_a: vec![first],
+        header_b: f.header.clone(),
+        rows_b: vec![second],
+        _dir: f.dir,
+    }
+}
+
+fn run(f: &Fixture, lock: &Lock) -> Result<comic_renamer_core::types::ApplyResult, ApplyError> {
+    apply(lock, &f.header, &f.rows, &f.records, false, &mut |_| {})
+}
+
+// ---------------------------------------------------------------------------
+// A run that cannot be recorded does not happen
+// ---------------------------------------------------------------------------
+
+/// Review Focus 4.
+#[test]
+fn apply_refuses_when_the_records_directory_is_not_a_directory() {
+    let f = fixture();
+    let blocked = f.dir.path().join("blocked");
+    std::fs::write(&blocked, "not a directory").unwrap();
+    let _guard = TreeGuard::new(&[&f.source_root, &f.dest_root]);
+    let lock = Lock::library(&f.records, &f.dest_root).unwrap();
+    let err = apply(&lock, &f.header, &f.rows, &blocked, false, &mut |_| {}).unwrap_err();
+    assert!(matches!(err, ApplyError::Records(_)), "{err:?}");
+}
+
+/// Review Focus 4's other half, and the one the probe exists for: a directory
+/// that is there and cannot be written into satisfies every existence check.
+#[test]
+fn apply_refuses_when_the_records_directory_cannot_be_written() {
+    let f = fixture();
+    let readonly = f.dir.path().join("readonly");
+    std::fs::create_dir(&readonly).unwrap();
+    let mut locked = std::fs::metadata(&readonly).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut locked, 0o500);
+    std::fs::set_permissions(&readonly, locked).unwrap();
+
+    let lock = Lock::library(&f.records, &f.dest_root).unwrap();
+    let outcome = {
+        let _guard = TreeGuard::new(&[&f.source_root, &f.dest_root]);
+        apply(&lock, &f.header, &f.rows, &readonly, false, &mut |_| {})
+    };
+    // Restored before the assertion, so a failure does not leave a directory
+    // `TempDir` cannot remove.
+    let mut open = std::fs::metadata(&readonly).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut open, 0o700);
+    std::fs::set_permissions(&readonly, open).unwrap();
+
+    let err = outcome.unwrap_err();
+    assert!(matches!(err, ApplyError::Records(_)), "{err:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Retention
+// ---------------------------------------------------------------------------
+
+/// The HIGH finding that drove this plan's rewrite: running one command twice
+/// must not make the first run unreversible.
+///
+/// Copy mode, because that is the door this reaches. A second *move* refuses
+/// at the pre-flight — its source is gone — and never gets as far as the
+/// collision check; the test below covers that one. A copy keeps its
+/// original, so the second run passes the pre-flight, collides on every row,
+/// places nothing, and arrives at the sweep with no record of its own.
+#[test]
+fn a_second_run_that_places_nothing_keeps_the_first_runs_record() {
+    let f = build(&["mazebook.pdf"], Mode::Copy).0;
+    let lock = Lock::library(&f.records, &f.dest_root).unwrap();
+    let first = run(&f, &lock).unwrap();
+    let record = first
+        .record
+        .clone()
+        .expect("a run that placed rows wrote a record");
+    let before = std::fs::read_to_string(&record).unwrap();
+
+    // Every row now collides with what the first run placed.
+    let again = run(&f, &lock).unwrap();
+    assert_eq!(
+        (again.executed, again.skipped),
+        (0, 1),
+        "the second run placed something: {again:?}"
+    );
+    assert_eq!(
+        again.record, None,
+        "every row collided, so nothing was recorded"
+    );
+    assert!(record.exists(), "and the first run is still reversible");
+    assert_eq!(
+        std::fs::read_to_string(&record).unwrap(),
+        before,
+        "the only record of where the first run's files went was rewritten"
+    );
+}
+
+/// The other door: a run refused before it reaches a single row must not take
+/// the previous run's record either. A second move is the common way to get
+/// here — the sources it names are in the library now.
+#[test]
+fn a_run_refused_at_the_pre_flight_keeps_the_previous_runs_record() {
+    let f = fixture();
+    let lock = Lock::library(&f.records, &f.dest_root).unwrap();
+    let record = run(&f, &lock).unwrap().record.unwrap();
+
+    let err = run(&f, &lock).unwrap_err();
+    assert!(matches!(err, ApplyError::SourceChanged(_)), "{err:?}");
+    assert!(record.exists(), "the first run stopped being reversible");
+}
+
+#[test]
+fn a_second_real_run_supersedes_the_first() {
+    let f = two_plans_one_root_pair();
+    let lock = Lock::library(&f.records, &f.dest_root).unwrap();
+    let a = apply(&lock, &f.header_a, &f.rows_a, &f.records, false, &mut |_| {}).unwrap();
+    let b = apply(&lock, &f.header_b, &f.rows_b, &f.records, false, &mut |_| {}).unwrap();
+    let (a, b) = (a.record.unwrap(), b.record.unwrap());
+    assert_ne!(a, b, "two runs wrote one record");
+    assert!(!a.exists(), "the superseded record survived");
+    assert!(b.exists(), "the run's own record was swept");
+}
+
+/// A record for another library is not this run's to delete, whatever order
+/// the two runs happened in.
+#[test]
+fn a_run_does_not_supersede_another_librarys_record() {
+    let mine = fixture();
+    let theirs = fixture();
+    // One store, two libraries — which is what the real store is.
+    let records = mine.records.clone();
+
+    let first = {
+        let lock = Lock::library(&records, &theirs.dest_root).unwrap();
+        apply(
+            &lock,
+            &theirs.header,
+            &theirs.rows,
+            &records,
+            false,
+            &mut |_| {},
+        )
+        .unwrap()
+        .record
+        .unwrap()
+    };
+    let lock = Lock::library(&records, &mine.dest_root).unwrap();
+    let second = apply(&lock, &mine.header, &mine.rows, &records, false, &mut |_| {})
+        .unwrap()
+        .record
+        .unwrap();
+
+    assert!(first.exists(), "another library's record was deleted");
+    assert!(second.exists());
+}
+
+/// `record::supersede` compares roots by exact `PathBuf` equality, so the
+/// record and the call site have to agree on one spelling — and agreeing on
+/// the canonical one is what makes two runs of the same library match when a
+/// plan reaches it through a symlink.
+///
+/// macOS puts a `TempDir` under `/var`, which is itself a symlink, so this is
+/// not a contrived path: it is the shape every other test here already has.
+#[test]
+fn a_library_reached_through_a_symlink_supersedes_its_own_earlier_run() {
+    let f = two_plans_one_root_pair();
+    let aka = f.dest_root.with_file_name("library-link");
+    std::os::unix::fs::symlink(&f.dest_root, &aka).unwrap();
+
+    // Plan A names the real directory, plan B the symlink. One library.
+    let header_b = PlanHeader {
+        dest_root: aka.clone(),
+        ..f.header_b.clone()
+    };
+
+    let lock = Lock::library(&f.records, &f.dest_root).unwrap();
+    let a = apply(&lock, &f.header_a, &f.rows_a, &f.records, false, &mut |_| {}).unwrap();
+    let b = apply(&lock, &header_b, &f.rows_b, &f.records, false, &mut |_| {}).unwrap();
+
+    let (a, b) = (a.record.unwrap(), b.record.unwrap());
+    assert!(
+        !a.exists(),
+        "the two runs did not recognise one library, so a run's predecessor \
+         was left behind and `undo` can now reverse either"
+    );
+    // And the stored spelling is the canonical one, not the symlink the plan
+    // named: that is what the comparison above depends on.
+    let summary = comic_renamer_core::undo::summarise(&b).unwrap();
+    assert_eq!(
+        summary.dest_root,
+        std::fs::canonicalize(&aka).unwrap(),
+        "the record stored the path the plan named rather than the library"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The library lock
+// ---------------------------------------------------------------------------
+
+/// The successor to `apply_and_undo_share_one_lock`, which pinned the per-plan
+/// lock this task deleted.
+#[test]
+fn apply_and_reverse_share_one_library_lock() {
+    let f = fixture();
+    let held = Lock::library(&f.records, &f.dest_root).unwrap();
+    assert!(
+        matches!(
+            Lock::library(&f.records, &f.dest_root),
+            Err(ApplyError::Locked)
+        ),
+        "a second run took the lock while the first held it"
+    );
+    drop(held);
+
+    let lock = Lock::library(&f.records, &f.dest_root).unwrap();
+    let r = run(&f, &lock).unwrap();
+    assert_eq!(r.executed, 1);
+    assert_eq!(
+        reverse_run(&lock, &r.record.unwrap()).unwrap().restored,
+        1,
+        "a reverse under the same held lock deadlocked or refused"
+    );
+    assert!(f.source_root.join("mazebook.pdf").exists());
+}
+
+/// Two libraries are two locks: one run must not stop another library's.
+#[test]
+fn two_libraries_in_one_store_do_not_block_each_other() {
+    let mine = fixture();
+    let theirs = fixture();
+    let _held = Lock::library(&mine.records, &mine.dest_root).unwrap();
+    Lock::library(&mine.records, &theirs.dest_root).expect("a different library was blocked");
+}
+
+#[test]
+fn a_lock_file_left_by_a_killed_run_does_not_block() {
+    // flock, not O_EXCL: the kernel releases the lock when its owner dies. An
+    // O_EXCL lock file survived a SIGKILL and had to be deleted by hand — and
+    // a crash is exactly when undo is needed, so the stale lock blocked the
+    // one recovery path.
+    let f = fixture();
+    let name = comic_renamer_core::record::lock_name(&f.dest_root).unwrap();
+    std::fs::write(f.records.join(name), b"leftover from a killed run").unwrap();
+    let lock = Lock::library(&f.records, &f.dest_root).unwrap();
+    assert_eq!(run(&f, &lock).unwrap().executed, 1);
+}
+
+#[test]
+fn the_lock_is_released_when_it_is_dropped() {
+    let f = fixture();
+    let first = Lock::library(&f.records, &f.dest_root).unwrap();
+    drop(first);
+    // The file itself persists, which is what makes a killed run recoverable;
+    // a second acquire is what proves the lock did not.
+    Lock::library(&f.records, &f.dest_root).expect("the lock outlived its holder");
+}
+
+// ---------------------------------------------------------------------------
+// The record's lifecycle
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_reversed_record_is_deleted_not_renamed_aside() {
+    let f = fixture();
+    let lock = Lock::library(&f.records, &f.dest_root).unwrap();
+    let r = run(&f, &lock).unwrap();
+    let record = r.record.unwrap();
+    assert!(reverse_run(&lock, &record).unwrap().refused.is_empty());
+    assert!(!record.exists(), "a reversed record was kept");
+    let aside = record.with_extension("record.reversed");
+    assert!(!aside.exists(), "a reversed record was renamed aside");
+    // Nothing of it left under any name: the store is empty again.
+    assert!(
+        comic_renamer_core::record::list(&f.records)
+            .unwrap()
+            .is_empty(),
+        "{:?}",
+        comic_renamer_core::record::list(&f.records).unwrap()
+    );
+}
+
+/// A reverse that refused something keeps the record, because the rows it
+/// refused are still in the library and still need a way back.
+#[test]
+fn a_record_survives_a_reverse_that_refused_a_row() {
+    let f = fixture();
+    let lock = Lock::library(&f.records, &f.dest_root).unwrap();
+    let r = run(&f, &lock).unwrap();
+    let record = r.record.unwrap();
+    // Something else is at the original name now, so the row cannot go back.
+    std::fs::write(f.source_root.join("mazebook.pdf"), b"squatter").unwrap();
+
+    let report = reverse_run(&lock, &record).unwrap();
+    assert_eq!(report.refused.len(), 1, "{report:?}");
+    assert!(record.exists(), "the record of a half-reversed run was deleted");
+
+    // Clear the squatter and the record is still good for a second pass.
+    std::fs::remove_file(f.source_root.join("mazebook.pdf")).unwrap();
+    assert_eq!(reverse_run(&lock, &record).unwrap().restored, 1);
+    assert!(!record.exists());
+}
+
+#[test]
+fn reversing_a_record_that_is_gone_is_not_an_error() {
+    let f = fixture();
+    let lock = Lock::library(&f.records, &f.dest_root).unwrap();
+    let absent = f.records.join(".comic-renamer.1.1.1.record");
+    assert_eq!(
+        reverse_run(&lock, &absent).unwrap(),
+        comic_renamer_core::types::UndoReport::default()
+    );
+}
+
+/// Review Focus 2, reached through `apply` rather than through `record`: a
+/// record is live while its run is writing it, which is what stops another
+/// run's sweep from taking it.
+///
+/// Observed from inside the run, through the progress callback. Afterwards is
+/// too late — the hold is released when the run ends, so a held record and an
+/// unheld one read identically and an assertion made then passes either way.
+#[test]
+fn the_record_is_held_while_the_run_is_writing_it() {
+    // Two rows, so a row's progress fires after the record exists.
+    let f = build(&["mazebook.pdf", "birdking_vol1.pdf"], Mode::Move).0;
+    let lock = Lock::library(&f.records, &f.dest_root).unwrap();
+    let mut seen = Vec::new();
+    let r = apply(&lock, &f.header, &f.rows, &f.records, false, &mut |_| {
+        for path in comic_renamer_core::record::list(&f.records).unwrap() {
+            seen.push(comic_renamer_core::record::is_live(&path).unwrap());
+        }
+    })
+    .unwrap();
+    let record = r.record.unwrap();
+
+    assert!(
+        !seen.is_empty(),
+        "no progress call saw a record, so this observed nothing"
+    );
+    assert!(
+        seen.iter().all(|&live| live),
+        "a record its own run was still writing read as abandoned, so another \
+         run's sweep would delete it mid-write: {seen:?}"
+    );
+    // And the hold is released when the run ends, which is what lets a later
+    // run sweep it.
+    assert!(
+        !comic_renamer_core::record::is_live(&record).unwrap(),
+        "the record stayed held after the run that wrote it ended"
+    );
+}
+
+/// `check` writes nothing, so it needs neither the lock nor the store — and a
+/// store it never touches cannot be the reason it refuses.
+#[test]
+fn check_needs_no_record_store() {
+    let f = fixture();
+    let guard = TreeGuard::new(&[&f.source_root, &f.dest_root]);
+    let r = comic_renamer_core::apply::check(&f.header, &f.rows, false, &mut |_| {}).unwrap();
+    assert_eq!((r.executed, r.skipped), (1, 0));
+    assert_eq!(r.record, None);
+    drop(guard);
+    assert!(
+        comic_renamer_core::record::list(&f.records)
+            .unwrap()
+            .is_empty(),
+        "check wrote a record"
+    );
+}
+
+/// The record is this run's own, not a name derived from anything a caller
+/// supplied — which is what `undo` no longer having to be handed a path rests
+/// on.
+#[test]
+fn a_record_is_named_by_the_store_and_lives_in_it() {
+    let f = fixture();
+    let lock = Lock::library(&f.records, &f.dest_root).unwrap();
+    let record = run(&f, &lock).unwrap().record.unwrap();
+    assert_eq!(record.parent(), Some(f.records.as_path()));
+    assert_eq!(
+        comic_renamer_core::record::list(&f.records).unwrap(),
+        vec![record.clone()],
+        "the store does not recognise the name the run wrote"
+    );
+    assert_eq!(
+        Path::new(record.file_name().unwrap())
+            .extension()
+            .and_then(|e| e.to_str()),
+        Some("record")
+    );
+}
+
+/// The record reverses on its own: `reverse_run` is handed no plan, no roots
+/// and no preset, so everything it needs has to have been written down.
+#[test]
+fn a_record_carries_the_fields_its_own_reverse_needs() {
+    let f = fixture();
+    let lock = Lock::library(&f.records, &f.dest_root).unwrap();
+    let record = run(&f, &lock).unwrap().record.unwrap();
+
+    let summary = comic_renamer_core::undo::summarise(&record).unwrap();
+    assert_eq!(summary.preset, "komga");
+    assert_eq!(summary.planned, 1);
+    assert_eq!(summary.reversible, 1);
+    assert!(!summary.interrupted);
+    assert_eq!(
+        summary.dest_root,
+        std::fs::canonicalize(&f.dest_root).unwrap()
+    );
+
+    // And the per-row fields: without them the preset rebuilds a different
+    // destination and the row is refused as one this run did not produce.
+    let report = comic_renamer_core::undo::reverse(&record).unwrap();
+    assert_eq!(report.restored, 1, "{report:?}");
+}
+
+/// Task 11's `a_run_that_executes_nothing_does_not_burn_the_plan`, moved here
+/// with the store as its subject. The plan is no longer burnable — nothing is
+/// named after it — but a run that places nothing still has to leave no
+/// record, which is what the sweep above depends on.
+#[test]
+fn a_run_that_executes_nothing_writes_no_record() {
+    let f = fixture();
+    std::fs::create_dir(f.dest_root.join("Mazebook")).unwrap();
+    std::fs::write(f.dest_root.join("Mazebook/Mazebook.pdf"), b"in the way").unwrap();
+
+    let lock = Lock::library(&f.records, &f.dest_root).unwrap();
+    let r = run(&f, &lock).unwrap();
+    assert_eq!((r.executed, r.skipped), (0, 1));
+    assert_eq!(r.record, None);
+    assert!(
+        comic_renamer_core::record::list(&f.records)
+            .unwrap()
+            .is_empty(),
+        "a run that moved nothing still wrote a record"
+    );
+
+    // The user clears the collision and re-runs the same plan.
+    std::fs::remove_dir_all(f.dest_root.join("Mazebook")).unwrap();
+    let r = run(&f, &lock).unwrap();
+    assert_eq!(r.executed, 1, "the plan was unusable after a refused run");
+    assert!(r.record.is_some());
+}
+
+/// `plan::write` is still how a plan reaches `apply`; this is the join between
+/// the two, and the only test here that goes through a file.
+#[test]
+fn a_plan_read_from_disk_runs_and_reverses() {
+    let f = fixture();
+    let path = f.dir.path().join("plan.jsonl");
+    plan::write(&f.header, &f.rows, &path).unwrap();
+
+    let (header, rows, edited) = plan::read_allowing_edits(&path).unwrap();
+    assert!(!edited, "a freshly written plan read as edited");
+    let lock = Lock::library(&f.records, &f.dest_root).unwrap();
+    let r = apply(&lock, &header, &rows, &f.records, false, &mut |_| {}).unwrap();
+    assert_eq!(r.executed, 1);
+    assert_eq!(
+        reverse_run(&lock, &r.record.unwrap()).unwrap().restored,
+        1
+    );
+}

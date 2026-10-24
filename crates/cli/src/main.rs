@@ -5,8 +5,11 @@
 //! takes no mode flag at all, which is what makes it reproducible from the
 //! plan alone.
 //!
-//! `undo` takes the **plan**, not the manifest (D38). The manifest is still
-//! the record of what happened; the plan is what anchors it.
+//! The record of what a run did lives in a directory the tool owns, not
+//! beside the plan. `apply` reads the plan once, holds the library's lock
+//! across the disclosure and the prompt, and hands `apply` the copy the
+//! disclosure was computed from — so what runs is what the user was shown,
+//! whatever happens to the file on disk in between.
 
 use clap::{Parser, Subcommand};
 use comic_renamer_core::fsops::{find_collisions, is_dataless};
@@ -16,11 +19,11 @@ use comic_renamer_core::overrides::Overrides;
 use comic_renamer_core::preset::{preset_by_id, Preset};
 use comic_renamer_core::resolve::{context_for, suggest_with};
 use comic_renamer_core::types::{
-    human_bytes as size, Collision, Mechanism, Mode, PlanRow, Progress, ScanOpts,
+    human_bytes as size, Collision, Mechanism, Mode, PlanHeader, PlanRow, Progress, ScanOpts,
     Status,
     UndoReport,
 };
-use comic_renamer_core::{apply, komga_api, plan, scan};
+use comic_renamer_core::{apply, komga_api, plan, record, scan, undo};
 mod map;
 
 use std::io::Write;
@@ -141,12 +144,10 @@ enum Command {
         komga_url: Option<String>,
     },
 
-    // D38: the manifest cannot anchor itself, so the plan's roots and the
-    // preset decide which destinations `reverse` will even recognise.
     /// Put a plan's files back where they came from.
     Undo {
-        /// The same plan you passed to `apply`. The record of what happened
-        /// is the `.undo.csv` beside it.
+        /// The same plan you passed to `apply`. It names the library; the
+        /// record of what happened is kept by the tool.
         plan: PathBuf,
     },
 }
@@ -360,14 +361,22 @@ fn run_apply(
     yes: bool,
     komga_url: Option<&str>,
 ) -> Result<(), String> {
-    // Read first, for the disclosure's arithmetic. `check` re-reads and
-    // revalidates; this copy is never what decides anything.
+    // Read **once**. Everything below — the pre-flight, the disclosure's
+    // arithmetic, and the run itself — works from this copy, so a plan
+    // rewritten while the user reads the disclosure cannot be what runs.
     let (header, rows, edited) =
         plan::read_allowing_edits(path).map_err(|e| e.to_string())?;
 
+    // Held across the pre-flight, the prompt and the run: another process
+    // starting on this library mid-prompt would otherwise be refused only
+    // after the user had consented.
+    let records = records_dir()?;
+    let lock = apply::Lock::library(&records, &header.dest_root).map_err(|e| e.to_string())?;
+
     // Pre-flight before the user is asked anything: a plan that will refuse
     // should refuse now, not after they have typed the word.
-    apply::check(path, allow_cloud_move, &mut render_progress).map_err(|e| e.to_string())?;
+    apply::check(&header, &rows, allow_cloud_move, &mut render_progress)
+        .map_err(|e| e.to_string())?;
 
     // §6.8.2: hashing switched on *after* a rename cannot help, because a
     // deleted record can never acquire a hash. Refuse rather than warn.
@@ -417,20 +426,33 @@ fn run_apply(
         confirm(header.mode)?;
     }
 
-    let result = apply::apply(path, allow_cloud_move, &mut render_progress)
-        .map_err(|e| e.to_string())?;
+    let result = apply::apply(
+        &lock,
+        &header,
+        &rows,
+        &records,
+        allow_cloud_move,
+        &mut render_progress,
+    )
+    .map_err(|e| e.to_string())?;
     println!(
         "\n{} placed · {} skipped · {} failed",
         result.executed, result.skipped, result.failed
     );
-    // The manifest is created lazily, on the first row that executes, so
-    // naming it after a run that placed nothing points at a file that is not
-    // there.
-    if result.executed > 0 {
-        println!("undo manifest: {}", apply::undo_path(path).display());
-        println!("  comic-renamer undo {}", path.display());
+    // States that the run can be reversed, and names no path. A record is a
+    // file the tool owns; printing where it lives invites it being handed
+    // back in, and a path a user supplies is exactly the authority the record
+    // store exists to take away.
+    if result.record.is_some() {
+        println!("  comic-renamer undo    puts this run back");
     }
     Ok(())
+}
+
+/// The record store: `$XDG_CONFIG_HOME/comic-renamer/runs`, or
+/// `~/Library/Application Support/comic-renamer/runs`.
+fn records_dir() -> Result<PathBuf, String> {
+    Ok(map::config_dir()?.join("runs"))
 }
 
 fn render_progress(p: Progress) {
@@ -748,7 +770,17 @@ fn confirm(mode: Mode) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 fn run_undo(path: &Path) -> Result<(), String> {
-    let report = apply::undo(path).map_err(|e| e.to_string())?;
+    let (header, ..) = plan::read_allowing_edits(path).map_err(|e| e.to_string())?;
+    let records = records_dir()?;
+    // Before the lookup, and the same lock `apply` runs under: a record being
+    // written by a live run must not be read as a run to reverse.
+    let lock = apply::Lock::library(&records, &header.dest_root).map_err(|e| e.to_string())?;
+
+    let report = match record_for(&records, &header)? {
+        Some(record) => apply::reverse_run(&lock, &record).map_err(|e| e.to_string())?,
+        // Never applied, or already reversed. Idempotent, not an error.
+        None => UndoReport::default(),
+    };
     let UndoReport {
         restored,
         skipped,
@@ -764,6 +796,30 @@ fn run_undo(path: &Path) -> Result<(), String> {
         eprintln!("  refused: {why}");
     }
     Err(format!("{} rows could not be reversed", refused.len()))
+}
+
+/// The newest record written for the library this plan names.
+///
+/// The plan is a handle, not an anchor: it supplies the pair of roots to match
+/// against and nothing else. A record names its own roots, and a record whose
+/// summary cannot be read is skipped rather than fatal — one unreadable file
+/// in the store must not make every other run unreversible.
+fn record_for(records: &Path, header: &PlanHeader) -> Result<Option<PathBuf>, String> {
+    let canonical = |path: &Path| {
+        std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))
+    };
+    let source_root = canonical(&header.source_root)?;
+    let dest_root = canonical(&header.dest_root)?;
+    // Newest first, so a library run more than once reverses the last run.
+    for path in record::list(records).map_err(|e| e.to_string())? {
+        let Ok(summary) = undo::summarise(&path) else {
+            continue;
+        };
+        if summary.source_root == source_root && summary.dest_root == dest_root {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
 }
 
 // ---------------------------------------------------------------------------

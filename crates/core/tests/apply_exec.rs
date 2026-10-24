@@ -4,9 +4,12 @@
 
 mod common;
 
-use comic_renamer_core::apply::{apply, undo, undo_path};
+use comic_renamer_core::apply::{apply, reverse_run, Lock};
 use comic_renamer_core::mapping::Mappings;
-use comic_renamer_core::types::{Mechanism, Mode, ScanOpts};
+use comic_renamer_core::preset::preset_by_id;
+use comic_renamer_core::types::{
+    ApplyError, ApplyResult, Mechanism, Mode, Resolved, ScanOpts, Status, UndoReport,
+};
 use comic_renamer_core::undo::{reverse, UndoWriter};
 
 
@@ -16,6 +19,22 @@ use std::io::ErrorKind;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use tempfile::{tempdir, TempDir};
+
+/// Everything a record needs about a row, built from one series name so the
+/// destination is one the preset genuinely produces — which is the only kind
+/// `undo::reverse` will recognise.
+fn produced(series: &str) -> (Resolved, PathBuf) {
+    let resolved = Resolved {
+        series: series.into(),
+        volume: None,
+        subtitle: None,
+        run: 5,
+        status: Status::Mapped,
+        record: None,
+    };
+    let relative = preset_by_id("komga").unwrap().destination(&resolved, "pdf");
+    (resolved, relative)
+}
 
 fn gcd() -> Mappings {
     mappings(&[
@@ -32,6 +51,10 @@ struct Fixture {
     source: PathBuf,
     dest: PathBuf,
     plan: PathBuf,
+    /// This fixture's own record store. Inside its temporary directory and
+    /// never the user's: the real store is under `Application Support`, and a
+    /// suite that wrote there would leave a record of every test run behind.
+    records: PathBuf,
 }
 
 impl Fixture {
@@ -39,6 +62,8 @@ impl Fixture {
         let source = tempdir().unwrap();
         let dest = tempdir().unwrap();
         let plans = tempdir().unwrap();
+        let records = plans.path().join("runs");
+        std::fs::create_dir_all(&records).unwrap();
         for name in names {
             // Real content, so a stream can be verified byte for byte.
             std::fs::write(source.path().join(name), format!("contents of {name}")).unwrap();
@@ -58,14 +83,29 @@ impl Fixture {
             source: source.path().to_path_buf(),
             dest: dest.path().to_path_buf(),
             plan: plan_path,
+            records,
             _source: source,
             _dest: dest,
             _plans: plans,
         }
     }
 
-    fn manifest(&self) -> PathBuf {
-        undo_path(&self.plan)
+    fn lock(&self) -> Lock {
+        Lock::library(&self.records, &self.dest).unwrap()
+    }
+
+    /// One run of the plan as it stands on disk, under a lock taken and
+    /// released around it — which is what the caller does.
+    fn run(&self) -> Result<ApplyResult, ApplyError> {
+        let (header, rows, _edited) = plan::read_allowing_edits(&self.plan).unwrap();
+        let lock = self.lock();
+        apply(&lock, &header, &rows, &self.records, false, &mut |_| {})
+    }
+
+    /// Reverses `record` under this library's lock.
+    fn undo(&self, record: &Path) -> Result<UndoReport, ApplyError> {
+        let lock = self.lock();
+        reverse_run(&lock, record)
     }
 
     /// Rewrites the plan so every row uses `mechanism`, re-stamping the
@@ -106,18 +146,27 @@ fn collect(dir: &Path, out: &mut Vec<String>) {
 // The undo manifest
 // ---------------------------------------------------------------------------
 
-/// A manifest-level fixture: a copy of one file already sitting in `dest`,
+/// A record-level fixture: a copy of one file already sitting in `dest`,
 /// recorded as this run having put it there.
 struct Recorded {
     _dir: TempDir,
     manifest: PathBuf,
-    source_root: PathBuf,
     dest_root: PathBuf,
     relative: PathBuf,
 }
 
 impl Recorded {
     fn new(name: &str, body: &[u8], mode: Mode, keep_source: bool) -> Recorded {
+        Recorded::of("Mazebook", name, body, mode, keep_source)
+    }
+
+    /// `name` is the bundle filename; the destination is whatever the komga
+    /// preset makes of `series`. It has to be: `undo::reverse` rebuilds the
+    /// destination from the record's own fields and refuses any row whose
+    /// `dest_relative` the preset does not produce, so a bare filename at the
+    /// library root — which is what this fixture used to record — is refused
+    /// before anything else about the row is examined.
+    fn of(series: &str, name: &str, body: &[u8], mode: Mode, keep_source: bool) -> Recorded {
         let dir = tempdir().unwrap();
         let source_root = dir.path().join("src");
         let dest_root = dir.path().join("dest");
@@ -125,14 +174,27 @@ impl Recorded {
         std::fs::create_dir_all(&dest_root).unwrap();
         let source = source_root.join(name);
         std::fs::write(&source, body).unwrap();
-        let relative = PathBuf::from(name);
+        let (resolved, relative) = produced(series);
         let destination = dest_root.join(&relative);
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
         std::fs::write(&destination, body).unwrap();
 
-        let manifest = dir.path().join("plan.jsonl.undo.csv");
-        let mut writer = UndoWriter::create(&manifest, &source_root, &dest_root).unwrap();
+        let manifest = dir.path().join("run.record");
+        let mut writer =
+            UndoWriter::create(&manifest, &source_root, &dest_root, "komga", 1).unwrap();
         let seq = writer
-            .record_pending(Path::new(name), &relative, Mechanism::Clone, mode, &source)
+            .record_pending(
+                Path::new(name),
+                &relative,
+                Mechanism::Clone,
+                mode,
+                &source,
+                &resolved.series,
+                resolved.volume,
+                resolved.subtitle.as_deref(),
+                resolved.run,
+                "pdf",
+            )
             .unwrap();
         let meta = std::fs::symlink_metadata(&destination).unwrap();
         writer
@@ -154,15 +216,13 @@ impl Recorded {
         Recorded {
             _dir: dir,
             manifest,
-            source_root,
             dest_root,
             relative,
         }
     }
 
-    fn reverse(&self) -> Result<comic_renamer_core::types::UndoReport, comic_renamer_core::types::UndoError> {
-        let recomputed = vec![self.relative.clone()];
-        reverse(&self.manifest, &self.source_root, &self.dest_root, &recomputed)
+    fn reverse(&self) -> Result<UndoReport, comic_renamer_core::types::UndoError> {
+        reverse(&self.manifest)
     }
 
     fn destination(&self) -> PathBuf {
@@ -171,15 +231,15 @@ impl Recorded {
 }
 
 #[test]
-fn create_refuses_an_existing_manifest() {
+fn create_refuses_an_existing_record() {
     let d = tempdir().unwrap();
-    let path = d.path().join("run.undo.csv");
-    let _first = UndoWriter::create(&path, d.path(), d.path()).expect("first create");
-    let second = UndoWriter::create(&path, d.path(), d.path());
+    let path = d.path().join("run.record");
+    let _first = UndoWriter::create(&path, d.path(), d.path(), "komga", 1).expect("first create");
+    let second = UndoWriter::create(&path, d.path(), d.path(), "komga", 1);
     assert_eq!(
         second.err().map(|e| e.kind()),
         Some(ErrorKind::AlreadyExists),
-        "a re-run would truncate the only record of where the last run's files went"
+        "a second run would truncate the only record of where the last run's files went"
     );
 }
 
@@ -188,8 +248,8 @@ fn pending_is_on_disk_before_the_operation() {
     let d = tempdir().unwrap();
     let source = d.path().join("a.pdf");
     std::fs::write(&source, b"x").unwrap();
-    let path = d.path().join("run.undo.csv");
-    let mut writer = UndoWriter::create(&path, d.path(), d.path()).unwrap();
+    let path = d.path().join("run.record");
+    let mut writer = UndoWriter::create(&path, d.path(), d.path(), "komga", 1).unwrap();
     writer
         .record_pending(
             Path::new("a.pdf"),
@@ -197,6 +257,11 @@ fn pending_is_on_disk_before_the_operation() {
             Mechanism::Rename,
             Mode::Move,
             &source,
+            "A",
+            None,
+            None,
+            5,
+            "pdf",
         )
         .unwrap();
     // Read back cold, not after a flush the test controlled.
@@ -212,7 +277,12 @@ fn awkward_filenames_survive_the_manifest_round_trip() {
         "Hellboy, the Corpse and the \"Iron\" Shoes.pdf",
         "two\nlines.pdf",
     ] {
-        let r = Recorded::new(name, b"copied here by the tool", Mode::Copy, true);
+        // The same text as the series too, so the quoting is exercised in the
+        // dest_relative and series columns as well as in source_name — all
+        // three are written by `field`, and the reader has to agree on all
+        // three for the row to be rebuilt at all.
+        let series = name.trim_end_matches(".pdf");
+        let r = Recorded::of(series, name, b"copied here by the tool", Mode::Copy, true);
         let report = r.reverse().unwrap();
         assert_eq!(report.restored, 1, "{name:?} did not round-trip: {report:?}");
         assert!(!r.destination().exists());
@@ -266,34 +336,30 @@ fn reverse_of_a_copy_refuses_when_the_original_is_gone() {
 
 #[test]
 fn reverse_refuses_a_destination_the_preset_does_not_produce() {
-    // Invariant 9: a hand-written manifest cannot name an arbitrary path.
+    // Invariant 9: a hand-written record cannot name an arbitrary path.
+    //
+    // The attack is edited *fields*, not an edited path: the row still names
+    // the file this run really placed, and the series it was rebuilt from now
+    // says something else. So the destination exists, holds exactly the
+    // identity the row records, and its original sits at the source — every
+    // other gate in `reverse_one` is satisfied, and the only thing that can
+    // refuse the row is the preset disagreeing with the path it names.
     let r = Recorded::new("Mazebook.pdf", b"x", Mode::Copy, true);
-    let report = reverse(
-        &r.manifest,
-        &r.source_root,
-        &r.dest_root,
-        // The plan produces something else entirely.
-        &[PathBuf::from("Something/Else.pdf")],
-    )
-    .unwrap();
-    assert_eq!(report.restored, 0);
-    assert!(r.destination().exists());
-}
+    let text = std::fs::read_to_string(&r.manifest).unwrap();
+    let tampered = text.replacen(",'Mazebook,", ",'Elsewhere,", 1);
+    assert_ne!(tampered, text, "the series column moved; this edits nothing");
+    std::fs::write(&r.manifest, tampered).unwrap();
 
-#[test]
-fn reverse_refuses_a_manifest_whose_roots_disagree_with_the_plan() {
-    let r = Recorded::new("Mazebook.pdf", b"x", Mode::Copy, true);
-    let elsewhere = tempdir().unwrap();
-    assert!(matches!(
-        reverse(
-            &r.manifest,
-            elsewhere.path(),
-            &r.dest_root,
-            &[r.relative.clone()]
-        ),
-        Err(comic_renamer_core::types::UndoError::NoRoot)
-    ));
-    assert!(r.destination().exists());
+    let report = r.reverse().unwrap();
+    assert_eq!(report.restored, 0, "{report:?}");
+    assert!(
+        report
+            .refused
+            .iter()
+            .any(|why| why.contains("not a destination")),
+        "refused for some other reason, so the preset check is unobserved: {report:?}"
+    );
+    assert!(r.destination().exists(), "a path the preset disowns was acted on");
 }
 
 // ---------------------------------------------------------------------------
@@ -304,7 +370,7 @@ fn reverse_refuses_a_manifest_whose_roots_disagree_with_the_plan() {
 fn a_move_relocates_and_leaves_nothing_behind() {
     let c = gcd();
     let f = Fixture::new(&["mazebook.pdf"], &c, Mode::Move);
-    let r = apply(&f.plan, false, &mut |_| {}).unwrap();
+    let r = f.run().unwrap();
     assert_eq!(r.executed, 1);
     assert!(!f.source.join("mazebook.pdf").exists());
     assert_eq!(f.files_under(&f.dest), ["Mazebook.pdf"]);
@@ -318,7 +384,7 @@ fn a_move_relocates_and_leaves_nothing_behind() {
 fn a_copy_keeps_the_original() {
     let c = gcd();
     let f = Fixture::new(&["mazebook.pdf"], &c, Mode::Copy);
-    apply(&f.plan, false, &mut |_| {}).unwrap();
+    f.run().unwrap();
     assert!(f.source.join("mazebook.pdf").exists(), "a copy must keep it");
     assert_eq!(f.files_under(&f.dest), ["Mazebook.pdf"]);
 }
@@ -332,7 +398,7 @@ fn a_plan_claiming_a_mechanism_the_volume_cannot_give_is_refused() {
     f.force_mechanism(Mechanism::Stream);
     let guard = TreeGuard::new(&[f.source.as_path(), f.dest.as_path()]);
     assert!(matches!(
-        apply(&f.plan, false, &mut |_| {}),
+        f.run(),
         Err(comic_renamer_core::types::ApplyError::MechanismChanged(_))
     ));
     drop(guard);
@@ -359,6 +425,8 @@ fn a_streamed_move_verifies_before_it_unlinks() {
     let _ = std::fs::remove_dir_all(&dest);
     std::fs::create_dir_all(&dest).unwrap();
     let plans = tempdir().unwrap();
+    let records = plans.path().join("runs");
+    std::fs::create_dir_all(&records).unwrap();
 
     let opts = ScanOpts {
         source_root: source.path().to_path_buf(),
@@ -372,8 +440,15 @@ fn a_streamed_move_verifies_before_it_unlinks() {
     assert_eq!(rows[0].mechanism, Mechanism::Stream, "not actually cross-volume");
     let plan_path = plans.path().join("plan.jsonl");
     plan::write(&header, &rows, &plan_path).unwrap();
+    // Through the file, as the CLI reads it: this is the one path where a
+    // plan's own serialisation of a cross-volume row matters.
+    let (header, rows, _edited) = plan::read_allowing_edits(&plan_path).unwrap();
 
-    apply(&plan_path, false, &mut |_| {}).unwrap();
+    let lock = Lock::library(&records, &dest).unwrap();
+    let record = apply(&lock, &header, &rows, &records, false, &mut |_| {})
+        .unwrap()
+        .record
+        .expect("a run that placed a row wrote a record");
     assert!(!source.path().join("mazebook.pdf").exists(), "the source survived a move");
     assert_eq!(
         std::fs::read_to_string(dest.join("Mazebook/Mazebook.pdf")).unwrap(),
@@ -394,7 +469,7 @@ fn a_streamed_move_verifies_before_it_unlinks() {
     // only that the source came back leaves that removal unobserved — the
     // restore reads as clean with the library copy still sitting there.
     let placed = dest.join("Mazebook/Mazebook.pdf");
-    let report = undo(&plan_path).unwrap();
+    let report = reverse_run(&lock, &record).unwrap();
     assert!(source.path().join("mazebook.pdf").exists(), "undo did not restore it");
     assert_eq!(report.restored, 1, "{report:?}");
     assert!(report.refused.is_empty(), "{report:?}");
@@ -442,9 +517,9 @@ fn a_fifo_at_a_cross_volume_destination_is_refused_rather_than_streamed() {
     assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o644) }, 0);
 
     let record = source.path().join("run.record");
-    let mut w = UndoWriter::create_with(&record, source.path(), &library, "komga", 1).unwrap();
+    let mut w = UndoWriter::create(&record, source.path(), &library, "komga", 1).unwrap();
     let seq = w
-        .record_pending_with(
+        .record_pending(
             Path::new("mazebook.pdf"),
             &relative,
             Mechanism::Stream,
@@ -527,6 +602,8 @@ fn a_destination_that_changes_during_the_stream_back_is_not_unlinked() {
     let _ = std::fs::remove_dir_all(&dest);
     std::fs::create_dir_all(&dest).unwrap();
     let plans = tempdir().unwrap();
+    let records = plans.path().join("runs");
+    std::fs::create_dir_all(&records).unwrap();
 
     let opts = ScanOpts {
         source_root: source.path().to_path_buf(),
@@ -540,7 +617,11 @@ fn a_destination_that_changes_during_the_stream_back_is_not_unlinked() {
     assert_eq!(rows[0].mechanism, Mechanism::Stream, "not actually cross-volume");
     let plan_path = plans.path().join("plan.jsonl");
     plan::write(&header, &rows, &plan_path).unwrap();
-    apply(&plan_path, false, &mut |_| {}).unwrap();
+    let lock = Lock::library(&records, &dest).unwrap();
+    let record = apply(&lock, &header, &rows, &records, false, &mut |_| {})
+        .unwrap()
+        .record
+        .expect("a run that placed a row wrote a record");
 
     let placed = dest.join("Mazebook/Mazebook.pdf");
     let placed_before = std::fs::symlink_metadata(&placed).unwrap().mtime();
@@ -566,7 +647,7 @@ fn a_destination_that_changes_during_the_stream_back_is_not_unlinked() {
         false
     });
 
-    let report = undo(&plan_path).unwrap();
+    let report = reverse_run(&lock, &record).unwrap();
     assert!(
         watcher.join().unwrap(),
         "the watcher never saw a .partial, so the stream-back never ran and this \
@@ -606,7 +687,7 @@ fn an_occupied_destination_is_refused_not_overwritten() {
     std::fs::write(f.dest.join("Mazebook/Mazebook.pdf"), b"ALREADY HERE").unwrap();
 
     let guard = TreeGuard::new(&[f.source.as_path(), f.dest.as_path()]);
-    let r = apply(&f.plan, false, &mut |_| {}).unwrap();
+    let r = f.run().unwrap();
     assert_eq!((r.executed, r.skipped), (0, 1));
     assert_eq!(
         std::fs::read_to_string(f.dest.join("Mazebook/Mazebook.pdf")).unwrap(),
@@ -624,10 +705,10 @@ fn scan_apply_undo_restores_the_tree() {
     let c = gcd();
     let f = Fixture::new(&["mazebook.pdf", "birdking_vol1.pdf"], &c, Mode::Move);
     let before = f.files_under(&f.source);
-    apply(&f.plan, false, &mut |_| {}).unwrap();
+    let record = f.run().unwrap().record.unwrap();
     assert!(f.files_under(&f.source).is_empty());
 
-    undo(&f.plan).unwrap();
+    f.undo(&record).unwrap();
     assert_eq!(f.files_under(&f.source), before);
     assert!(f.files_under(&f.dest).is_empty(), "the destination still holds files");
 }
@@ -636,12 +717,12 @@ fn scan_apply_undo_restores_the_tree() {
 fn reverse_of_a_copy_deletes_the_destination_only() {
     let c = gcd();
     let f = Fixture::new(&["mazebook.pdf"], &c, Mode::Copy);
-    apply(&f.plan, false, &mut |_| {}).unwrap();
+    let record = f.run().unwrap().record.unwrap();
 
     // The source must be untouched throughout: getting copy and move the
     // wrong way round here clobbers a kept original.
     let guard = TreeGuard::new(&[f.source.as_path()]);
-    undo(&f.plan).unwrap();
+    f.undo(&record).unwrap();
     assert!(f.files_under(&f.dest).is_empty());
     drop(guard);
 }
@@ -650,30 +731,33 @@ fn reverse_of_a_copy_deletes_the_destination_only() {
 fn reverse_is_idempotent_and_refuses_a_reoccupied_path() {
     let c = gcd();
     let f = Fixture::new(&["mazebook.pdf"], &c, Mode::Move);
-    apply(&f.plan, false, &mut |_| {}).unwrap();
+    let record = f.run().unwrap().record.unwrap();
 
-    assert_eq!(undo(&f.plan).unwrap().restored, 1);
-    // Idempotent: a complete reverse renames the manifest aside, so a second
-    // pass has nothing to do rather than failing.
-    let second = undo(&f.plan).unwrap();
+    assert_eq!(f.undo(&record).unwrap().restored, 1);
+    // Idempotent: a complete reverse deletes the record, so a second pass has
+    // nothing to do rather than failing.
+    let second = f.undo(&record).unwrap();
     assert_eq!((second.restored, second.refused.len()), (0, 0), "{second:?}");
     assert_eq!(f.files_under(&f.source), ["mazebook.pdf"]);
 
-    // And the plan is runnable again, which it was not when a successful
-    // undo left the manifest in place for O_EXCL to trip over.
-    assert_eq!(apply(&f.plan, false, &mut |_| {}).unwrap().executed, 1);
+    // And the plan is runnable again. It always is now — nothing is named
+    // after it — but a second run still has to write a record of its own
+    // rather than finding the first one's in the way.
+    let again = f.run().unwrap();
+    assert_eq!(again.executed, 1);
+    assert!(again.record.is_some_and(|r| r != record));
 }
 
 #[test]
 fn reverse_refuses_to_overwrite_a_squatter() {
     let c = gcd();
     let f = Fixture::new(&["mazebook.pdf"], &c, Mode::Move);
-    apply(&f.plan, false, &mut |_| {}).unwrap();
+    let record = f.run().unwrap().record.unwrap();
     std::fs::write(f.source.join("mazebook.pdf"), b"squatter").unwrap();
 
-    // Per-row now, not a whole-manifest error: one bad row must not strand
+    // Per-row now, not a whole-record error: one bad row must not strand
     // every other row in the file.
-    let report = undo(&f.plan).unwrap();
+    let report = f.undo(&record).unwrap();
     assert_eq!(report.restored, 0);
     assert_eq!(report.refused.len(), 1, "{report:?}");
     assert_eq!(
@@ -684,15 +768,23 @@ fn reverse_refuses_to_overwrite_a_squatter() {
 }
 
 #[test]
-fn a_re_run_cannot_truncate_the_previous_manifest() {
+fn a_re_run_cannot_truncate_the_previous_record() {
     let c = gcd();
-    let f = Fixture::new(&["mazebook.pdf"], &c, Mode::Move);
-    apply(&f.plan, false, &mut |_| {}).unwrap();
-    let first = std::fs::read_to_string(f.manifest()).unwrap();
+    // Copy, not Move: a second run of a *move* never gets this far, because
+    // its source is gone and the pre-flight refuses the whole run. A copy
+    // keeps the original, so the second run reaches the collision check and
+    // the record logic beyond it, which is what this is about.
+    let f = Fixture::new(&["mazebook.pdf"], &c, Mode::Copy);
+    let record = f.run().unwrap().record.unwrap();
+    let first = std::fs::read_to_string(&record).unwrap();
 
-    assert!(apply(&f.plan, false, &mut |_| {}).is_err());
+    // The second run collides on every row, so it places nothing — and a run
+    // that places nothing writes no record and sweeps none either.
+    let again = f.run().unwrap();
+    assert_eq!((again.executed, again.skipped), (0, 1), "{again:?}");
+    assert_eq!(again.record, None);
     assert_eq!(
-        std::fs::read_to_string(f.manifest()).unwrap(),
+        std::fs::read_to_string(&record).unwrap(),
         first,
         "the only record of where the last run's files went was overwritten"
     );
@@ -720,6 +812,8 @@ fn an_interrupted_apply_reverses_the_completed_rows() {
     let _ = std::fs::remove_dir_all(&dest);
     std::fs::create_dir_all(&dest).unwrap();
     let plans = tempdir().unwrap();
+    let records = plans.path().join("runs");
+    std::fs::create_dir_all(&records).unwrap();
 
     let opts = ScanOpts {
         source_root: source.path().to_path_buf(),
@@ -741,7 +835,8 @@ fn an_interrupted_apply_reverses_the_completed_rows() {
     std::os::unix::fs::PermissionsExt::set_mode(&mut locked, 0o500);
     std::fs::set_permissions(source.path(), locked).unwrap();
 
-    let result = apply(&plan_path, false, &mut |_| {});
+    let lock = Lock::library(&records, &dest).unwrap();
+    let result = apply(&lock, &header, &rows, &records, false, &mut |_| {});
 
     let mut restore = std::fs::metadata(source.path()).unwrap().permissions();
     std::os::unix::fs::PermissionsExt::set_mode(&mut restore, 0o700);
@@ -755,7 +850,13 @@ fn an_interrupted_apply_reverses_the_completed_rows() {
         "a source was consumed despite the abort"
     );
 
-    let report = undo(&plan_path).unwrap();
+    // An aborted run returns `Err`, so it hands back no record path — which
+    // is the case the store answers: the record of what the run managed to do
+    // is in it, findable without the run's cooperation. A crash is the same
+    // shape, and it is the shape `undo` was built for.
+    let found = comic_renamer_core::record::list(&records).unwrap();
+    assert_eq!(found.len(), 1, "the aborted run left no record: {found:?}");
+    let report = reverse_run(&lock, &found[0]).unwrap();
     assert!(report.refused.is_empty(), "{report:?}");
     assert_eq!(
         std::fs::read_dir(source.path()).unwrap().count(),
@@ -790,20 +891,28 @@ fn a_placed_move_checks_the_source_before_deleting_the_copy() {
     std::fs::create_dir_all(&source_root).unwrap();
     std::fs::create_dir_all(&dest_root).unwrap();
     let good = b"the verified library copy, intact";
-    let destination = dest_root.join("Mazebook.pdf");
+    let (resolved, relative) = produced("Mazebook");
+    let destination = dest_root.join(&relative);
+    std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
     std::fs::write(&destination, good).unwrap();
     let source = source_root.join("mazebook.pdf");
     std::fs::write(&source, good).unwrap();
 
-    let manifest = d.path().join("plan.jsonl.undo.csv");
-    let mut writer = UndoWriter::create(&manifest, &source_root, &dest_root).unwrap();
+    let manifest = d.path().join("run.record");
+    let mut writer =
+        UndoWriter::create(&manifest, &source_root, &dest_root, "komga", 1).unwrap();
     let seq = writer
         .record_pending(
             Path::new("mazebook.pdf"),
-            Path::new("Mazebook.pdf"),
+            &relative,
             Mechanism::Stream,
             Mode::Move,
             &source,
+            &resolved.series,
+            resolved.volume,
+            resolved.subtitle.as_deref(),
+            resolved.run,
+            "pdf",
         )
         .unwrap();
     let meta = std::fs::symlink_metadata(&destination).unwrap();
@@ -822,13 +931,7 @@ fn a_placed_move_checks_the_source_before_deleting_the_copy() {
     // The user puts something else back at the source name.
     std::fs::write(&source, b"junk").unwrap();
 
-    let report = reverse(
-        &manifest,
-        &source_root,
-        &dest_root,
-        &[PathBuf::from("Mazebook.pdf")],
-    )
-    .unwrap();
+    let report = reverse(&manifest).unwrap();
     assert_eq!(report.restored, 0, "{report:?}");
     assert_eq!(report.refused.len(), 1, "{report:?}");
     assert_eq!(
@@ -851,32 +954,34 @@ fn reverse_does_not_hang_on_a_fifo_at_a_destination() {
     let source = source_root.join("mazebook.pdf");
     std::fs::write(&source, b"x").unwrap();
 
-    let fifo = dest_root.join("Mazebook.pdf");
+    let (resolved, relative) = produced("Mazebook");
+    let fifo = dest_root.join(&relative);
+    std::fs::create_dir_all(fifo.parent().unwrap()).unwrap();
     let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
     // SAFETY: a valid NUL-terminated path for the duration of the call.
     assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o644) }, 0);
 
-    let manifest = d.path().join("plan.jsonl.undo.csv");
-    let mut writer = UndoWriter::create(&manifest, &source_root, &dest_root).unwrap();
+    let manifest = d.path().join("run.record");
+    let mut writer =
+        UndoWriter::create(&manifest, &source_root, &dest_root, "komga", 1).unwrap();
     writer
         .record_pending(
             Path::new("mazebook.pdf"),
-            Path::new("Mazebook.pdf"),
+            &relative,
             Mechanism::Stream,
             Mode::Move,
             &source,
+            &resolved.series,
+            resolved.volume,
+            resolved.subtitle.as_deref(),
+            resolved.run,
+            "pdf",
         )
         .unwrap();
     drop(writer);
 
     // The assertion is that this returns at all.
-    let report = reverse(
-        &manifest,
-        &source_root,
-        &dest_root,
-        &[PathBuf::from("Mazebook.pdf")],
-    )
-    .unwrap();
+    let report = reverse(&manifest).unwrap();
     assert_eq!(report.restored, 0, "{report:?}");
     assert!(fifo.exists());
 }
@@ -887,13 +992,13 @@ fn an_unreadable_destination_is_refused_not_mistaken_for_absent() {
     // was refused for the wrong reason. fstatat answers through the parent.
     let c = gcd();
     let f = Fixture::new(&["mazebook.pdf"], &c, Mode::Move);
-    apply(&f.plan, false, &mut |_| {}).unwrap();
+    let record = f.run().unwrap().record.unwrap();
     let book = f.dest.join("Mazebook/Mazebook.pdf");
     let mut locked = std::fs::metadata(&book).unwrap().permissions();
     std::os::unix::fs::PermissionsExt::set_mode(&mut locked, 0o000);
     std::fs::set_permissions(&book, locked).unwrap();
 
-    let report = undo(&f.plan).unwrap();
+    let report = f.undo(&record).unwrap();
     // The file itself is unreadable, but its identity is not, so the undo
     // proceeds rather than refusing.
     assert_eq!(report.restored, 1, "{report:?}");
@@ -906,14 +1011,14 @@ fn an_unparseable_row_is_reported_not_dropped() {
     // the class the design's own preamble says the last rewrite missed.
     let c = gcd();
     let f = Fixture::new(&["mazebook.pdf", "birdking_vol1.pdf"], &c, Mode::Move);
-    apply(&f.plan, false, &mut |_| {}).unwrap();
+    let record = f.run().unwrap().record.unwrap();
 
-    let text = std::fs::read_to_string(f.manifest()).unwrap();
+    let text = std::fs::read_to_string(&record).unwrap();
     let mangled = text.replacen(",rename,", ",ranme,", 1);
-    assert_ne!(mangled, text, "the manifest shape changed");
-    std::fs::write(f.manifest(), mangled).unwrap();
+    assert_ne!(mangled, text, "the record shape changed");
+    std::fs::write(&record, mangled).unwrap();
 
-    let report = undo(&f.plan).unwrap();
+    let report = f.undo(&record).unwrap();
     // Asserted on the *reason*, not merely that something was refused: the
     // dropped row's orphaned `done` also produces a refusal, so a bare
     // is-not-empty check passes even when the parse failure is silent.
@@ -939,27 +1044,30 @@ fn an_unparseable_row_is_reported_not_dropped() {
 fn a_partial_undo_can_be_resumed() {
     // A5. prune_empty_dirs removed the parent after a successful row, and a
     // later resolve of a refused row then failed at the parent — which is
-    // not a metadata NotFound, so "nothing to do" never applied, `refused`
-    // was never empty, and O_EXCL killed the plan forever.
+    // not a metadata NotFound, so "nothing to do" never applied and `refused`
+    // was never empty. A record that keeps a refusal forever is a record
+    // that never gets deleted, so the resumed pass is also what proves the
+    // record survived the first one.
     let c = gcd();
     let f = Fixture::new(&["mazebook.pdf", "birdking_vol1.pdf"], &c, Mode::Move);
-    apply(&f.plan, false, &mut |_| {}).unwrap();
+    let record = f.run().unwrap().record.unwrap();
 
     // Squat one original name so its row refuses.
     std::fs::write(f.source.join("birdking_vol1.pdf"), b"squatter").unwrap();
-    let first = undo(&f.plan).unwrap();
+    let first = f.undo(&record).unwrap();
     assert_eq!(first.restored, 1, "{first:?}");
     assert_eq!(first.refused.len(), 1, "{first:?}");
+    assert!(record.exists(), "a half-reversed run lost its record");
 
     // Clear the squatter and resume.
     std::fs::remove_file(f.source.join("birdking_vol1.pdf")).unwrap();
-    let second = undo(&f.plan).unwrap();
+    let second = f.undo(&record).unwrap();
     assert_eq!(second.restored, 1, "the partial undo could not be resumed: {second:?}");
     assert!(second.refused.is_empty(), "{second:?}");
     assert!(f.files_under(&f.dest).is_empty(), "files left in the library");
 
     // And the plan is runnable again.
-    assert_eq!(apply(&f.plan, false, &mut |_| {}).unwrap().executed, 2);
+    assert_eq!(f.run().unwrap().executed, 2);
 }
 
 #[test]
@@ -970,15 +1078,15 @@ fn an_unterminated_quote_does_not_silently_swallow_the_rest() {
     // library.
     let c = gcd();
     let f = Fixture::new(&["mazebook.pdf", "birdking_vol1.pdf"], &c, Mode::Move);
-    apply(&f.plan, false, &mut |_| {}).unwrap();
+    let record = f.run().unwrap().record.unwrap();
 
-    let text = std::fs::read_to_string(f.manifest()).unwrap();
+    let text = std::fs::read_to_string(&record).unwrap();
     let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
     // A stray quote partway through, with records after it.
     lines[2].push('"');
-    std::fs::write(f.manifest(), lines.join("\n") + "\n").unwrap();
+    std::fs::write(&record, lines.join("\n") + "\n").unwrap();
 
-    let report = undo(&f.plan).unwrap();
+    let report = f.undo(&record).unwrap();
     assert!(
         report
             .refused
@@ -1051,29 +1159,31 @@ fn a_pending_clone_row_is_refused_rather_than_matched_on_size() {
     let source = source_root.join("mazebook.pdf");
     std::fs::write(&source, b"identical bytes").unwrap();
     // A different file that happens to be the same size — the common case.
-    let destination = dest_root.join("Mazebook.pdf");
+    let (resolved, relative) = produced("Mazebook");
+    let destination = dest_root.join(&relative);
+    std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
     std::fs::write(&destination, b"someone else's").unwrap();
 
-    let manifest = d.path().join("plan.jsonl.undo.csv");
-    let mut writer = UndoWriter::create(&manifest, &source_root, &dest_root).unwrap();
+    let manifest = d.path().join("run.record");
+    let mut writer =
+        UndoWriter::create(&manifest, &source_root, &dest_root, "komga", 1).unwrap();
     writer
         .record_pending(
             Path::new("mazebook.pdf"),
-            Path::new("Mazebook.pdf"),
+            &relative,
             Mechanism::Clone,
             Mode::Copy,
             &source,
+            &resolved.series,
+            resolved.volume,
+            resolved.subtitle.as_deref(),
+            resolved.run,
+            "pdf",
         )
         .unwrap();
     drop(writer); // no `placed`: the run was interrupted
 
-    let report = reverse(
-        &manifest,
-        &source_root,
-        &dest_root,
-        &[PathBuf::from("Mazebook.pdf")],
-    )
-    .unwrap();
+    let report = reverse(&manifest).unwrap();
     assert_eq!(report.restored, 0, "{report:?}");
     assert!(
         report
@@ -1086,18 +1196,24 @@ fn a_pending_clone_row_is_refused_rather_than_matched_on_size() {
 }
 
 #[test]
-fn apply_and_undo_share_one_lock() {
-    // Obligation 7's other side. Task 11 required it and two separate lock
-    // files silently defeated it; nothing tested that the fix joined them.
+fn a_run_and_a_reverse_cannot_overlap_on_one_library() {
+    // The successor to `apply_and_undo_share_one_lock`. Obligation 7's other
+    // side: `undo` always required the lock `apply` takes, and two separate
+    // lock files silently defeated it. The lock is now one per library and
+    // held by the caller, so this is about what `Lock::library` refuses —
+    // `apply_record.rs` covers the pair sharing one held lock.
     let c = gcd();
     let f = Fixture::new(&["mazebook.pdf"], &c, Mode::Move);
-    apply(&f.plan, false, &mut |_| {}).unwrap();
+    let record = f.run().unwrap().record.unwrap();
 
-    let held = comic_renamer_core::apply::Lock::acquire(&f.plan).unwrap();
+    let held = f.lock();
     assert!(
-        matches!(undo(&f.plan), Err(comic_renamer_core::types::ApplyError::Locked)),
-        "undo ran while apply held the plan lock"
+        matches!(
+            Lock::library(&f.records, &f.dest),
+            Err(comic_renamer_core::types::ApplyError::Locked)
+        ),
+        "a second holder took the library lock while the first held it"
     );
     drop(held);
-    assert_eq!(undo(&f.plan).unwrap().restored, 1);
+    assert_eq!(f.undo(&record).unwrap().restored, 1);
 }
