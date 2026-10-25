@@ -577,8 +577,53 @@ interrupted-with-rows records for one pair gives "swept 1; records left 4", and
 through `undo --list`. The behaviour is defensible and documented as a D57
 exception; the entry's own summary sentence no longer describes it.
 
+### Owner's calls on the backlog, 2026-10-25
+
+- **The Homebrew formula is a release blocker.** It is for people who do not want
+  to run `cargo`, so `cargo install --path crates/cli --locked` working is not a
+  substitute. Not to be fixed now; **no release ships without it.** The standing
+  warning holds: do not write it in a session that cannot run
+  `brew install --build-from-source`, because this repo has been wrong about a
+  packaging claim three times.
+- **Kavita is dropped until a user asks.** The research in
+  `docs/research/2026-10-23-kavita-from-source.md` stands and the finding is real
+  — 890 of 2,223 rows would become one-book series — but nobody is waiting on it.
+  Do not spend Phase 2 effort here unprompted.
+- **The fault-injection facility is not worth building as a facility.** See the
+  entry below.
+
+### The three reasoned-not-tested claims, and why one facility is the wrong shape
+
+An implementer proposed that a single fault-injection seam — fail one write
+inside `perform` after the destination exists — would close three `shortcut:`
+claims at once: the `mechanism` column's one read-path state, `perform`'s
+ordering shortcut, and "`placed` survives a failed unlink". That framing is
+optimistic, and the branch that proposed it also produced the techniques that
+make a facility unnecessary.
+
+- **"`placed` survives a failed unlink" needs no injection.** `chmod` the source
+  parent to `0500` after the clone and `unlinkat` fails with `EACCES`. Existing
+  machinery, one fixture.
+- **The ordering claim — verify before unlink — is a perturbation**, which
+  `a_destination_that_changes_during_the_stream_back_is_not_unlinked` already
+  does. Extending it is cheaper than a seam.
+- **Only the interrupted clone genuinely needs process control**, and D58's race
+  test shows how: trigger off a filesystem property nothing else touches — it
+  uses the destination's atime — so the kill lands inside the window by
+  construction rather than on a timed guess. Subprocess plus trigger, no
+  production-code seam.
+
+A `#[cfg(test)]` hook inside `perform` would put a test seam in the one function
+whose ordering is load-bearing, which is the opposite of what this project does
+elsewhere. **Do these three individually, when next touching `perform`, with the
+techniques above.** None guards a current bug; all three guard against a future
+regression, so none is urgent.
+
 Then, two things that gate a release but block no development.
 
+**1. The licence for publishing Humble-derived titles. Deferred by the owner on
+2026-10-25** — saved for later, not dropped. It still gates publishing the table
+and blocks no development.
 **1. The licence for publishing Humble-derived titles.** `data/LICENSE` ties
 rule data to the Grand Comics Database under CC BY-SA 4.0. The Humble titles came
 from Humble's order API, and D31 committed them as *test* data, with no URLs,
