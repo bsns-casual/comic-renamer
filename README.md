@@ -135,11 +135,18 @@ assistant or attach to a pull request.
 
 `undo` takes a run, not a plan. Passing it a plan path is an error. A run is
 recorded as it goes, in a directory the tool keeps for itself, and `undo` reads
-only that directory. When a run copied files in, `undo`
-removes a library file only if the file it was copied from is still where it
-was, with the same content. If you deleted the bundle folder after a copy,
-`undo` refuses and says so, because the library file would be the last copy.
-It takes no `--yes`; it has nothing to confirm.
+only that directory. It takes no `--yes`; it has nothing to confirm.
+
+**Reversing a copy never deletes a library file.** It moves the file into
+`<library>/.comic-renamer-aside/<run>/` and reports where, so an undo that was
+wrong about which file it was looking at has relocated one file rather than
+destroyed it. **Nothing empties that directory.** Delete the files yourself once
+you are satisfied with what went back.
+
+`undo` also checks that the file a library copy came from is still at the source
+with the same content, and refuses the row when it is not. That check decides
+whether the reverse is right, not whether it is safe. If you deleted the bundle
+folder after a copy, `undo` refuses and says so.
 
 `comic-renamer` with no arguments opens a menu and needs a terminal. If an
 earlier run was interrupted, or a finished one is still reversible, the menu

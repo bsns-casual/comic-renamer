@@ -74,11 +74,19 @@ without changing the spec first.**
     "just drop `_hd`": deciding which parts of a filename are noise is inference,
     and a token that looks like noise in one marketplace is a title in another.
     (rebuild §5.3, D40)
-11. **A record never authorises its own deletion.** Reversing a copy removes a
-    library file; the record may say *which* file, never *that it is safe to
-    remove*. That is verified against the filesystem — the source it was copied
-    from must still be there, with the same content. A record is a map, not a
-    warrant. (session-scoped-undo §2, D54)
+11. **A record never authorises its own deletion — and since D58 no reverse
+    deletes a library file at all.** Reversing a copy renames it into
+    `<dest_root>/.comic-renamer-aside/<run-id>/`, leaf name only, through
+    `Entry::rename_into`'s `RENAME_EXCL`. The record may say *which* file,
+    never *that it is safe to displace*. That is still verified against the
+    filesystem — the source it was copied from must still be there, with the
+    same content — but the check now decides whether the reverse is *correct*,
+    not whether it is *safe*: an adversarial review showed its source hash is
+    check-then-act and cannot be made sound, because the bundle folder has no
+    lock by design. So the destructive step went instead of the window
+    shrinking. **Nothing empties the aside directory**; a reverse reports its
+    path and count and the user deletes the files. A record is a map, not a
+    warrant. (session-scoped-undo §2, D54, D58)
 
 Also load-bearing, though not numbered: **nothing is stored without a keystroke.**
 A guess is a typing aid. The mapping session writes only rows the user approved,
@@ -275,10 +283,11 @@ agreed. The other 14.7% are known-bad decompositions, such as
 subtitle "Before the Fall Vol. 9" and no volume. Review them in a `map` session
 before any of this is committed.
 
-**Tests:** `cargo test --workspace` runs 530 and ignores 9 (counted 2026-10-24
-by summing the `test result:` lines: 530 passed, 0 failed, 9 ignored; 510 before
-a four-seat adversarial review, 500 before the whole-branch review's fix wave,
-409 and 7 before session-scoped undo), with no compiler warnings. The nine `#[ignore]`d
+**Tests:** `cargo test --workspace` runs 534 and ignores 9 (counted 2026-10-25
+by summing the `test result:` lines: 534 passed, 0 failed, 9 ignored; 530 before
+D58, 510 before a four-seat adversarial review, 500 before the whole-branch
+review's fix wave, 409 and 7 before session-scoped undo), with no compiler
+warnings. The nine `#[ignore]`d
 tests need real hardware or the real corpus release, and **CI runs all nine**:
 five are volume-gated (`COMIC_RENAMER_TEST_VOLUME`; four in `apply_exec.rs`,
 one in `cli.rs`) and four are corpus tests (`COMIC_RENAMER_TEST_ZIP`, in
@@ -503,8 +512,19 @@ both. The first was a data-loss path: a hand-written manifest beside a forged
 plan made `undo` delete a library file no run placed. The second needed no
 adversary: a second terminal running `scan` substituted a plan under a
 confirmation already given. Session-scoped undo addresses them with invariant 11
-(D54) and by reading the plan once and executing from that copy. Both were
-tested on the branch, but **no run on GitHub has been observed for it**. The
+(D54, D58) and by reading the plan once and executing from that copy. Both were
+tested on the branch, but **no run on GitHub has been observed for it**.
+
+The first fix then needed a second one. An adversarial seat showed D54's own
+gate was check-then-act on the source and lost the file outright when raced —
+`1 restored · 0 refused`, exit 0, a 400 MB payload in neither place, on the
+first attempt. D58 replaced the unlink with a rename into the aside directory,
+which is why invariant 11 now reads the way it does. The race is reproduced
+deterministically in
+`nothing_is_lost_when_the_source_is_truncated_inside_the_gate`
+(`crates/core/tests/undo_authority.rs`): it triggers off the *destination's*
+atime, which nothing before the gate touches, so the writer fires inside the
+window by construction rather than on a timed guess. The
 design's §7 left one question open that was deliberately not planned: sweeping
 records written by an install that predates the sweep. No release has shipped,
 so none exists.
