@@ -19,7 +19,7 @@ use comic_renamer_core::overrides::Overrides;
 use comic_renamer_core::preset::{preset_by_id, Preset};
 use comic_renamer_core::resolve::{context_for, suggest_with};
 use comic_renamer_core::types::{
-    human_bytes as size, Collision, Mechanism, Mode, PlanRow, Progress, ScanOpts,
+    human_bytes as size, Aside, Collision, Mechanism, Mode, PlanRow, Progress, ScanOpts,
     Status,
     UndoReport,
 };
@@ -910,10 +910,20 @@ fn print_report(report: &UndoReport, into: Option<&Path>) -> Result<(), String> 
         restored,
         skipped,
         refused,
+        aside,
     } = report;
     println!("{restored} restored · {skipped} skipped · {} refused", refused.len());
     if let Some(root) = into {
         println!("  put back into {}", root.display());
+    }
+    // D58: reversing a copy relocates the library file rather than deleting
+    // it, so there is a directory with files in it that the user now owns.
+    // Said on every reverse that moved one, because nothing else on the
+    // system will: no sweep empties it, and a directory the tool filled and
+    // never mentioned is a surprise the next time the library is measured.
+    if let Some(Aside { directory, files }) = aside {
+        println!("  {} moved aside into {}", plural(*files, "file"), directory.display());
+        println!("  nothing deletes them for you");
     }
     if refused.is_empty() {
         return Ok(());

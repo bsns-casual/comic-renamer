@@ -1344,3 +1344,51 @@ fn re_importing_a_bundle_says_which_undo_the_sweep_took() {
     );
     assert_eq!(record_files(&f).len(), 1, "both records survived, so nothing was swept");
 }
+
+/// D58: reversing a copy moves the library file aside, and the report says
+/// where it went, how many are there, and that nothing empties it.
+///
+/// `Mode::Copy`, which every other undo test here is not: a copy is the only
+/// mode whose reverse has a library file to deal with, and the whole decision
+/// is about what happens to it.
+#[test]
+fn undo_of_a_copy_says_where_the_library_file_was_moved_aside() {
+    let f = fixture(Mode::Copy);
+    assert!(run_in(&f, &["apply", f.plan.to_str().unwrap(), "--yes"], "")
+        .status
+        .success());
+    assert!(f.placed.exists());
+
+    let out = run_in(&f, &["undo"], "");
+    assert!(out.status.success(), "{}", stderr(&out));
+    let said = stdout(&out);
+    assert!(said.contains("1 restored"), "{said}");
+    assert!(said.contains("1 file moved aside into"), "{said}");
+    assert!(said.contains(".comic-renamer-aside"), "{said}");
+    assert!(
+        said.contains("nothing deletes them for you"),
+        "the report has to say the directory is never emptied: {said}"
+    );
+    assert!(!f.placed.exists(), "the destination was cleared");
+    assert!(f.source.join("hellboy_vol1.pdf").exists());
+
+    // And the file is really where the report said. Zero bytes (invariant 3),
+    // so existence is the whole claim.
+    let aside = f.dest.join(".comic-renamer-aside");
+    let found: Vec<PathBuf> = std::fs::read_dir(&aside)
+        .unwrap()
+        .flatten()
+        .flat_map(|run| std::fs::read_dir(run.path()).unwrap().flatten().collect::<Vec<_>>())
+        .map(|e| e.path())
+        .collect();
+    assert_eq!(
+        found.len(),
+        1,
+        "one run directory holding one file, found {found:?}"
+    );
+    assert_eq!(
+        found[0].file_name(),
+        f.placed.file_name(),
+        "the name is the leaf the library used"
+    );
+}

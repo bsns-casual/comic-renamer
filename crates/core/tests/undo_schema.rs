@@ -65,6 +65,17 @@ fn a_record_alone_rebuilds_every_destination() {
     assert_eq!(report.refused, Vec::<String>::new());
     assert_eq!(report.restored, 1);
     assert!(!dir.path().join("library").join(dest_for()).exists());
+    // A copy, so D58 applies: the destination is clear and the bytes it held
+    // are in the aside directory, named for this record. Checked here too,
+    // because "the destination no longer exists" on its own is equally true
+    // of a reverse that destroyed the file.
+    let aside = report.aside.expect("a reversed copy names its aside directory");
+    assert_eq!(aside.files, 1);
+    assert!(aside.directory.ends_with(".comic-renamer-aside/run.record"));
+    assert_eq!(
+        std::fs::read(aside.directory.join(dest_for().file_name().unwrap())).unwrap(),
+        b"bytes"
+    );
 }
 
 /// Review Focus 3, both halves.

@@ -180,6 +180,28 @@ pub struct UndoReport {
     /// Left alone and why: the destination is not what the manifest recorded,
     /// the original path is occupied, or the row could not be examined.
     pub refused: Vec<String>,
+    /// Where this reverse put the library files it was authorised to remove,
+    /// and how many are waiting there (D58). `None` when it moved none.
+    pub aside: Option<Aside>,
+}
+
+/// The directory a reverse moved library files into instead of unlinking
+/// them, and how many files it holds (D58).
+///
+/// One value rather than two fields on the report, so a path cannot be
+/// reported over a count of zero. **Nothing ever empties this directory** —
+/// removing the files is a keystroke the user makes, because an automatic
+/// purge would put back the destructive path D58 removed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Aside {
+    /// Absolute, under the library root: `<dest_root>/.comic-renamer-aside/<run-id>`.
+    pub directory: PathBuf,
+    /// What the directory holds, not what this pass put there — a reverse that
+    /// refused some rows and was run again adds to a directory the earlier
+    /// pass started, and the number the user needs is how many are waiting. A
+    /// directory that cannot be read falls back to this pass's own count,
+    /// which is a true lower bound.
+    pub files: usize,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

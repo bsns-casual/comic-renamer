@@ -10,7 +10,9 @@ use crate::fsops::{
     ensure_root, prune_empty_dirs, resolve_at, sha256_of, stat_at, stream_verified, Entry,
 };
 use crate::preset::preset_by_id;
-use crate::types::{Mechanism, Mode, Resolved, Status as MapStatus, UndoError, UndoReport};
+use crate::types::{
+    Aside, Mechanism, Mode, Resolved, Status as MapStatus, UndoError, UndoReport,
+};
 use std::io::{self, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
@@ -344,7 +346,24 @@ pub fn reverse(manifest: &Path) -> Result<UndoReport, UndoError> {
         message: format!("unknown preset {:?}", m.preset),
     })?;
 
+    // D58's aside directory, named for the run whose reverse fills it: the run
+    // id is the record's own file name, which is what `undo --list` prints and
+    // `undo <run-id>` takes. One directory per run, so two runs' reverses
+    // cannot collide inside it.
+    let run_id = manifest.file_name().map(Path::new).ok_or_else(|| UndoError::Parse {
+        line: 0,
+        message: "this record has no file name to name an aside directory after".into(),
+    })?;
+    // `file_name` cannot yield a separator or `..`, so this holds by
+    // construction. Checked anyway: it is the one component of the aside path
+    // that does not come from this file, and a path reaching the library under
+    // a name the tool did not choose is the shape of every finding this
+    // branch exists to close.
+    single_component(run_id).map_err(|message| UndoError::Parse { line: 0, message })?;
+    let aside = Path::new(ASIDE).join(run_id);
+
     let mut report = UndoReport::default();
+    let mut moved_aside = 0usize;
     report.refused.extend(m.unreadable);
 
     // The bundle folder is where the files go back to, and a user who deleted
@@ -389,11 +408,30 @@ pub fn reverse(manifest: &Path) -> Result<UndoReport, UndoError> {
             record: None,
         };
         let own = [preset.destination(&resolved, &f.extension)];
-        match reverse_one(&row, &source_root, &dest_root, &own) {
-            Ok(true) => report.restored += 1,
-            Ok(false) => report.skipped += 1,
+        match reverse_one(&row, &source_root, &dest_root, &own, &aside) {
+            // Still a reverse: the library no longer holds the file and the
+            // bundle does. It also left a file behind, which the report has
+            // to name — nothing else will.
+            Ok(Reversed::MovedAside) => {
+                report.restored += 1;
+                moved_aside += 1;
+            }
+            Ok(Reversed::Restored) => report.restored += 1,
+            Ok(Reversed::Nothing) => report.skipped += 1,
             Err(why) => report.refused.push(format!("row {}: {why}", row.seq)),
         }
+    }
+    if moved_aside > 0 {
+        let directory = dest_root.join(&aside);
+        // What the directory holds, not what this pass put there: a reverse
+        // that refused some rows and was run again adds to a directory the
+        // earlier pass started. A read that fails still has `moved_aside`,
+        // which is a true lower bound, so no reverse reports a directory
+        // without a count.
+        let files = std::fs::read_dir(&directory)
+            .map(Iterator::count)
+            .unwrap_or(moved_aside);
+        report.aside = Some(Aside { directory, files });
     }
     Ok(report)
 }
@@ -403,9 +441,10 @@ fn reverse_one(
     source_root: &Path,
     dest_root: &Path,
     recomputed: &[PathBuf],
-) -> Result<bool, String> {
+    aside: &Path,
+) -> Result<Reversed, String> {
     if row.status == Status::Failed {
-        return Ok(false);
+        return Ok(Reversed::Nothing);
     }
     // Invariant 2 applied to reverse: a destination is only recognised if the
     // preset still produces it. Without this a hand-written manifest names an
@@ -428,7 +467,7 @@ fn reverse_one(
         // same run, usually. That is "nothing to do", not a refusal: treating
         // it as one left `refused` non-empty forever, so the manifest was
         // never renamed aside and `O_EXCL` killed the plan permanently.
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Reversed::Nothing),
         Err(e) => {
             return Err(format!(
                 "cannot resolve {}: {e}",
@@ -438,7 +477,7 @@ fn reverse_one(
     };
     let actual = match entry.identity() {
         Ok(actual) => actual,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Reversed::Nothing),
         Err(e) => {
             // `Path::exists()` answers false on EACCES, so a permission
             // problem used to read as "already reversed".
@@ -475,12 +514,13 @@ fn reverse_one(
                     "the original {} is not what this run copied from",
                     source_name.display()
                 )),
-                Ok(_) => remove_with_a_copy_at_the_source(
+                Ok(_) => move_aside_with_a_copy_at_the_source(
                     &entry,
                     source_root,
                     source_name,
                     dest_root,
                     &row.dest_relative,
+                    aside,
                 ),
             }
         }
@@ -495,15 +535,16 @@ fn reverse_one(
             Ok(actual) if row.status == Status::Placed
                 && row.source_identity == Some(*actual) =>
             {
-                remove_with_a_copy_at_the_source(
+                move_aside_with_a_copy_at_the_source(
                     &entry,
                     source_root,
                     source_name,
                     dest_root,
                     &row.dest_relative,
+                    aside,
                 )
             }
-            Ok(actual) if row.source_identity == Some(*actual) => Ok(false),
+            Ok(actual) if row.source_identity == Some(*actual) => Ok(Reversed::Nothing),
             Ok(_) => Err(format!("{} is occupied", source_name.display())),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 // The common case is a user who deleted the emptied bundle
@@ -514,7 +555,7 @@ fn reverse_one(
                     Ok(()) => {
                         prune_empty_dirs(dest_root, &row.dest_relative)
                             .map_err(|e| e.to_string())?;
-                        Ok(true)
+                        Ok(Reversed::Restored)
                     }
                     Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                         Err(format!("{} is occupied", source_name.display()))
@@ -558,9 +599,9 @@ fn reverse_one(
                             }
                         }
                         // Deliberately *not*
-                        // `remove_with_a_copy_at_the_source`. The copy at the
-                        // source is one this run streamed back a moment ago,
-                        // not one the record claims was always there, and
+                        // `move_aside_with_a_copy_at_the_source`. The copy at
+                        // the source is one this run streamed back a moment
+                        // ago, not one the record claims was always there, and
                         // `stream_verified` compared its SHA-256 against the
                         // bytes it read. Hashing the source again would
                         // re-read the payload for a comparison already made
@@ -569,11 +610,25 @@ fn reverse_one(
                         // cover. The asymmetry is the point: the gate exists
                         // for sources a record vouches for, and this one the
                         // tool wrote itself.
+                        //
+                        // **And this one still unlinks** (D58). The two
+                        // record-authorised sites rename into the aside
+                        // directory, because there the gate's agreement can
+                        // be stale by the time it acts. Here it cannot: this
+                        // run wrote the source itself, and `entry.identity()`
+                        // was just re-read through the pinned descriptor, so
+                        // the bytes provably exist in two places at the
+                        // moment of the unlink. Setting a file aside here
+                        // would leave every cross-volume undo with a second
+                        // copy of its whole payload in the library, for a
+                        // safety margin it already has. This is the same
+                        // asymmetry the content gate above has, for the same
+                        // reason.
                         match entry.remove() {
                             Ok(()) => {
                                 prune_empty_dirs(dest_root, &row.dest_relative)
                                     .map_err(|e| e.to_string())?;
-                                Ok(true)
+                                Ok(Reversed::Restored)
                             }
                             // Reported for what it is. The previous version
                             // called this "occupied", pointing the user at
@@ -592,7 +647,33 @@ fn reverse_one(
     }
 }
 
-/// The one gate on every unlink whose authority comes from a record.
+/// What one row's reverse did.
+///
+/// `MovedAside` is still a reverse — the library no longer holds the file and
+/// the bundle does — but it also left a file behind, in a directory nothing
+/// else on the system will ever mention. Counted separately for that reason.
+enum Reversed {
+    /// Already reversed, or never executed. Nothing to do.
+    Nothing,
+    /// The file is back at its source.
+    Restored,
+    /// The library's copy was renamed into the aside directory (D58).
+    MovedAside,
+}
+
+/// Where a reverse puts a library file it is authorised to remove (D58).
+///
+/// Under `dest_root`, so the rename is one `renameat` on one filesystem:
+/// atomic, and incapable of half-completing the way a cross-volume
+/// copy-then-unlink can. Dot-prefixed so a library scanner skips it.
+///
+/// **Nothing ever empties it.** Removing the files is a keystroke the user
+/// makes. An automatic purge would put back the destructive path D58 removes,
+/// and every sweep this project has written for its own convenience has had
+/// to be argued out of deleting something.
+const ASIDE: &str = ".comic-renamer-aside";
+
+/// The one gate on every library removal whose authority comes from a record.
 ///
 /// The identity check above compares the destination against the size, inode
 /// and mtime the record carries — numbers whoever wrote the record chose, and
@@ -601,32 +682,46 @@ fn reverse_one(
 /// `restored: 1, refused: []`. A better identity check cannot close it,
 /// because the record is still both sides of the comparison.
 ///
-/// So the filesystem decides instead. The destination goes only when a
+/// So the filesystem decides instead. The destination moves only when a
 /// regular file still sits at the recorded source and holds the same bytes,
-/// which makes the removal a de-duplication rather than a deletion. Someone
-/// who plants a record cannot then make the tool delete anything they did not
-/// already hold a copy of.
+/// which makes it a de-duplication rather than a deletion. Someone who plants
+/// a record cannot make the tool displace anything they did not already hold
+/// a copy of.
 ///
-/// Both unlink sites that act on record-supplied source data call this —
-/// `Mode::Copy`, and `Mode::Move`'s `placed` branch removing the duplicate a
+/// Both sites that act on record-supplied source data call this —
+/// `Mode::Copy`, and `Mode::Move`'s `placed` branch clearing the duplicate a
 /// failed unlink left. Guarding one and not the other only moves the finding
 /// to the other door.
 ///
 /// The source is hashed first: it is the record-claimed side, so it is where a
 /// refusal is expected, and reading it cannot hydrate a library file that is
 /// about to be refused anyway.
-fn remove_with_a_copy_at_the_source(
+///
+/// **What this check is for, since D58.** It decides whether the reverse is
+/// *correct*, and no longer whether it is *safe*. It used to decide both, and
+/// could not: an adversarial review showed the check-then-act, because the
+/// source is hashed by path and nothing holds it afterwards. A writer
+/// truncating the source between the two hashes got the library copy unlinked
+/// anyway — `1 restored · 0 refused`, exit 0, and a 400 MB payload in neither
+/// place, on the first attempt. Narrowing the window does not close it: a
+/// truncation between a re-hash and the unlink loses the same bytes, and the
+/// bundle folder has no lock by accepted design, so any content check on it is
+/// racy by construction. So the destructive step went instead (D58). A stale
+/// or forged authorisation now relocates a file inside the user's own library
+/// rather than destroying it.
+fn move_aside_with_a_copy_at_the_source(
     entry: &Entry,
     source_root: &Path,
     source_name: &Path,
     dest_root: &Path,
     dest_relative: &Path,
-) -> Result<bool, String> {
+    aside: &Path,
+) -> Result<Reversed, String> {
     let source = sha256_of(&source_root.join(source_name))
         .map_err(|e| format!("cannot read the original {}: {e}", source_name.display()))?;
     // Reading a cloud placeholder here hydrates it, which costs the download
-    // of a file that is then removed. D23 already accepts that cost on the
-    // way in, and the alternative is a hash the record supplies.
+    // of a file that is then moved. D23 already accepts that cost on the way
+    // in, and the alternative is a hash the record supplies.
     let placed = entry
         .sha256()
         .map_err(|e| format!("cannot read {}: {e}", dest_relative.display()))?;
@@ -637,9 +732,36 @@ fn remove_with_a_copy_at_the_source(
             dest_relative.display()
         ));
     }
-    entry.remove().map_err(|e| e.to_string())?;
+    // The leaf, and nothing else. `dest_relative` came from the record, and
+    // nothing here reconstructs a path it supplied: the shape of the aside
+    // path is this module's, and this is one component inside it. Two rows
+    // sharing a leaf within one run therefore collide, which `RENAME_EXCL`
+    // reports rather than overwriting (invariant 6).
+    let leaf = dest_relative
+        .file_name()
+        .ok_or_else(|| format!("{} names no file", dest_relative.display()))?;
+    let target = aside.join(leaf);
+    // Created here rather than up front: a reverse that moves nothing aside —
+    // every move-mode run — must not leave an empty directory in a library.
+    ensure_root(&dest_root.join(aside))
+        .map_err(|e| format!("cannot make room at {}: {e}", aside.display()))?;
+    // `Entry::rename_into` is `renameatx_np(RENAME_EXCL)` through the entry's
+    // own pinned parent descriptor — the same one the identity check and the
+    // hash above used, so the act and the checks stay on one resolution.
+    entry.rename_into(dest_root, &target).map_err(|e| {
+        if e.kind() == io::ErrorKind::AlreadyExists {
+            format!(
+                "{} is already set aside at {}; {} was left in the library",
+                Path::new(leaf).display(),
+                target.display(),
+                dest_relative.display()
+            )
+        } else {
+            format!("cannot move {} aside: {e}", dest_relative.display())
+        }
+    })?;
     prune_empty_dirs(dest_root, dest_relative).map_err(|e| e.to_string())?;
-    Ok(true)
+    Ok(Reversed::MovedAside)
 }
 
 fn plain_relative(path: &Path) -> Result<(), String> {

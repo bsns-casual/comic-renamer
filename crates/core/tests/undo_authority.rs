@@ -11,7 +11,7 @@
 mod common;
 
 use comic_renamer_core::preset::preset_by_id;
-use comic_renamer_core::types::{Mechanism, Mode, Resolved, Status};
+use comic_renamer_core::types::{Aside, Mechanism, Mode, Resolved, Status};
 use comic_renamer_core::undo::{reverse, UndoWriter};
 use common::{reverse_before, DEADLINE};
 use std::os::unix::fs::MetadataExt;
@@ -42,6 +42,9 @@ struct Fixture {
     _dir: TempDir,
     record: PathBuf,
     source_file: PathBuf,
+    /// The library root. D58's aside directory is under it, so a test that
+    /// looks for a file moved aside needs it.
+    library: PathBuf,
     library_file: PathBuf,
     recorded_source_identity: Identity,
 }
@@ -96,15 +99,22 @@ fn planted(mode: Mode) -> Fixture {
     if mode == Mode::Copy {
         w.record_done(seq).unwrap();
     }
-    Fixture { _dir: dir, record, source_file, library_file, recorded_source_identity }
+    Fixture { _dir: dir, record, source_file, library, library_file, recorded_source_identity }
 }
 
 /// A copy that really happened: the library holds the source's bytes, so the
-/// source is a copy of what is about to be deleted.
+/// source is a copy of what is about to be removed.
 fn real_copy() -> Fixture {
+    real_copy_of(b"the bytes of a comic")
+}
+
+/// As `real_copy`, over a payload the caller chooses. The race test needs one
+/// large enough that hashing it takes measurable time; every other test here
+/// is indifferent to the content and uses the default.
+fn real_copy_of(payload: &[u8]) -> Fixture {
     let (dir, source, library) = roots();
     let source_file = source.join("Hellboy_v01.pdf");
-    std::fs::write(&source_file, b"the bytes of a comic").unwrap();
+    std::fs::write(&source_file, payload).unwrap();
     let library_file = library.join(dest_for());
 
     let record = dir.path().join("run.record");
@@ -127,7 +137,7 @@ fn real_copy() -> Fixture {
     std::fs::copy(&source_file, &library_file).unwrap();
     w.record_placed(seq, identity_of(&library_file)).unwrap();
     w.record_done(seq).unwrap();
-    Fixture { _dir: dir, record, source_file, library_file, recorded_source_identity }
+    Fixture { _dir: dir, record, source_file, library, library_file, recorded_source_identity }
 }
 
 /// A same-volume move: the rename took the inode with it, so the source is
@@ -157,7 +167,7 @@ fn real_move() -> Fixture {
         .unwrap();
     std::fs::rename(&source_file, &library_file).unwrap();
     w.record_done(seq).unwrap();
-    Fixture { _dir: dir, record, source_file, library_file, recorded_source_identity }
+    Fixture { _dir: dir, record, source_file, library, library_file, recorded_source_identity }
 }
 
 /// Writes over a file without truncating it, so the inode and — given the
@@ -224,6 +234,11 @@ fn a_real_copy_is_reversed_because_the_source_still_matches() {
     assert_eq!(report.refused, Vec::<String>::new());
     assert_eq!(report.restored, 1);
     assert!(!f.library_file.exists() && f.source_file.exists());
+    // Since D58 "the destination is clear" is half the truth, and on its own
+    // it is also true of a reverse that destroyed the file. What happened to
+    // it is pinned in full below; this line is here so that reading only this
+    // test does not leave the stronger claim looking optional.
+    assert!(aside_file(&f).is_file(), "the library's copy was not set aside");
 }
 
 /// Isolates the content gate, which is the only test here that does.
@@ -390,11 +405,204 @@ fn a_fifo_at_the_destination_is_refused_rather_than_blocking() {
 
 /// Reversing a move by renaming back is untouched: `RENAME_EXCL` refuses to
 /// clobber, so nothing is deleted and nothing needs hashing.
+///
+/// And it leaves no aside directory. D58's directory is created by the row
+/// that needs it, not up front, because move is the default mode — a library
+/// reversed back to empty would otherwise be left holding a dot-directory
+/// that nothing in the tool ever removes.
 #[test]
 fn a_move_is_reversed_by_renaming_back_without_a_content_check() {
     let f = real_move();
-    assert_eq!(reverse(&f.record).unwrap().restored, 1);
+    let report = reverse(&f.record).unwrap();
+    assert_eq!(report.restored, 1);
     assert!(f.source_file.exists());
     assert!(!f.library_file.exists());
     assert_eq!(identity_of(&f.source_file), f.recorded_source_identity);
+    assert_eq!(report.aside, None);
+    assert!(
+        !f.library.join(ASIDE).exists(),
+        "a move-mode reverse created an aside directory it had no use for"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// D58: the act the gate authorises is a rename, not an unlink.
+// ---------------------------------------------------------------------------
+
+/// Hardcoded, not read from the crate. A test that asks the code what the
+/// directory is called cannot notice the dot going missing, and the dot is
+/// what keeps a library scanner out of it.
+const ASIDE: &str = ".comic-renamer-aside";
+
+/// Every fixture here writes its record as `run.record`, and a run id is the
+/// record's own file name.
+fn aside_dir(f: &Fixture) -> PathBuf {
+    f.library.join(ASIDE).join("run.record")
+}
+
+fn aside_file(f: &Fixture) -> PathBuf {
+    aside_dir(f).join(f.library_file.file_name().unwrap())
+}
+
+/// The decision itself: a reverse the gate authorises renames the library file
+/// into the aside directory and never unlinks it.
+///
+/// Also pins the **leaf only** rule. Were the target the record's
+/// `dest_relative`, the file would land under `…/run.record/Hellboy/` and this
+/// path would hold nothing — and since nothing creates that subdirectory, the
+/// rename would fail and the row would be refused instead.
+#[test]
+fn a_reversed_copy_moves_the_library_file_aside_rather_than_unlinking_it() {
+    let f = real_copy();
+    let payload = std::fs::read(&f.library_file).unwrap();
+
+    let report = reverse(&f.record).unwrap();
+    assert_eq!(report.refused, Vec::<String>::new());
+    assert_eq!(report.restored, 1);
+    assert!(!f.library_file.exists(), "the destination was cleared");
+    assert!(f.source_file.exists(), "the original is still at the source");
+
+    let kept = aside_file(&f);
+    assert!(
+        kept.is_file(),
+        "the library file was unlinked, not moved aside to {}",
+        kept.display()
+    );
+    assert_eq!(
+        std::fs::read(&kept).unwrap(),
+        payload,
+        "the bytes that were in the library are still on disk"
+    );
+    assert_eq!(
+        report.aside,
+        Some(Aside { directory: aside_dir(&f), files: 1 }),
+        "the report says where and how many"
+    );
+}
+
+/// `RENAME_EXCL` refuses rather than overwriting, and the row says so.
+///
+/// Reachable without an adversary: a first pass that refused some rows, run
+/// again, adds to a directory the earlier pass started — and two rows sharing
+/// a leaf inside one run arrive here too. Either way the file already set
+/// aside is not the one to lose.
+#[test]
+fn an_occupied_aside_name_refuses_and_overwrites_nothing() {
+    let f = real_copy();
+    let occupied = aside_file(&f);
+    std::fs::create_dir_all(occupied.parent().unwrap()).unwrap();
+    std::fs::write(&occupied, b"set aside by an earlier pass").unwrap();
+
+    let report = reverse(&f.record).unwrap();
+    assert_eq!(report.restored, 0);
+    assert!(
+        report.refused.iter().any(|why| why.contains("already set aside")),
+        "the refusal names the collision: {:?}",
+        report.refused
+    );
+    assert!(
+        f.library_file.exists(),
+        "the library file stays put when it cannot be moved aside"
+    );
+    assert_eq!(
+        std::fs::read(&occupied).unwrap(),
+        b"set aside by an earlier pass",
+        "the file already set aside was not clobbered"
+    );
+    assert_eq!(report.aside, None, "nothing was moved aside, so nothing is named");
+}
+
+/// Big enough that hashing it is a window another thread can act inside,
+/// small enough to write four times in a test.
+const PAYLOAD: usize = 8 << 20;
+
+fn atime_ns(path: &Path) -> i64 {
+    let m = std::fs::metadata(path).unwrap();
+    m.atime() * 1_000_000_000 + m.atime_nsec()
+}
+
+/// The race D58 exists for, reproduced, with the assertion that matters.
+///
+/// The gate hashed the source by path, hashed the destination, then unlinked.
+/// A writer truncating the source in between got the library copy unlinked
+/// anyway — `1 restored · 0 refused`, exit 0, and the payload in neither
+/// place. The adversarial run measured that with a 400 MB file and a
+/// wall-clock sleep; this reaches the same window without sleeping on a guess.
+///
+/// The trigger is the **destination's** atime. Nothing before the gate reads
+/// the destination — `identity()` is an `fstat`, and the source's check is a
+/// `stat` — so the first atime the destination gets is the gate's own hash of
+/// it, which runs after the source's. A writer that waits for that and then
+/// truncates is inside the window by construction.
+///
+/// Two assertions, and the second is what keeps this honest:
+///
+/// - **Every attempt:** the bytes that were in the library are still readable
+///   somewhere. That holds wherever the truncation landed, so it is not a
+///   timing claim and cannot pass by the writer being late.
+/// - **Across the attempts:** at least one reached the authorised act with the
+///   source already truncated. `restored == 1` says the gate agreed and acted;
+///   a truncation landing before the source's hash finished would have made
+///   the two hashes differ, and one landing before the identity check would
+///   have failed that — so either would have refused the row. The pair is an
+///   exact witness that the window was entered, and without it this test would
+///   pass on a machine whose writer never fired at all.
+#[test]
+fn nothing_is_lost_when_the_source_is_truncated_inside_the_gate() {
+    let payload = vec![b'c'; PAYLOAD];
+    let mut raced = 0;
+    let mut outcomes = Vec::new();
+
+    for attempt in 0..4 {
+        let f = real_copy_of(&payload);
+        // Sampled here, on this thread, before anything can read the
+        // destination. Taken inside the writer it would race the very hash it
+        // is waiting for.
+        let quiet = atime_ns(&f.library_file);
+
+        let watch = f.library_file.clone();
+        let source = f.source_file.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            while atime_ns(&watch) == quiet && start.elapsed() < DEADLINE {
+                std::thread::sleep(std::time::Duration::from_micros(200));
+            }
+            // One byte, so the source no longer holds what the gate just
+            // agreed it held.
+            std::fs::write(&source, b"x").unwrap();
+            tx.send(std::time::Instant::now()).unwrap();
+        });
+
+        let report = reverse(&f.record).unwrap();
+        let returned = std::time::Instant::now();
+        let truncated = rx.recv_timeout(DEADLINE).expect("the writer never fired");
+        writer.join().unwrap();
+
+        // Wherever it landed, the payload is still readable from one of the
+        // two places a reverse can leave it.
+        let survived = [aside_file(&f), f.library_file.clone()]
+            .iter()
+            .any(|p| std::fs::read(p).is_ok_and(|bytes| bytes == payload));
+        assert!(
+            survived,
+            "attempt {attempt}: the payload is in neither place. \
+             report: {report:?}; the source is now {} bytes",
+            std::fs::metadata(&f.source_file).map(|m| m.len()).unwrap_or(0)
+        );
+
+        let inside = report.restored == 1 && truncated < returned;
+        outcomes.push(format!(
+            "attempt {attempt}: restored={} refused={} inside_window={inside}",
+            report.restored,
+            report.refused.len()
+        ));
+        raced += usize::from(inside);
+    }
+
+    assert!(
+        raced > 0,
+        "the window was never entered, so this proved nothing:\n  {}",
+        outcomes.join("\n  ")
+    );
 }

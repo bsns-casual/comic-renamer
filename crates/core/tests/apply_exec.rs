@@ -884,17 +884,45 @@ fn scan_apply_undo_restores_the_tree() {
     assert!(f.files_under(&f.dest).is_empty(), "the destination still holds files");
 }
 
+/// D58 changed what this test can claim. The destination is still cleared,
+/// but the file it held is now in the aside directory, which is itself under
+/// the library root — so `files_under(&f.dest)` is no longer empty, and a
+/// version of this test that still asserted it was would be asserting that
+/// the bytes had been destroyed.
+///
+/// Named rather than counted: "one file somewhere under the library" would
+/// also be true of a reverse that did nothing at all.
 #[test]
-fn reverse_of_a_copy_deletes_the_destination_only() {
+fn reverse_of_a_copy_clears_the_destination_and_sets_the_file_aside() {
     let c = gcd();
     let f = Fixture::new(&["mazebook.pdf"], &c, Mode::Copy);
     let record = f.run().unwrap().record.unwrap();
+    let placed = f.dest.join("Mazebook/Mazebook.pdf");
+    assert!(placed.is_file(), "nothing was placed to reverse");
 
     // The source must be untouched throughout: getting copy and move the
     // wrong way round here clobbers a kept original.
     let guard = TreeGuard::new(&[f.source.as_path()]);
-    f.undo(&record).unwrap();
-    assert!(f.files_under(&f.dest).is_empty());
+    let report = f.undo(&record).unwrap();
+    assert!(!placed.exists(), "the destination was not cleared");
+
+    let aside = report.aside.expect("a reversed copy names its aside directory");
+    assert_eq!(aside.files, 1);
+    assert!(
+        aside.directory.starts_with(f.dest.canonicalize().unwrap()),
+        "the aside directory belongs under the library root: {}",
+        aside.directory.display()
+    );
+    assert_eq!(
+        std::fs::read_to_string(aside.directory.join("Mazebook.pdf")).unwrap(),
+        "contents of mazebook.pdf",
+        "the bytes the library held are still readable"
+    );
+    assert_eq!(
+        f.files_under(&f.dest),
+        vec!["Mazebook.pdf".to_string()],
+        "the only file left under the library is the one set aside"
+    );
     drop(guard);
 }
 
