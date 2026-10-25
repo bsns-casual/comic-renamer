@@ -333,8 +333,8 @@ fn reverse_refuses_when_only_size_and_inode_match() {
 /// and the only thing standing between that and a stranger's file being moved
 /// into the user's bundle folder is the identity comparison. Every weakening
 /// of that comparison survived the suite, because the only fixture exercising
-/// it was `Mode::Copy`, where `remove_with_a_copy_at_the_source` hashes the
-/// two sides and refuses anyway.
+/// it was `Mode::Copy`, where `move_aside_with_a_copy_at_the_source` hashes
+/// the two sides and refuses anyway.
 struct RecordedMove {
     _dir: TempDir,
     manifest: PathBuf,

@@ -541,12 +541,17 @@ fn atime_ns(path: &Path) -> i64 {
 ///   somewhere. That holds wherever the truncation landed, so it is not a
 ///   timing claim and cannot pass by the writer being late.
 /// - **Across the attempts:** at least one reached the authorised act with the
-///   source already truncated. `restored == 1` says the gate agreed and acted;
+///   source already truncated. Two observations bound it from each side, and
+///   both are exact rather than timed. `restored == 1` bounds it from below:
 ///   a truncation landing before the source's hash finished would have made
 ///   the two hashes differ, and one landing before the identity check would
-///   have failed that — so either would have refused the row. The pair is an
-///   exact witness that the window was entered, and without it this test would
-///   pass on a machine whose writer never fired at all.
+///   have failed that, so either would have refused the row — the row was
+///   reversed, therefore the truncation is after the source's hash. The
+///   writer's own `stat` bounds it from above: taken after its write has
+///   completed, a destination still at its own path means the act has not
+///   happened yet. Together they place the truncation strictly inside the
+///   window, and without them this test would pass on a machine whose writer
+///   never fired at all.
 #[test]
 fn nothing_is_lost_when_the_source_is_truncated_inside_the_gate() {
     let payload = vec![b'c'; PAYLOAD];
@@ -571,12 +576,25 @@ fn nothing_is_lost_when_the_source_is_truncated_inside_the_gate() {
             // One byte, so the source no longer holds what the gate just
             // agreed it held.
             std::fs::write(&source, b"x").unwrap();
-            tx.send(std::time::Instant::now()).unwrap();
+            // One `stat`, immediately after that write, and it is what makes
+            // the bound exact instead of a timing argument. The write has
+            // already completed, so a destination still sitting at its own
+            // path means the act has not happened yet — and therefore that
+            // the truncation is strictly before it. Finding it already gone
+            // is conservative: that attempt simply does not count, which is
+            // the safe direction for a witness.
+            //
+            // Comparing instants cannot say this. A truncation that lands
+            // after the rename but before `reverse` returns — during
+            // `prune_empty_dirs`, or the `read_dir` that counts the aside
+            // directory — is earlier than the return and later than the act,
+            // so a `truncated < returned` bound would call it a witness when
+            // it is not one.
+            tx.send(watch.exists()).unwrap();
         });
 
         let report = reverse(&f.record).unwrap();
-        let returned = std::time::Instant::now();
-        let truncated = rx.recv_timeout(DEADLINE).expect("the writer never fired");
+        let before_the_act = rx.recv_timeout(DEADLINE).expect("the writer never fired");
         writer.join().unwrap();
 
         // Wherever it landed, the payload is still readable from one of the
@@ -591,9 +609,10 @@ fn nothing_is_lost_when_the_source_is_truncated_inside_the_gate() {
             std::fs::metadata(&f.source_file).map(|m| m.len()).unwrap_or(0)
         );
 
-        let inside = report.restored == 1 && truncated < returned;
+        let inside = report.restored == 1 && before_the_act;
         outcomes.push(format!(
-            "attempt {attempt}: restored={} refused={} inside_window={inside}",
+            "attempt {attempt}: restored={} refused={} before_the_act={before_the_act} \
+             inside_window={inside}",
             report.restored,
             report.refused.len()
         ));

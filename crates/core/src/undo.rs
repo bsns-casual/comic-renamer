@@ -613,17 +613,29 @@ fn reverse_one(
                         //
                         // **And this one still unlinks** (D58). The two
                         // record-authorised sites rename into the aside
-                        // directory, because there the gate's agreement can
-                        // be stale by the time it acts. Here it cannot: this
-                        // run wrote the source itself, and `entry.identity()`
-                        // was just re-read through the pinned descriptor, so
-                        // the bytes provably exist in two places at the
-                        // moment of the unlink. Setting a file aside here
-                        // would leave every cross-volume undo with a second
-                        // copy of its whole payload in the library, for a
-                        // safety margin it already has. This is the same
-                        // asymmetry the content gate above has, for the same
-                        // reason.
+                        // directory because the agreement that licenses them
+                        // is about the *source*, which nothing locks, so it
+                        // can be stale by the time they act. Here the
+                        // agreement is about the destination:
+                        // `entry.identity()` was just re-read through the
+                        // pinned descriptor, so the file this unlinks is the
+                        // one the row recorded, and the copy at the source is
+                        // one this run wrote rather than one the record
+                        // vouches for.
+                        //
+                        // Stated no more strongly than that. It bounds
+                        // *which* file goes; it does not establish that the
+                        // same bytes now exist in two places, and the
+                        // `shortcut` above is why — `stream_verified`
+                        // re-opens the library file by path, so a component
+                        // swapped inside the library during the stream has
+                        // the copy read a stranger while the recorded file is
+                        // still removed. Moving aside here would make that
+                        // residual recoverable, at the price of a second copy
+                        // of the whole payload in the library on every
+                        // cross-volume undo; D58 weighed the two and kept the
+                        // unlink. Closing the residual itself needs the
+                        // fd-taking variant the shortcut names.
                         match entry.remove() {
                             Ok(()) => {
                                 prune_empty_dirs(dest_root, &row.dest_relative)
