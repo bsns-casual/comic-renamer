@@ -53,9 +53,53 @@ the authority for the one irreversible act.
 
 ## 2. The decisions
 
+**D58 — reversing a copy moves the library file aside; it never unlinks it.**
+Owner's decision, 2026-10-24. D54 below stands, but the act it guards is no
+longer destructive, which is what makes the guard's own race survivable.
+
+An adversarial review demonstrated that `remove_with_a_copy_at_the_source` is
+itself check-then-act — invariant 6 — inside the fix for invariant 11. It hashes
+the source **by path**, hashes the destination through a pinned descriptor, then
+unlinks. A writer truncating the source between the two reads gets the library
+copy unlinked anyway: `1 restored · 0 refused`, exit 0, **a 400 MB payload in
+neither place, on the first attempt.** The destination side is sound; the source
+cannot be, because the bundle folder has no lock by accepted design, so any
+content check on it is racy by construction. Narrowing the window does not close
+it — truncation between a re-hash and the unlink loses the same bytes.
+
+So the destructive step goes, rather than the window shrinking:
+
+- The two **record-authorised** unlinks — the Copy arm and the Move arm's
+  `Placed` branch — rename the library file into
+  `<dest_root>/.comic-renamer-aside/<run-id>/` instead of unlinking it.
+- The target is **under `dest_root`**, so the move is a `renameat` on one
+  filesystem: atomic, and incapable of half-completing the way a cross-volume
+  copy-then-unlink can. `Entry::rename_into` already does exactly this, through
+  the same pinned parent descriptor the identity check and the hash used, with
+  `RENAME_EXCL` so it refuses rather than clobbering (invariant 6).
+- The name is the **leaf only**, not the record's `dest_relative`: nothing
+  reconstructs a path the record supplied. Two rows sharing a leaf inside one
+  run collide, and `RENAME_EXCL` reports it rather than overwriting.
+- The directory is dot-prefixed so a library scanner skips it.
+- The **third** unlink site keeps `remove()`. There the tool itself streamed the
+  source back moments earlier and re-verified the destination through the
+  handle, so the bytes provably exist in two places. That is the same asymmetry
+  the content gate already has, for the same reason.
+
+**Nothing ever empties the aside directory.** A reverse reports its path and how
+many files it holds, and removing them is a keystroke the user makes. Automatic
+purging would put a destructive path back, which is the thing this decision
+removes.
+
+What this does to the guard above: the content check still decides whether a
+reverse is **correct**, and no longer decides whether it is **safe**. A stale or
+forged authorisation now relocates a file inside the user's own library instead
+of destroying it, so invariant 11's stakes fall to the same level as D54's
+already-accepted relocation residual.
+
 **D54 — A record locates files; it never authorises deleting one.**
-Reversing a *copy* deletes a library file, and that is the only irreversible
-half. The tool verifies against the filesystem instead of against the record:
+Reversing a *copy* moves a library file aside (D58), and that was the only
+irreversible half until D58 made it recoverable. The tool verifies against the filesystem instead of against the record:
 the destination may be removed only when the file it was copied from is still
 present at the recorded source **and has the same content**. A planted record
 cannot make the tool delete anything the planter did not already hold a copy of.
