@@ -8,7 +8,7 @@ use comic_renamer_core::apply::{apply, reverse_run, Lock};
 use comic_renamer_core::mapping::Mappings;
 use comic_renamer_core::preset::preset_by_id;
 use comic_renamer_core::types::{
-    ApplyError, ApplyResult, Mechanism, Mode, Resolved, ScanOpts, Status, UndoReport,
+    ApplyError, ApplyResult, Aside, Mechanism, Mode, Resolved, ScanOpts, Status, UndoReport,
 };
 use comic_renamer_core::undo::{reverse, UndoWriter};
 
@@ -1062,9 +1062,52 @@ fn an_interrupted_apply_reverses_the_completed_rows() {
         2,
         "undo disturbed the sources"
     );
-    // The duplicate is gone and the library is empty again: rows_still_moved == 0.
-    let left: Vec<_> = walkdir(&dest);
-    assert!(left.is_empty(), "rows still moved: {left:?}");
+    // D58 changed what this test can claim. Reversing a `placed` move takes
+    // the record-authorised unlink, which now renames the library file into
+    // the aside directory — so "the library is empty" would be asserting that
+    // the duplicate's bytes were destroyed, which is the thing D58 removed.
+    //
+    // What is still true, and asserted positively below: nothing remains at a
+    // library *destination*, and the file that moved is in the aside directory
+    // under this run's id with its bytes readable.
+    //
+    // The destinations are recomputed through the preset, the way `apply` does
+    // (invariant 2). Reading them out of the plan would check the library
+    // against a string the plan supplied.
+    let komga = preset_by_id("komga").unwrap();
+    for row in &rows {
+        let destination = dest.join(komga.destination(&row.resolved(), &row.extension));
+        assert!(
+            !destination.exists(),
+            "a row is still at its library destination: {}",
+            destination.display()
+        );
+    }
+
+    // Named rather than counted, as its same-volume sibling is: the directory
+    // is this run's id, and the file in it reads back. "One file somewhere
+    // under the library" would also hold for a reverse that moved nothing.
+    let aside = dest
+        .canonicalize()
+        .unwrap()
+        .join(".comic-renamer-aside")
+        .join(found[0].file_name().expect("a record is named after its run"));
+    assert_eq!(
+        report.aside,
+        Some(Aside { directory: aside.clone(), files: 1 }),
+        "the reverse did not name the directory it moved the duplicate into: {report:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(aside.join("Birdking Vol. 01.pdf")).unwrap(),
+        "contents of birdking_vol1.pdf",
+        "the duplicate's bytes are neither at the destination nor set aside"
+    );
+    // And nowhere else under the library: one file, the one set aside.
+    assert_eq!(
+        walkdir(&dest),
+        vec!["Birdking Vol. 01.pdf".to_string()],
+        "the library holds something besides the file set aside"
+    );
 
     let _ = std::fs::remove_dir_all(&dest);
 }
