@@ -506,14 +506,23 @@ name above.
 
 ### Pick up here
 
-**0. Two data-safety findings, closed on a branch that has not merged.**
+**0. Two data-safety findings, closed, merged and green.**
 `docs/research/2026-10-23-two-pre-existing-data-safety-findings.md` describes
 both. The first was a data-loss path: a hand-written manifest beside a forged
 plan made `undo` delete a library file no run placed. The second needed no
 adversary: a second terminal running `scan` substituted a plan under a
 confirmation already given. Session-scoped undo addresses them with invariant 11
-(D54, D58) and by reading the plan once and executing from that copy. Both were
-tested on the branch, but **no run on GitHub has been observed for it**.
+(D54, D58) and by reading the plan once and executing from that copy. Merged to
+`main` on 2026-10-25 at `55407a3`, and **CI run 40163809503 is green on all six
+jobs** — the first time every job has run on this work.
+
+One note on how it got there, because the shape recurs: the merge went out with
+the volume job red. `cargo test --workspace` reports 534 and **skips the nine
+`#[ignore]`d tests**, so "534 passed" was never the whole suite, and one of those
+nine asserted the pre-D58 truth that a reversed copy leaves the library empty.
+Four visible tests were updated when D58 landed; the invisible one was not,
+because that round's brief did not require the RAM-disk run. **Quote 534 of 543,
+or run the volume suite.**
 
 The first fix then needed a second one. An adversarial seat showed D54's own
 gate was check-then-act on the source and lost the file outright when raced —
@@ -528,6 +537,45 @@ window by construction rather than on a timed guess. The
 design's §7 left one question open that was deliberately not planned: sweeping
 records written by an install that predates the sweep. No release has shipped,
 so none exists.
+
+### Four decisions waiting on the owner
+
+None blocks development and none blocks a release. Each was ruled on during the
+session-scoped-undo work and deliberately left for the owner, with the reasoning
+recorded here so it does not have to be re-derived.
+
+**D-a. `apply`'s exit code for a consented run that places nothing.** A run that
+*can* place nothing is caught before the prompt by `facts.files == 0`, skips the
+mode block, and exits non-zero — that part is accurate. A run that passes the
+typed confirmation and *then* places nothing, because every row collided at
+execution, exits **zero**. By this file's own reasoning that is wrong: "an exit
+code that is zero either way cannot tell a caller 'the library matches the plan'
+from 'it does not'." It was left alone because it is pre-existing and a
+user-visible change to the one contract automation depends on, which is not a
+thing to alter inside a plan about undo records.
+
+**D-b. What `reversible` should count.** It counts rows the record *recorded* as
+reversible, not rows still in the library, so a partial reverse over-reports.
+Changing it changes the menu's wording and `undo --list`'s output, so it is a
+semantics decision rather than a fix. Note the related trap, already closed: the
+count must stay derived from `expected()`, because the two disagreed once and a
+crash in the default mode's one-syscall window then produced a record every
+automatic path read as empty and the next run deleted.
+
+**D-c. Whether the menu expands `~`.** `ask_path` strips quotes and does not
+expand `~`; the doc comment claiming otherwise has been corrected. A shell
+expands `~` before `scan` ever sees it, but a menu prompt does not — and the menu
+is the entry point for people who do not use flags, which is exactly the
+population that types `~/Comics`. The gap is real; how much path syntax a prompt
+should parse is the open question.
+
+**D-d. D57's "one record per pair" wording.** The sweep now exempts a record that
+is `interrupted && reversible > 0`, so retention is one finished record **plus one
+per un-reversed partial run**, with no constant cap. Measured: three
+interrupted-with-rows records for one pair gives "swept 1; records left 4", and
+`first_interrupted` surfaces only the newest, so the rest are reachable only
+through `undo --list`. The behaviour is defensible and documented as a D57
+exception; the entry's own summary sentence no longer describes it.
 
 Then, two things that gate a release but block no development.
 
