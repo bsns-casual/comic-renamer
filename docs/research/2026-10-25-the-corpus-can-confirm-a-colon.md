@@ -82,11 +82,16 @@ to `name_key`, and reported `Before the Fall` as **unconfirmed** — contradicti
 a direct query made minutes earlier. Comparing a key derived from the `name`
 column on both sides raised the confirmed count from 68 to 111. **Anything
 matching against this corpus must either reproduce GCD's stopword rules or
-compare on `name`.** Worth checking whether the resolver's own corpus lookup has
-this asymmetry, because it would depress `located` silently.
+compare on `name`.**
+
+*Checked, 2026-10-25: the resolver does not have this asymmetry.*
+`Corpus::open` indexes `key_variants(&record.name)` **and** inserts `name_key`,
+so both spellings reach the same records and `located` is not depressed by it.
+`seed`'s own lookup compares on `name` for the opposite reason: it needs the
+string to be the *same* string, not merely stopword-equivalent.
 
 **`issue_count` must not be used to bound a volume.** 107 of the 111 confirmed
-stems have `issue_count >= N`, which looks like a free sanity check. The four
+stems have `issue_count >= N`, which looks like a free quick check. The four
 exceptions are all `Battle Angel Alita: Last Order`, which the corpus records at
 15 issues while the bundle holds volumes 16–19 — the corpus is simply incomplete
 there. Gating on it would have discarded four correct rows. Use the corpus to
@@ -94,12 +99,32 @@ confirm the **series**; never to reject the volume. This is independent support
 for D44, which stores `volume_count` per row precisely because deriving a padding
 width from a growing table is unsafe.
 
-## What to do with it
+*And the resolver already does gate on it.* `corpus_ladder`'s step 3 is
+"volume feasibility: a hard constraint. A file numbered volume N cannot belong
+to a series with fewer than N entries" — the same rule, live, where it costs a
+*suggestion* rather than a row. `measure` buckets 93 of 2,223 rows (4.2%) as
+"corpus refused (language or volume)", which is the upper bound on what it
+costs; the bucket does not yet separate the two causes, and splitting it is the
+next cheap measurement if the suggestion rate is ever worth raising.
+`MappingRow::validate` carries the rule too, but only for a row with a
+`volume_count`, and `seed` writes none — so the four Alita rows are stored, not
+rejected.
 
-The change belongs in `xtask/src/seed.rs`'s `build_row`, which today calls
-`parse_title` and nothing else. Given a title with a trailing volume marker and a
-colon in the stem, ask the corpus whether the stem is a series; if it is, take
-that as the series and the marker as the volume.
+## What was done with it
+
+**Implemented in `xtask/src/seed.rs` on 2026-10-25** (`trailing_volume`,
+`is_series`, `corpus_split`, and a fifth parameter on `build_row`). A run
+against the pinned corpus confirms **111 rows**, matching this measurement
+exactly, and the generator reports them as their own class rather than folding
+them into "clean" — the point is that a reviewer can tell a corpus-confirmed
+split from a guess. The colon class fell from 129 to 18, and the known-bad
+fraction from 14.7% to 9.7%.
+
+The 12 whole-title confirmations were **deliberately left out**. They change no
+field — the parser already keeps a bare trailing number in the series name — so
+they would only relabel 12 of 197 flagged rows, which does not change the
+review's shape. The lookup is one function (`is_series`) if that ever becomes
+worth doing.
 
 Two things that stay true:
 
@@ -112,5 +137,6 @@ Two things that stay true:
   stops ignoring it.
 
 Known-bad fraction before: **14.7%** (8.9% bare trailing number, 5.8% volume
-marker swallowed by a colon, 0.0% multiple colons). The colon class is the one
-this closes.
+marker swallowed by a colon, 0.0% multiple colons). After: **9.7%**, the colon
+class reduced to the 18 titles the corpus cannot speak to — light novels,
+audiobooks, `Altair`, and `The Goon: Bunch of Old Crap Omnibus`.

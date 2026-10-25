@@ -266,25 +266,48 @@ one at a time. `cargo xtask seed` regenerates them from
 also writes about 2,200 candidate rows to `target/seed/humble.tsv`, which is
 untracked. It waits for the maintainer to review it, because D51 and the rebuild's
 §4 forbid storing rows nobody approved, and committing 2,200 unreviewed rows on
-the first commit would do exactly that. On its last run (2026-10-23) the
+the first commit would do exactly that. On its last run (2026-10-25) the
 generator built 2,223 rows, rejected 1 (a short line), found 0 key collisions, and
 de-duplicated to 2,204. Its own classification of the 2,223:
 
 ```
 1896   85.3%  clean
  197    8.9%  bare trailing number in the series (not a volume marker)
- 129    5.8%  volume marker swallowed into the subtitle (colon came first)
+ 111    5.0%  corpus confirms the series (colon kept, volume recovered)
+  18    0.8%  volume marker swallowed into the subtitle (colon came first)
    1    0.0%  multiple colons
 ```
 
 **"Clean" is an upper bound.** It means no heuristic fired, not that a human
-agreed. The other 14.7% are known-bad decompositions, such as
-`Attack on Titan: Before the Fall Vol. 9` becoming series "Attack on Titan" with
-subtitle "Before the Fall Vol. 9" and no volume. Review them in a `map` session
-before any of this is committed.
+agreed. The 9.7% in the other three classes are known-bad decompositions; a
+`map` session is where they get corrected, before any of this is committed.
 
-**Tests:** `cargo test --workspace` runs 534 and ignores 9 (counted 2026-10-25
-by summing the `test result:` lines: 534 passed, 0 failed, 9 ignored; 530 before
+**The colon class was 129 rows and is now 18, because `seed` asks the corpus.**
+Where a verified title ends in a volume marker and its stem carries a colon,
+the generator looks the stem up: `Attack on Titan: Before the Fall` is one of
+seven Attack on Titan series GCD records, with 17 issues, so the colon belongs
+to the name and `Vol. 9` is the volume — not an arc of `Attack on Titan` with
+the marker stranded in a subtitle. 111 of 127 such titles confirm;
+`docs/research/2026-10-25-the-corpus-can-confirm-a-colon.md` measures it and
+names the 16 that do not. Three things that lookup deliberately does not do,
+each of which cost something to find:
+
+- **It never consults `issue_count`.** Four `Battle Angel Alita: Last Order`
+  rows hold volumes 16–19 of a run GCD records at 15. The corpus confirms the
+  *series*, never the volume, which is independent support for D44.
+- **It compares squashed names on both sides.** GCD's own `name_key` strips
+  stopwords (`attackontitanbeforefall`, no "the"), and matching against that
+  alone reported this very series as unconfirmed: 68 instead of 111.
+- **It never touches the 12 shipped marketplace rows.** Those were confirmed
+  title by title, and a keystroke outranks a lookup (D50, D51). `data/mappings/`
+  is byte-identical after a regeneration, which is the check that proves it.
+
+A missing corpus is "no guess", not an error (D49): `seed` prints one line and
+falls back to the parser for every row. `measure` still requires one.
+
+**Tests:** `cargo test --workspace` runs 537 and ignores 9 (counted 2026-10-25
+by summing the `test result:` lines: 537 passed, 0 failed, 9 ignored; 534 before
+the corpus-confirms-a-colon change, 530 before
 D58, 510 before a four-seat adversarial review, 500 before the whole-branch
 review's fix wave, 409 and 7 before session-scoped undo), with no compiler
 warnings. The nine `#[ignore]`d
@@ -633,8 +656,12 @@ repository is a different use, and nobody has answered whether it is allowed.
 does not wait on it; publishing it does. (D51, rebuild §10)
 
 **2. The Humble table review.** See "What ships" above. The generator's output
-sits in `target/seed/humble.tsv`, and the 14.7% in known-bad decomposition
-classes need correcting by hand before anything is committed. A `map` session is
+sits in `target/seed/humble.tsv`, and the 9.7% in known-bad decomposition
+classes need correcting by hand before anything is committed. The largest
+remaining class is the 197 bare trailing numbers (8.9%): a whole-title corpus
+lookup confirms 12 of them (`RoboCop 2`, `B.P.R.D.: 1948`), which was measured
+and **deliberately not implemented** — it changes no field, only the report, so
+12 of 197 does not change the review's shape. A `map` session is
 the intended tool for it. **Invariant 7's bundle half matters here**: 158 of the
 table's 2,036 keys appear under more than one bundle, so this is the table where
 a literal bundle comparison would have started costing titles.
@@ -683,6 +710,14 @@ toolchain.
 - **`volume_count` is user-supplied** and sets the zero-padding width (D44, which
   replaced D37's corpus lookup). A wrong value produces a wrong *name*, never a
   wrong *location*.
+- **The resolver treats `issue_count` as a hard volume bound, and the corpus is
+  incomplete.** `corpus_ladder`'s step 3 refuses a series with fewer entries
+  than the file's volume number. `Battle Angel Alita: Last Order` is recorded at
+  15 issues and the bundle holds volumes 16–19, so four real rows get no
+  suggestion. `measure` reports 93 of 2,223 rows (4.2%) as "corpus refused
+  (language or volume)" — an upper bound, since that bucket mixes the two
+  causes. Splitting it is the cheap next measurement; it costs typing, never
+  data, which is why nothing was changed here.
 - `located`: *Domestic Girlfriend* and *Altair* were absent from the corpus when
   Task 12 was written — manga romanisation, the gap §6.2.1 gives Layer B — and
   `mirkaandolfosmercy_vol1` is the reverse match direction, where §6.1 specifies
