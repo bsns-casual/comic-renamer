@@ -56,10 +56,16 @@ fn main() {
     }
 }
 
-fn measure() -> Result<(), String> {
+/// The pinned corpus, downloading it if the cache has none. `measure` requires
+/// it; `seed` treats a failure as "no guess" (D49).
+fn open_corpus() -> Result<Corpus, String> {
     let manifest = parse_manifest(MANIFEST).map_err(|e| e.to_string())?;
     let database = ensure_corpus(&manifest, &cache_dir()?).map_err(|e| e.to_string())?;
-    let corpus = Corpus::open(&database, &manifest).map_err(|e| e.to_string())?;
+    Corpus::open(&database, &manifest).map_err(|e| e.to_string())
+}
+
+fn measure() -> Result<(), String> {
+    let corpus = open_corpus()?;
     let overrides = Overrides::parse(OVERRIDES).map_err(|e| e.to_string())?;
 
     // Located: a row counts when the corpus named a series at all, whether or
