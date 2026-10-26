@@ -17,8 +17,8 @@ use tempfile::{tempdir, TempDir};
 
 fn gcd() -> Mappings {
     mappings(&[
-        ("mazebook", "Mazebook", None, None, Some(5)),
-        ("birdking_vol1", "Birdking", Some(1), None, Some(3)),
+        ("mazebook", "Mazebook", None, None, None, Some(5)),
+        ("birdking_vol1", "Birdking", Some(1), None, None, Some(3)),
         // A subtitle, because the preset puts it in the leaf — `Hellboy Vol.
         // 01 - Seed of Destruction.pdf` — so a record that loses it names a
         // path the preset does not produce and the row is refused forever.
@@ -26,13 +26,14 @@ fn gcd() -> Mappings {
             "hellboy_vol1_seedofdestruction",
             "Hellboy",
             Some(1),
+            None,
             Some("Seed of Destruction"),
             Some(4),
         ),
         // A run of 100, because `pad` is `run.to_string().len().max(2)` and
         // every shorter run floors to width 2 — so this is the only shape in
         // which the run is visible in a path at all.
-        ("velvet_vol1", "Velvet", Some(1), None, Some(100)),
+        ("velvet_vol1", "Velvet", Some(1), None, None, Some(100)),
     ])
 }
 

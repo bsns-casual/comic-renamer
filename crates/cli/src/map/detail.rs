@@ -207,6 +207,8 @@ impl<'a> Detail<'a> {
             key: String::new(),
             series: fields.series.clone(),
             volume: fields.volume,
+            // Task 7 wires `fields.issue` once ParsedTitle carries one.
+            issue: None,
             subtitle: fields.subtitle.clone(),
             lang: String::new(),
             volume_count: super::table::run_length(&self.candidates, &fields.series),
@@ -627,6 +629,7 @@ mod tests {
                 key: String::new(),
                 series: "Same".into(),
                 volume: Some(1),
+                issue: None,
                 subtitle: None,
                 lang: String::new(),
                 volume_count: e.approved_row().unwrap().1,

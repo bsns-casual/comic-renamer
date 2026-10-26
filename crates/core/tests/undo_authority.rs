@@ -23,6 +23,7 @@ fn dest_for() -> PathBuf {
     let resolved = Resolved {
         series: "Hellboy".into(),
         volume: Some(1),
+        issue: None,
         subtitle: None,
         run: 3,
         status: Status::Mapped,

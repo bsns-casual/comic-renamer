@@ -402,6 +402,9 @@ pub fn reverse(manifest: &Path) -> Result<UndoReport, UndoError> {
         let resolved = Resolved {
             series: f.series.clone(),
             volume: f.volume,
+            // TASK 5 OWNS THIS. The record has no `issue` column yet, so a
+            // reverse of an issue row rebuilds the wrong leaf until it does.
+            issue: None,
             subtitle: f.subtitle.clone(),
             run: f.run,
             status: MapStatus::Mapped,

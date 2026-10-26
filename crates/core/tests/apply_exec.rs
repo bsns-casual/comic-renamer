@@ -27,6 +27,7 @@ fn produced(series: &str) -> (Resolved, PathBuf) {
     let resolved = Resolved {
         series: series.into(),
         volume: None,
+        issue: None,
         subtitle: None,
         run: 5,
         status: Status::Mapped,
@@ -38,14 +39,14 @@ fn produced(series: &str) -> (Resolved, PathBuf) {
 
 fn gcd() -> Mappings {
     mappings(&[
-        ("mazebook", "Mazebook", None, None, Some(5)),
-        ("birdking_vol1", "Birdking", Some(1), None, Some(3)),
+        ("mazebook", "Mazebook", None, None, None, Some(5)),
+        ("birdking_vol1", "Birdking", Some(1), None, None, Some(3)),
         // The second volume of the same series, so two rows share one series
         // folder. Every other pair in this file lands in a directory of its
         // own, which is why nothing could see the order rows are reversed in
         // or the `prune_empty_dirs` call between them.
-        ("birdking_vol2", "Birdking", Some(2), None, Some(3)),
-        ("hellboyomnibus_vol1", "Hellboy Omnibus", Some(1), None, Some(4)),
+        ("birdking_vol2", "Birdking", Some(2), None, None, Some(3)),
+        ("hellboyomnibus_vol1", "Hellboy Omnibus", Some(1), None, None, Some(4)),
     ])
 }
 
@@ -672,6 +673,7 @@ fn a_fifo_at_a_cross_volume_destination_is_refused_rather_than_streamed() {
     let resolved = comic_renamer_core::types::Resolved {
         series: "Mazebook".into(),
         volume: None,
+        issue: None,
         subtitle: None,
         run: 5,
         status: comic_renamer_core::types::Status::Mapped,

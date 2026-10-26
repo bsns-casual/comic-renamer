@@ -86,6 +86,7 @@ fn two_issues_of_one_series_render_to_different_paths() {
         let r = Resolved {
             series: p.series,
             volume: p.volume,
+            issue: None,
             subtitle: p.subtitle,
             run: 0,
             status: Status::Mapped,

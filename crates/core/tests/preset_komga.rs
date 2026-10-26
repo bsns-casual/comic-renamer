@@ -14,6 +14,7 @@ fn res(series: &str, volume: Option<u32>, run: u32, subtitle: Option<&str>) -> R
     Resolved {
         series: series.to_string(),
         volume,
+        issue: None,
         subtitle: subtitle.map(str::to_string),
         run,
         status: Status::Mapped,

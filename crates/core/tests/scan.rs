@@ -12,9 +12,9 @@ use tempfile::tempdir;
 
 fn gcd() -> Mappings {
     mappings(&[
-        ("mazebook", "Mazebook", None, None, Some(5)),
-        ("hellboyomnibus_vol1", "Hellboy Omnibus", Some(1), None, Some(4)),
-        ("maskomnibusvolume1secondedition", "The Mask Omnibus", Some(1), None, Some(2)),
+        ("mazebook", "Mazebook", None, None, None, Some(5)),
+        ("hellboyomnibus_vol1", "Hellboy Omnibus", Some(1), None, None, Some(4)),
+        ("maskomnibusvolume1secondedition", "The Mask Omnibus", Some(1), None, None, Some(2)),
     ])
 }
 
@@ -132,9 +132,9 @@ fn a_zero_byte_source_is_a_row_not_a_fault() {
 #[test]
 fn the_source_folder_name_is_the_bundle_that_breaks_a_tie() {
     // Two rows share a key; only the bundle says which one this folder wants.
-    let tsv = "key\tseries\tvolume\tsubtitle\tlang\tvolume_count\tbundle\n\
-               maskomnibus\tThe Mask Omnibus\t\t\ten\t\tHumbleDarkHorseAnniversaryBundle\n\
-               maskomnibus\tThe Mask\t\t\ten\t\tSomeOtherBundle\n";
+    let tsv = "key\tseries\tvolume\tissue\tsubtitle\tlang\tvolume_count\tbundle\n\
+               maskomnibus\tThe Mask Omnibus\t\t\t\ten\t\tHumbleDarkHorseAnniversaryBundle\n\
+               maskomnibus\tThe Mask\t\t\t\ten\t\tSomeOtherBundle\n";
     let m = Mappings::load(tsv, None).unwrap();
     let dest = tempdir().unwrap();
     let parent = tempdir().unwrap();

@@ -8,6 +8,7 @@ fn row(series: &str) -> MappingRow {
         key: "k".into(),
         series: series.into(),
         volume: Some(1),
+        issue: None,
         subtitle: None,
         lang: "en".into(),
         volume_count: None,
@@ -217,4 +218,24 @@ fn rejects_a_rendered_destination_over_budget() {
     assert!(rendered_budget_ok(&row(&"x".repeat(120)), &Raw(3)), "~365 bytes total");
     assert!(!rendered_budget_ok(&row(&"x".repeat(120)), &Raw(9)), "over 1024 bytes total");
     assert!(!rendered_budget_ok(&row("x"), &LongLeaf), "one 256-byte component");
+}
+
+// --- D60: the issue column's own rule ------------------------------------
+
+#[test]
+fn an_issue_past_the_ceiling_is_refused() {
+    let mut r = row("Curse");
+    r.issue = Some(10_000);
+    assert!(r.validate().is_err(), "the ceiling is 9999");
+    r.issue = Some(9_999);
+    assert!(r.validate().is_ok());
+}
+
+#[test]
+fn a_row_may_carry_a_volume_and_an_issue_together() {
+    // Love and Rockets Vol. IV #9: 17 rows in the Humble table are both.
+    let mut r = row("Love and Rockets");
+    r.volume = Some(4);
+    r.issue = Some(9);
+    assert!(r.validate().is_ok());
 }

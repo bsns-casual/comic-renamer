@@ -74,6 +74,9 @@ pub enum SuggestionSource {
 pub struct Resolved {
     pub series: String,
     pub volume: Option<u32>,
+    /// A single issue (D60), rendered by the preset at a fixed four digits.
+    /// Independent of `volume`; a row may carry both.
+    pub issue: Option<u32>,
     pub subtitle: Option<String>,
     pub run: u32,
     pub status: Status,
@@ -145,6 +148,9 @@ impl PlanRow {
         Resolved {
             series: self.series.clone(),
             volume: self.volume,
+            // Task 4 gives `PlanRow` its own issue; until then a plan cannot
+            // carry one, so this is None rather than a dropped field.
+            issue: None,
             subtitle: self.subtitle.clone(),
             run: self.run,
             status: self.status.clone(),

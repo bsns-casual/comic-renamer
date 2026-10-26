@@ -1,12 +1,12 @@
 use comic_renamer_core::mapping::{find_key_collisions, key, MappingRow, Mappings};
 use std::path::Path;
 
-const HEADER: &str = "key\tseries\tvolume\tsubtitle\tlang\tvolume_count\tbundle\n";
+const HEADER: &str = "key\tseries\tvolume\tissue\tsubtitle\tlang\tvolume_count\tbundle\n";
 
 fn tsv(rows: &[(&str, &str, &str)]) -> String {
     let mut s = HEADER.to_string();
     for (k, series, bundle) in rows {
-        s.push_str(&format!("{k}\t{series}\t1\t\ten\t\t{bundle}\n"));
+        s.push_str(&format!("{k}\t{series}\t1\t\t\ten\t\t{bundle}\n"));
     }
     s
 }
@@ -16,6 +16,7 @@ fn row(k: &str, series: &str, bundle: &str) -> MappingRow {
         key: k.into(),
         series: series.into(),
         volume: Some(1),
+        issue: None,
         subtitle: None,
         lang: "en".into(),
         volume_count: None,

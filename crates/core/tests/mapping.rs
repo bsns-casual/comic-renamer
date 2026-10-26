@@ -34,6 +34,7 @@ fn row() -> MappingRow {
         key: "hackslashbacktoschool".into(),
         series: "Hack/Slash: Back to School".into(),
         volume: Some(3),
+        issue: None,
         subtitle: Some("A: B".into()),
         lang: "en".into(),
         volume_count: Some(12),
@@ -85,23 +86,27 @@ fn key_is_nfc_lowercase_alphanumeric_only() {
 
 #[test]
 fn parse_tsv_strips_crlf_and_a_bom() {
-    let rows = parse_tsv("\u{feff}key\tseries\tvolume\tsubtitle\tlang\tvolume_count\tbundle\r\nx\tX\t\t\ten\t\tb\r\n").unwrap();
+    let rows = parse_tsv("\u{feff}key\tseries\tvolume\tissue\tsubtitle\tlang\tvolume_count\tbundle\r\nx\tX\t\t\t\ten\t\tb\r\n").unwrap();
     assert_eq!(rows[0].key, "x");
     assert_eq!(rows[0].series, "X");
     assert_eq!(rows[0].volume, None);
+    assert_eq!(rows[0].issue, None);
     assert_eq!(rows[0].subtitle, None);
     assert_eq!(rows[0].bundle, "b", "a trailing CR must not survive in the last field");
 }
 
 #[test]
 fn parse_tsv_errors_carry_the_line_number() {
-    let hdr = "key\tseries\tvolume\tsubtitle\tlang\tvolume_count\tbundle\n";
+    let hdr = "key\tseries\tvolume\tissue\tsubtitle\tlang\tvolume_count\tbundle\n";
     let bad_header = parse_tsv("key\tseries\n").unwrap_err().to_string();
     assert!(bad_header.contains("line 1"), "{bad_header}");
     let short = parse_tsv(&format!("{hdr}x\tX\n")).unwrap_err().to_string();
     assert!(short.contains("line 2"), "{short}");
-    let nan = parse_tsv(&format!("{hdr}x\tX\tabc\t\ten\t\tb\n")).unwrap_err().to_string();
+    let nan = parse_tsv(&format!("{hdr}x\tX\tabc\t\t\ten\t\tb\n")).unwrap_err().to_string();
     assert!(nan.contains("line 2"), "{nan}");
+    // A non-numeric issue is named by its own column, not the volume's.
+    let bad_issue = parse_tsv(&format!("{hdr}x\tX\t\tabc\t\ten\t\tb\n")).unwrap_err().to_string();
+    assert!(bad_issue.contains("line 2") && bad_issue.contains("issue"), "{bad_issue}");
 }
 
 #[test]
@@ -123,4 +128,33 @@ fn resolved_carries_the_row_into_the_preset_unchanged() {
     assert!(r.record.is_none());
     let none = MappingRow { volume_count: None, ..row() }.resolved();
     assert_eq!(none.run, 0);
+}
+
+// --- D60: an issue is its own column -------------------------------------
+
+#[test]
+fn a_row_with_an_issue_round_trips_through_the_tsv() {
+    let row = MappingRow {
+        key: "beeandpuppycatissue1".into(),
+        series: "Bee and PuppyCat".into(),
+        volume: None,
+        issue: Some(1),
+        subtitle: None,
+        lang: "en".into(),
+        volume_count: None,
+        bundle: "Humble BOOM! Bundle".into(),
+    };
+    assert_eq!(parse_tsv(&to_tsv(&[row.clone()])).unwrap(), vec![row]);
+}
+
+#[test]
+fn a_seven_column_file_is_refused_by_name() {
+    // No release has shipped, so there is no migration — but a stale file must
+    // say what is wrong with it rather than drop rows.
+    let old = "key\tseries\tvolume\tsubtitle\tlang\tvolume_count\tbundle\nk\tS\t\t\ten\t\tB\n";
+    let err = parse_tsv(old).unwrap_err();
+    assert!(
+        format!("{err:?}").contains("issue"),
+        "the error must name the expected header so a stale file is legible: {err:?}"
+    );
 }

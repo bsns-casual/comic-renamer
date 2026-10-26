@@ -106,6 +106,8 @@ fn row_for(stem: &str, fields: &ParsedTitle, count: Option<u32>, bundle: &str, l
         key: key(stem)?,
         series: fields.series.clone(),
         volume: fields.volume,
+        // Task 7 wires `fields.issue` once ParsedTitle carries one.
+        issue: None,
         subtitle: fields.subtitle.clone(),
         lang: lang.to_string(),
         volume_count: count,
@@ -1134,7 +1136,7 @@ mod tests {
     fn a_contribution_holds_exactly_the_row_fields() {
         let tsv = one_row_tsv();
         assert_eq!(comic_renamer_core::mapping::parse_tsv(&tsv).unwrap().len(), 1);
-        assert_eq!(tsv.lines().nth(1).unwrap().split('\t').count(), 7, "{tsv}");
+        assert_eq!(tsv.lines().nth(1).unwrap().split('\t').count(), 8, "{tsv}");
     }
 
     #[test]

@@ -11,7 +11,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use unicode_normalization::UnicodeNormalization;
 
-const HEADER: &str = "key\tseries\tvolume\tsubtitle\tlang\tvolume_count\tbundle";
+const HEADER: &str =
+    "key\tseries\tvolume\tissue\tsubtitle\tlang\tvolume_count\tbundle";
 
 /// The frozen key rule: NFC, lowercase, keep alphanumerics. Every contributed
 /// row was keyed by this, so changing it invalidates all of them. `None` when
@@ -31,6 +32,9 @@ pub struct MappingRow {
     pub key: String,
     pub series: String,
     pub volume: Option<u32>,
+    /// A single issue (D60). Independent of `volume`: 17 rows in the Humble
+    /// table are `Love and Rockets Vol. IV #9`, which is both.
+    pub issue: Option<u32>,
     pub subtitle: Option<String>,
     pub lang: String,
     pub volume_count: Option<u32>,
@@ -39,11 +43,12 @@ pub struct MappingRow {
 
 impl MappingRow {
     /// `volume_count: None` becomes run 0, which `preset::komga::pad` floors
-    /// at two digits.
+    /// at two digits. `issue` needs no such width: D60 fixes it at four.
     pub fn resolved(&self) -> Resolved {
         Resolved {
             series: self.series.clone(),
             volume: self.volume,
+            issue: self.issue,
             subtitle: self.subtitle.clone(),
             run: self.volume_count.unwrap_or(0),
             status: Status::Mapped,
@@ -84,20 +89,21 @@ pub fn parse_tsv(text: &str) -> Result<Vec<MappingRow>, MappingError> {
             continue;
         }
         let f: Vec<&str> = raw.split('\t').collect();
-        if f.len() != 7 {
+        if f.len() != 8 {
             return Err(MappingError::Parse {
                 line,
-                reason: format!("expected 7 columns, found {}", f.len()),
+                reason: format!("expected 8 columns, found {}", f.len()),
             });
         }
         rows.push(MappingRow {
             key: f[0].to_string(),
             series: f[1].to_string(),
             volume: num(f[2], line, "volume")?,
-            subtitle: (!f[3].is_empty()).then(|| f[3].to_string()),
-            lang: f[4].to_string(),
-            volume_count: num(f[5], line, "volume_count")?,
-            bundle: f[6].to_string(),
+            issue: num(f[3], line, "issue")?,
+            subtitle: (!f[4].is_empty()).then(|| f[4].to_string()),
+            lang: f[5].to_string(),
+            volume_count: num(f[6], line, "volume_count")?,
+            bundle: f[7].to_string(),
         });
     }
     if !seen_header {
@@ -113,10 +119,11 @@ pub fn to_tsv(rows: &[MappingRow]) -> String {
     let mut out = format!("{HEADER}\n");
     for r in rows {
         out.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             r.key,
             r.series,
             n(r.volume),
+            n(r.issue),
             r.subtitle.as_deref().unwrap_or(""),
             r.lang,
             n(r.volume_count),
@@ -133,6 +140,10 @@ const MAX_RENDERED_BYTES: usize = 1024;
 /// `Vol. 0000000005`. Four digits covers every real run; the longest manga in
 /// the corpus is three.
 const MAX_VOLUME_COUNT: u32 = 9999;
+/// D60 pads an issue to a fixed four digits, so a larger number would widen
+/// the name past what the convention promises. The largest issue number in the
+/// corpus is 666.
+const MAX_ISSUE: u32 = 9999;
 
 fn invalid(field: &'static str, reason: impl Into<String>) -> MappingError {
     MappingError::Invalid { field, reason: reason.into() }
@@ -206,6 +217,15 @@ impl MappingRow {
         }
         validate_field("lang", &self.lang)?;
         validate_field("bundle", &self.bundle)?;
+        // No cross-field rule against `volume`: a row may be both (D60).
+        if let Some(issue) = self.issue {
+            if issue > MAX_ISSUE {
+                return Err(invalid(
+                    "issue",
+                    format!("is {issue}; the ceiling is {MAX_ISSUE}"),
+                ));
+            }
+        }
         if let Some(count) = self.volume_count {
             if count > MAX_VOLUME_COUNT {
                 return Err(invalid(

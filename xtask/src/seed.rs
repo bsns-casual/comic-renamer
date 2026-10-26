@@ -320,6 +320,8 @@ fn build_row(
         key,
         series,
         volume,
+        // Task 8 derives a real issue; the parser cannot see the filename.
+        issue: None,
         subtitle,
         lang: LANG.to_string(),
         volume_count: None,
