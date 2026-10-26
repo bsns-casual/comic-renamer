@@ -149,7 +149,11 @@ corpus/          manifest.json — the pinned corpus. Never the .sqlite itself.
 data/mappings/   the shipped filename→title table, one TSV per marketplace
 data/overrides.toml   first-party Layer B title overrides
 xtask/           cargo xtask measure | seed | check-mappings [base-ref]
-scripts/         CI checks, runnable locally: python3 scripts/check-manifest.py
+scripts/         checks and tools, runnable locally:
+                 python3 scripts/check-manifest.py
+                 python3 scripts/review-rows.py <out.json>   the review page's data
+                 node scripts/check-review-page.cjs          its path mirror vs komga.rs
+                 scripts/review-page.html                    the Humble review page itself
 .github/         workflows: verify (every PR), corpus-refresh (monthly)
 ```
 
@@ -190,8 +194,90 @@ done   R1-R14  the rebuild: frozen key and TSV I/O, §6.11 validation, the
                marketplace, `map`, the approval table, the detail editor,
                confirmation, contribution, seeding, the three hard checks,
                documentation
+done   D59-D61  single issues are first class: an `issue` column, rendered as
+               four padded digits with no `#`, derived where a filename or a
+               sibling of the same verified title vouches for it
 todo   T15  Homebrew — see below
 ```
+
+### Single issues, and the issue column (D59-D61)
+
+Done on `main`, 18 commits ending `8c5254f` on 2026-10-26, planned in
+`docs/plans/2026-10-26-issue-column.md`, 9 tasks. **Not pushed yet.**
+
+**§1.1's first assumption was wrong.** It said "no issue numbers; every file
+is a collected edition", measured against one Dark Horse bundle and
+generalised into a property of the problem. Across the generated Humble table
+1,305 rows carry a volume, **151 are single issues**, and 748 are books with
+neither — and Sweet Shop, GlobalComix and DriveThru sell single issues as
+their primary unit. Volumes and one-shots already worked, so the correction
+cost one column rather than three features.
+
+What it changed, each read from the code or run:
+
+- **Four data shapes gained the field**: the mapping TSV (8 columns), `Resolved`,
+  `PlanRow` (plan **v2 → v3**, and a v2 plan is refused rather than read as
+  issue-less), `ParsedTitle`, `Suggestion`, and the undo record's CSV
+  (**16 → 17 columns**). No migrations, by decision — no release has shipped,
+  and every stale format now fails naming what it expected.
+- **The Komga leaf is `<Series>[ Vol. NN][ IIII][ - Subtitle]`** (D60). Four
+  digits, fixed, no run width: the ceiling is known and low, so there is no
+  `issue_count` column. No `#`, because it sorts and displays badly outside
+  Komga and buys nothing inside it.
+- **The corpus and override suggestion paths pass no issue**, with the reason
+  at each site: the corpus ladder reads a tokenised stem whose tokeniser has
+  only `Token::Volume`, and Layer B's TOML has no issue field. A suggestion
+  with no issue costs typing, never data.
+- `cargo xtask measure` is **unchanged**: 91.6 / 62.9 / 48.9. Expected — the
+  grader compares titles, and this adds a field it does not read.
+
+Two things inserting a column broke that nothing would have caught:
+
+- **The undo record's roots row** emitted 16 columns while its reader took
+  `preset` and `planned` at literal indices 14 and 15. It surfaced as fifteen
+  unrelated fixtures failing with `unknown preset ""`. All seventeen indices
+  `undo.rs` hard-codes are pinned now by one test that names the cause.
+- **`seed`'s de-duplication tuple** had been every semantic field, so it could
+  fold an exact repeat but never a pair that disagreed — one line before
+  `find_key_collisions`, the gate that exists to refuse such a pair. Measured
+  unreachable (19 repeated `(key, bundle)` pairs, all with identical titles),
+  which is why it needed a test rather than a reader. It is `dedup_identity`
+  now.
+
+### What the volume-gated suite does and does not protect
+
+**Measured 2026-10-26, so nobody re-derives it.** The five
+`COMIC_RENAMER_TEST_VOLUME` tests were run against this branch: **604 of 604
+pass**, the first time every gated test has run locally here. Three of the
+five call `reverse_run` or `record_pending`, which is exactly the code the
+issue column changed — and that does **not** mean they protect it. Each of
+these record-format mutations **survives all five** and is caught by the
+ungated suite:
+
+```
+PAD one comma short                  gated: survived   ungated: caught
+subtitle read from the issue column  gated: survived   ungated: caught
+the rebuild drops the issue          gated: survived   ungated: caught
+```
+
+Their rows are volumes and one-shots, which do not discriminate a column
+layout. They discriminate the streamed path, the `placed` state and
+abort-on-failure, exactly as this file already said — and nothing more. So a
+change to the record *format* does not need the volume suite; a change to
+cross-device *behaviour* does.
+
+A disk image is the safer way to get one, and needs no `diskutil`:
+
+```
+hdiutil create -size 1400m -fs HFS+ -volname CRTEST /tmp/crtest.dmg
+hdiutil attach /tmp/crtest.dmg
+COMIC_RENAMER_TEST_VOLUME=/Volumes/CRTEST cargo test --workspace -- --ignored
+hdiutil detach /Volumes/CRTEST && rm /tmp/crtest.dmg
+```
+
+`hdiutil create` takes a file path, never a device node, so it cannot be
+pointed at real hardware. 1400 MiB clears the `max(1 GiB, 10%)` reserve that
+otherwise refuses every run.
 
 ### Session-scoped undo and the startup menu
 
@@ -268,19 +354,38 @@ untracked. It waits for the maintainer to review it, because D51 and the rebuild
 §4 forbid storing rows nobody approved, and committing 2,200 unreviewed rows on
 the first commit would do exactly that. On its last run (2026-10-25) the
 generator built 2,223 rows, rejected 1 (a short line), found 0 key collisions, and
-de-duplicated to 2,204. Its own classification of the 2,223:
+de-duplicated to 2,204. Its own classification of the 2,223, after the issue
+column (D59–D61) landed on 2026-10-26:
 
 ```
-1896   85.3%  clean
- 197    8.9%  bare trailing number in the series (not a volume marker)
+1707   76.8%  clean
+ 189    8.5%  issue written in the verified title (#N)
+ 117    5.3%  issue copied from a sibling of the same title
  111    5.0%  corpus confirms the series (colon kept, volume recovered)
+  59    2.7%  issue taken from the filename (D61)
+  21    0.9%  bare trailing number in the series (not a volume marker)
   18    0.8%  volume marker swallowed into the subtitle (colon came first)
    1    0.0%  multiple colons
 ```
 
 **"Clean" is an upper bound.** It means no heuristic fired, not that a human
-agreed. The 9.7% in the other three classes are known-bad decompositions; a
-`map` session is where they get corrected, before any of this is committed.
+agreed.
+
+**The bare-trailing-number class fell from 197 to 21**, which is the issue
+column's whole point: 59 rows had an issue number the filename vouched for,
+and 117 more are other files of those same titles. Before that propagation
+(D61 as amended) one comic landed in two Komga series folders —
+`Hacktivist/Hacktivist 0001.cbz` beside `Hacktivist 1/Hacktivist 1.cbz` — and
+nothing could report it, because the paths differ and so do the folder
+collision keys.
+
+**A derived issue is not a confirmed one.** `scripts/review-rows.py` keeps
+both derived classes in the review pile, so the page still puts 212 rows in
+front of a human — the same count as before, every one of them now arriving
+with a better proposal. One of the 59 is wrong in a way only a reader catches:
+`"Shrine of the Monkey God!" in Kramers Ergot 9` is one story inside the ninth
+book of a numbered anthology, and the rule makes the quoted story the series.
+Routing derived rows out of that pile would have hidden it.
 
 **The colon class was 129 rows and is now 18, because `seed` asks the corpus.**
 Where a verified title ends in a volume marker and its stem carries a colon,
@@ -305,12 +410,15 @@ each of which cost something to find:
 A missing corpus is "no guess", not an error (D49): `seed` prints one line and
 falls back to the parser for every row. `measure` still requires one.
 
-**Tests:** `cargo test --workspace` runs 537 and ignores 9 (counted 2026-10-25
-by summing the `test result:` lines: 537 passed, 0 failed, 9 ignored; 534 before
+**Tests:** `cargo test --workspace` runs 595 and ignores 9 (counted 2026-10-26
+by summing the `test result:` lines: 595 passed, 0 failed, 9 ignored; 537 before
+the issue column, 534 before
 the corpus-confirms-a-colon change, 530 before
 D58, 510 before a four-seat adversarial review, 500 before the whole-branch
 review's fix wave, 409 and 7 before session-scoped undo), with no compiler
-warnings. The nine `#[ignore]`d
+warnings. **The five volume-gated tests were run on 2026-10-26 and pass, so
+604 of 604 is the whole-suite number** — see "What the volume-gated suite does
+and does not protect" above before assuming a change needs them. The nine `#[ignore]`d
 tests need real hardware or the real corpus release, and **CI runs all nine**:
 five are volume-gated (`COMIC_RENAMER_TEST_VOLUME`; four in `apply_exec.rs`,
 one in `cli.rs`) and four are corpus tests (`COMIC_RENAMER_TEST_ZIP`, in
@@ -529,6 +637,22 @@ name above.
 
 ### Pick up here
 
+**-1. The issue column is done and NOT PUSHED.** 18 commits on `main`,
+`ef57cf6..8c5254f`, 595 of 604 passing with the volume suite run and clean,
+`check-mappings` and `check-review-page.cjs` both green, no compiler warnings.
+`cargo xtask seed` leaves `data/mappings/` byte-identical except the four rows
+that legitimately improved (`Hammer Head`, `Minotaur`, `DIE: Loaded`,
+`Glarien: Origins` each carried `#1` as subtitle text). Nothing is pushed
+because a push is the owner's call; `git push` is all that is owed.
+
+One thing to carry forward about the review that produced those 18 commits:
+**four seats found nine real defects and three of them were in my own new
+tests.** A test that passes for the wrong reason is the recurring shape here —
+`!refused.is_empty()` satisfied by an unrelated refusal, a non-digit typed on
+an empty field where the parse fails either way, a helper that did not assert
+it had broken what it claimed to break. Run the mutation, do not reason about
+it.
+
 **0. Two data-safety findings, closed, merged and green.**
 `docs/research/2026-10-23-two-pre-existing-data-safety-findings.md` describes
 both. The first was a data-loss path: a hand-written manifest beside a forged
@@ -540,12 +664,12 @@ confirmation already given. Session-scoped undo addresses them with invariant 11
 jobs** — the first time every job has run on this work.
 
 One note on how it got there, because the shape recurs: the merge went out with
-the volume job red. `cargo test --workspace` reports 534 and **skips the nine
-`#[ignore]`d tests**, so "534 passed" was never the whole suite, and one of those
+the volume job red. `cargo test --workspace` reported 534 then and **skips the
+nine `#[ignore]`d tests**, so "534 passed" was never the whole suite, and one of those
 nine asserted the pre-D58 truth that a reversed copy leaves the library empty.
 Four visible tests were updated when D58 landed; the invisible one was not,
-because that round's brief did not require the RAM-disk run. **Quote 534 of 543,
-or run the volume suite.**
+because that round's brief did not require the RAM-disk run. **Quote the gated
+total, or run the volume suite** — 595 of 604 as of 2026-10-26.
 
 The first fix then needed a second one. An adversarial seat showed D54's own
 gate was check-then-act on the source and lost the file outright when raced —
@@ -560,6 +684,30 @@ window by construction rather than on a timed guess. The
 design's §7 left one question open that was deliberately not planned: sweeping
 records written by an install that predates the sweep. No release has shipped,
 so none exists.
+
+### Three cuts the issue column deferred, 2026-10-26
+
+Each was raised by a review seat, graded, and left undone on purpose. None has
+a user-visible effect; all three are signature or naming work.
+
+**P-a. `record_pending` takes eleven positional arguments and should take
+`&Resolved`.** `apply.rs` builds one a line earlier and `undo.rs` reassembles
+one at the rebuild, so four parameters and the
+`#[allow(clippy::too_many_arguments)]` would go. The ponytail seat argued the
+deferral was wrong because this branch "paid twice" — `PAD`, `COLUMNS`, the
+roots-row literal and `pending_fields`' indices all shifted for one field. That
+is the **CSV's positional format**, not the signature, and `&Resolved` would
+not change it. Worth its own commit; 22 call sites on a destructive path at the
+end of a long branch was the wrong moment.
+
+**P-b. `show` takes four positionals at seven call sites** and should take
+`&ParsedTitle`. Declined because five of the seven would then convert a
+`Suggestion` through `as_parsed`, cloning two Strings per row per render frame
+in a TUI, to save six lines.
+
+**P-c. `pad_issue` is a one-line `format!` with one caller.** Declined: its
+doc comment carries D60's "why four digits, why no `#`", which is this repo's
+house style for a decided thing.
 
 ### Four decisions waiting on the owner
 
@@ -655,16 +803,48 @@ repository is a different use, and nobody has answered whether it is allowed.
 **This gates release, not development.** Building and reviewing the table locally
 does not wait on it; publishing it does. (D51, rebuild §10)
 
-**2. The Humble table review.** See "What ships" above. The generator's output
-sits in `target/seed/humble.tsv`, and the 9.7% in known-bad decomposition
-classes need correcting by hand before anything is committed. The largest
-remaining class is the 197 bare trailing numbers (8.9%): a whole-title corpus
-lookup confirms 12 of them (`RoboCop 2`, `B.P.R.D.: 1948`), which was measured
-and **deliberately not implemented** — it changes no field, only the report, so
-12 of 197 does not change the review's shape. A `map` session is
-the intended tool for it. **Invariant 7's bundle half matters here**: 158 of the
-table's 2,036 keys appear under more than one bundle, so this is the table where
-a literal bundle comparison would have started costing titles.
+**2. The Humble table review. In progress, 15 of 2,204 decided.** See "What
+ships" above for the class table.
+
+**`map` is not the tool for it, and the owner chose a page instead.** `map`'s
+`Entry` holds a filename and the resolver's candidates and never reads
+`fixtures/humble-ground-truth.tsv`, so a `map` session would ask for 2,204
+titles to be re-decided from 48.9%-accurate guesses while discarding the
+verified titles `seed` already built the rows from. It is also 38 sessions,
+one per bundle, because a contribution carries exactly one bundle name.
+
+The review runs on **`scripts/review-page.html`**, published privately as an
+artifact. Each card shows the filename, its bundle, the verified Humble title,
+three prefilled fields and the Komga path they produce. Decisions live in the
+artifact's own store, one document per 100 rows, and `scripts/review-rows.py`
+builds the page's data from `cargo xtask seed`'s output. To regenerate and
+republish, run `cargo xtask seed`, then `review-rows.py`, then publish
+`scripts/review-page.html` **with the existing artifact's URL** — a different
+file path would make a new artifact and orphan the decisions.
+
+Three things that page learned the hard way, all fixed:
+
+- **Writes merge, never replace.** It rebuilt each 100-row block from its own
+  mirror and wrote it whole, so one failed read at load plus one Confirm
+  destroyed the other 99 decisions.
+- **A decision's identity is checked, not assumed.** The store is keyed on a
+  row's ordinal in `seed`'s output; each decision also carries its row's key
+  and bundle, and a mismatch is reported as an orphan rather than painted over
+  the wrong file.
+- **`scripts/check-review-page.cjs`** pins its path renderer against
+  `komga.rs` with 13 cases copied from `preset_komga.rs`. The page mirrors the
+  preset in JavaScript, which is not an invariant 1 violation — it constructs
+  no path the tool acts on — but an unpinned mirror that drifts shows the
+  wrong path to someone making 2,204 decisions.
+
+**Invariant 7's bundle half matters here**: 158 of the table's 2,036 keys
+appear under more than one bundle, so this is the table where a literal bundle
+comparison would have started costing titles.
+
+Still measured and **deliberately not implemented**: a whole-title corpus
+lookup confirms 12 of the bare trailing numbers (`RoboCop 2`,
+`B.P.R.D.: 1948`). It changes no field, only the report, and that class is 21
+rows now rather than 197, so it would change nothing about the review's shape.
 
 Then, in rough priority:
 
