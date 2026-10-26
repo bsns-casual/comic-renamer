@@ -75,6 +75,12 @@ impl Preset for Komga {
         if let Some(volume) = resolved.volume {
             stem.push_str(&format!(" Vol. {}", pad(volume, resolved.run)));
         }
+        // After the volume and before the subtitle (D60): a volume's issues
+        // have to sort inside that volume, and the subtitle has to stay last
+        // because filename sort order is reading order (§6.8.1).
+        if let Some(issue) = resolved.issue {
+            stem.push_str(&format!(" {}", pad_issue(issue)));
+        }
         if let Some(subtitle) = &resolved.subtitle {
             stem.push_str(" - ");
             stem.push_str(subtitle);
@@ -107,6 +113,17 @@ impl Preset for Komga {
 pub fn pad(volume: u32, run: u32) -> String {
     let width = run.to_string().len().max(2);
     format!("{volume:0width$}")
+}
+
+/// Zero-pads an issue to a fixed four digits, with no `#` (D60).
+///
+/// Takes no run width, unlike `pad`: the ceiling is known and low — the
+/// largest issue number in the corpus is 666 — so four digits covers every
+/// real issue and there is no per-series count to store or get wrong. A `#`
+/// would sort and display badly everywhere outside Komga and buys nothing
+/// inside it, where the number comes from filename order anyway.
+pub fn pad_issue(issue: u32) -> String {
+    format!("{issue:04}")
 }
 
 /// Fixes titles legal as titles and hostile as paths. Distinct titles must
