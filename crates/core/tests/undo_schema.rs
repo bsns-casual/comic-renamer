@@ -522,7 +522,14 @@ fn a_short_pending_row_under_a_good_header_is_refused_per_row() {
     assert!(before, "the fixture must have placed a library file");
     let report = reverse(&record).unwrap();
     assert_eq!(report.restored, 0, "a shifted row must not be rebuilt: {report:?}");
-    assert!(!report.refused.is_empty(), "and it must be reported: {report:?}");
+    // The refusal has to be ABOUT the pending row. `!is_empty()` alone passed
+    // while `undo.rs`'s dropped-row report was deleted, because shortening
+    // the `placed` and `done` rows orphans them and `orphan` pushes its own
+    // refusals — a green test over the exact bug its doc comment names.
+    assert!(
+        report.refused.iter().any(|r| r.contains("rebuild")),
+        "no refusal names the row that cannot be rebuilt: {report:?}"
+    );
     assert_eq!(placed.exists(), before, "the library must be untouched");
 }
 

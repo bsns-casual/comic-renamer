@@ -636,17 +636,21 @@ fn nothing_is_lost_when_the_source_is_truncated_inside_the_gate() {
 // --- D60: an issue must travel with the record ----------------------------
 
 /// The destination of a single issue. Nothing else in this file uses one.
-fn issue_dest() -> PathBuf {
+fn issue_dest_for(issue: u32) -> PathBuf {
     let resolved = Resolved {
         series: "Curse".into(),
         volume: None,
-        issue: Some(3),
+        issue: Some(issue),
         subtitle: None,
         run: 0,
         status: Status::Mapped,
         record: None,
     };
     preset_by_id("komga").unwrap().destination(&resolved, "pdf")
+}
+
+fn issue_dest() -> PathBuf {
+    issue_dest_for(3)
 }
 
 #[test]
@@ -748,4 +752,51 @@ fn an_issue_row_interrupted_in_move_modes_rename_window_is_still_reversible() {
     assert_eq!(report.restored, 1, "{report:?}");
     assert!(source_file.exists(), "the file belongs back in the bundle folder");
     assert!(!library_file.exists());
+}
+
+/// Issue zero through the record, because `Some(0)` is the one issue value a
+/// writer can mistake for absence and the record is the only input to a
+/// reverse. `record_pending` filtering it out survived the whole workspace.
+#[test]
+fn a_record_carries_issue_zero_like_any_other() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source");
+    let library = dir.path().join("library");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::create_dir_all(library.join(issue_dest_for(0)).parent().unwrap()).unwrap();
+    let source = source.canonicalize().unwrap();
+    let library = library.canonicalize().unwrap();
+
+    let source_file = source.join("curse_issue0.pdf");
+    std::fs::write(&source_file, b"issue zero of Curse").unwrap();
+    let library_file = library.join(issue_dest_for(0));
+    assert!(
+        library_file.to_string_lossy().contains("Curse 0000"),
+        "{library_file:?}"
+    );
+
+    let record = dir.path().join("run.record");
+    let mut w = UndoWriter::create(&record, &source, &library, "komga", 1).unwrap();
+    let seq = w
+        .record_pending(
+            Path::new("curse_issue0.pdf"),
+            &issue_dest_for(0),
+            Mechanism::Clone,
+            Mode::Copy,
+            &source_file,
+            "Curse",
+            None,
+            Some(0),
+            None,
+            0,
+            "pdf",
+        )
+        .unwrap();
+    std::fs::copy(&source_file, &library_file).unwrap();
+    w.record_placed(seq, identity_of(&library_file)).unwrap();
+    w.record_done(seq).unwrap();
+    drop(w);
+
+    let report = reverse(&record).unwrap();
+    assert_eq!(report.restored, 1, "the record lost issue 0: {report:?}");
 }

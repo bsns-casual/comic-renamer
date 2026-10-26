@@ -34,6 +34,13 @@ fn gcd() -> Mappings {
         // every shorter run floors to width 2 — so this is the only shape in
         // which the run is visible in a path at all.
         ("velvet_vol1", "Velvet", Some(1), None, None, Some(100)),
+        // An issue, for the same reason the subtitle row above exists and
+        // `common::MapRow` carries the field at all: a field no fixture
+        // expresses is a field no test pins. Every other fixture in the
+        // workspace passes `issue: None`, so `scan` dropping the issue and
+        // `apply` recording none both survived the whole suite — the second
+        // placing the file correctly while making the row unreversible.
+        ("curse_issue3", "Curse", None, Some(3), None, None),
     ])
 }
 
@@ -980,4 +987,38 @@ fn a_plan_read_from_disk_runs_and_reverses() {
         reverse_run(&lock, &r.record.unwrap()).unwrap().restored,
         1
     );
+}
+
+// ---------------------------------------------------------------------------
+// D60: an issue has to survive scan, apply and the reverse
+// ---------------------------------------------------------------------------
+
+/// The one test that carries an issue through every stage. Two one-line
+/// mutations survived the entire workspace before it existed:
+/// `scan.rs`'s `issue: resolved.issue` → `None`, and `apply.rs`'s
+/// `row.issue` → `None`. The second is the dangerous one — `apply`
+/// recomputes the destination from the row, so the file still lands at
+/// `Curse 0003.pdf`, but the record carries no issue and every issue row of
+/// that run becomes permanently unreversible, with `undo` exiting 0 having
+/// restored nothing.
+#[test]
+fn an_issue_survives_scan_apply_and_the_reverse() {
+    let (f, _) = build(&["curse_issue3.pdf"], Mode::Move);
+    assert_eq!(f.rows.len(), 1);
+    assert_eq!(f.rows[0].issue, Some(3), "scan dropped the issue");
+
+    let placed = f.dest_root.join("Curse/Curse 0003.pdf");
+    let lock = Lock::library(&f.records, &f.dest_root).unwrap();
+    let result = run(&f, &lock).unwrap();
+    assert_eq!(result.executed, 1);
+    assert!(placed.exists(), "the padded leaf is not where the preset put it");
+
+    // The decisive half: the record is the only input to a reverse, so an
+    // issue that fails to reach it rebuilds the wrong leaf and the row is
+    // refused rather than restored.
+    let report = reverse_run(&lock, &result.record.unwrap()).unwrap();
+    assert_eq!(report.restored, 1, "the record lost the issue: {report:?}");
+    assert_eq!(report.refused, Vec::<String>::new());
+    assert!(f.source_root.join("curse_issue3.pdf").exists());
+    assert!(!placed.exists());
 }

@@ -40,6 +40,9 @@ fn produced(series: &str) -> (Resolved, PathBuf) {
 fn gcd() -> Mappings {
     mappings(&[
         ("mazebook", "Mazebook", None, None, None, Some(5)),
+        // An issue, so the streamed and cross-volume paths carry one too.
+        // Every other fixture in this file is a volume or a one-shot.
+        ("curse_issue3", "Curse", None, Some(3), None, None),
         ("birdking_vol1", "Birdking", Some(1), None, None, Some(3)),
         // The second volume of the same series, so two rows share one series
         // folder. Every other pair in this file lands in a directory of its

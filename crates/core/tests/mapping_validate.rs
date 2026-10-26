@@ -229,6 +229,9 @@ fn an_issue_past_the_ceiling_is_refused() {
     assert!(r.validate().is_err(), "the ceiling is 9999");
     r.issue = Some(9_999);
     assert!(r.validate().is_ok());
+    // And zero is a real issue, not absence: a `#0` ships.
+    r.issue = Some(0);
+    assert!(r.validate().is_ok(), "issue 0 is a value, not a missing field");
 }
 
 #[test]
@@ -238,4 +241,19 @@ fn a_row_may_carry_a_volume_and_an_issue_together() {
     r.volume = Some(4);
     r.issue = Some(9);
     assert!(r.validate().is_ok());
+}
+
+/// `resolved()` is the only bridge from a stored row to a rendered path, and
+/// `Some(0)` is the value a filter there would silently swallow. Pinned here
+/// rather than in the preset tests, which build `Resolved` directly and so
+/// never cross that bridge.
+#[test]
+fn issue_zero_reaches_the_destination_through_resolved() {
+    let mut r = row("Spawn");
+    r.volume = None;
+    r.issue = Some(0);
+    assert_eq!(
+        Komga.destination(&r.resolved(), "cbz"),
+        PathBuf::from("Spawn/Spawn 0000.cbz")
+    );
 }

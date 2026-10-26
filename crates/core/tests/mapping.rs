@@ -34,7 +34,11 @@ fn row() -> MappingRow {
         key: "hackslashbacktoschool".into(),
         series: "Hack/Slash: Back to School".into(),
         volume: Some(3),
-        issue: None,
+        // Zero, not None: real comics ship a `#0`, and `Some(0)` is a value
+        // every stage could mistake for absence. Filtering it out in
+        // `resolved()`, `validate`, `parse_tsv` or `record_pending` each
+        // survived the whole workspace while this was `None`.
+        issue: Some(0),
         subtitle: Some("A: B".into()),
         lang: "en".into(),
         volume_count: Some(12),
