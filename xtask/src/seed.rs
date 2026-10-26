@@ -205,7 +205,7 @@ pub fn seed() -> Result<(), String> {
     }
     // Exact repeats collapse; a pair that disagrees survives to be counted below.
     let mut seen = HashSet::new();
-    rows.retain(|r| seen.insert((r.key.clone(), r.bundle.clone(), r.series.clone(), r.volume, r.subtitle.clone())));
+    rows.retain(|r| seen.insert(dedup_identity(r)));
     let collisions = find_key_collisions(&rows);
     let out = root.join("target/seed/humble.tsv");
     std::fs::create_dir_all(out.parent().unwrap()).map_err(|e| e.to_string())?;
@@ -234,6 +234,28 @@ pub fn seed() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Every semantic field of a row in this path. `lang` is the constant `LANG`
+/// and `volume_count` is always `None` here, which is why neither appears.
+///
+/// Named rather than inlined because the property matters: an exact repeat
+/// collapses, and a pair that *disagrees* must survive to
+/// `find_key_collisions`, the gate whose job is to refuse it. Adding `issue`
+/// to the row broke that silently — the tuple had been every field, and a
+/// pair differing only by issue folded before the gate ran. No fixture pair
+/// exercises it, which is exactly why it needed a test rather than a reader.
+fn dedup_identity(
+    r: &MappingRow,
+) -> (String, String, String, Option<u32>, Option<u32>, Option<String>) {
+    (
+        r.key.clone(),
+        r.bundle.clone(),
+        r.series.clone(),
+        r.volume,
+        r.issue,
+        r.subtitle.clone(),
+    )
 }
 
 /// A trailing `#N` taken out of a leftover, the way `parse_title` takes one
@@ -667,5 +689,42 @@ mod take_hash_issue_tests {
             );
         }
         assert_eq!(take_hash_issue(None), (None, None));
+    }
+}
+
+#[cfg(test)]
+mod dedup_tests {
+    use super::*;
+
+    fn row(issue: Option<u32>) -> MappingRow {
+        MappingRow {
+            key: "k".into(),
+            series: "S".into(),
+            volume: None,
+            issue,
+            subtitle: None,
+            lang: LANG.to_string(),
+            volume_count: None,
+            bundle: "B".into(),
+        }
+    }
+
+    /// The de-duplication tuple must carry every semantic field, or a pair
+    /// that *disagrees* is folded away before `find_key_collisions` — the
+    /// gate whose whole job is to refuse exactly that pair — ever runs.
+    /// Adding `issue` to the row broke that property silently: no fixture
+    /// pair exercises it today, and the next generator change could.
+    #[test]
+    fn two_rows_differing_only_by_issue_are_not_one_row() {
+        assert_ne!(dedup_identity(&row(Some(1))), dedup_identity(&row(Some(2))));
+        assert_ne!(dedup_identity(&row(None)), dedup_identity(&row(Some(1))));
+        assert_eq!(dedup_identity(&row(Some(1))), dedup_identity(&row(Some(1))));
+    }
+
+    /// And the gate itself still sees them, which is what makes surviving
+    /// the fold worth anything.
+    #[test]
+    fn the_collision_gate_reports_a_pair_that_disagrees_on_the_issue() {
+        assert!(!find_key_collisions(&[row(Some(1)), row(Some(2))]).is_empty());
     }
 }

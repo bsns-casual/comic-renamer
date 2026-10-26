@@ -574,3 +574,56 @@ fn an_entry_removes_only_through_its_own_resolved_parent() {
     entry.remove().unwrap();
     drop(g);
 }
+
+// --- D60: issues through collision detection -----------------------------
+
+/// A row with an issue, built on `row`'s deliberately-lying preview so this
+/// still proves `find_collisions` recomputes rather than reading it.
+fn issue_row(id: &str, series: &str, issue: Option<u32>, ino: u64) -> PlanRow {
+    PlanRow { issue, ..row(id, series, None, 0, ino) }
+}
+
+/// The plan's Review Focus put this condition in collision detection, and
+/// the preset tests pinned only the preset. Two issues of one series are two
+/// destinations that share a folder: `find_collisions` must group them
+/// without refusing either, or a whole run of issues becomes unplaceable.
+#[test]
+fn two_issues_of_one_series_are_not_a_collision() {
+    let d = tempfile::tempdir().unwrap();
+    let rows = [
+        issue_row("r1", "Curse", Some(1), 11),
+        issue_row("r2", "Curse", Some(2), 12),
+    ];
+    assert!(find_collisions(&rows, d.path(), &Komga).is_empty());
+}
+
+/// Review Focus 4, through the same door. `Elephantmen 2260` the series and
+/// `Elephantmen` issue 2260 render the SAME leaf name and are kept apart
+/// only by the series folder — so this is the test that fails if anything
+/// ever flattens that folder.
+#[test]
+fn a_series_named_with_a_number_does_not_collide_with_an_issue_of_that_number() {
+    let d = tempfile::tempdir().unwrap();
+    let named = issue_row("r1", "Elephantmen 2260", None, 11);
+    let issued = issue_row("r2", "Elephantmen", Some(2260), 12);
+    let dest = |r: &PlanRow| {
+        comic_renamer_core::preset::Preset::destination(&Komga, &r.resolved(), &r.extension)
+    };
+    assert_eq!(
+        dest(&named).file_name(),
+        dest(&issued).file_name(),
+        "the leaves really do collide, which is what makes this worth testing"
+    );
+    assert!(find_collisions(&[named, issued], d.path(), &Komga).is_empty());
+}
+
+/// And the gate still bites where it should: one series, one issue, twice.
+#[test]
+fn the_same_issue_of_one_series_twice_is_a_collision() {
+    let d = tempfile::tempdir().unwrap();
+    let rows = [
+        issue_row("r1", "Curse", Some(3), 11),
+        issue_row("r2", "Curse", Some(3), 12),
+    ];
+    assert_eq!(find_collisions(&rows, d.path(), &Komga).len(), 1);
+}
