@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use comic_renamer_core::corpus::Corpus;
-use comic_renamer_core::mapping::{find_key_collisions, key, to_tsv, MappingRow};
+use comic_renamer_core::mapping::{find_key_collisions, key, to_tsv, MappingRow, MAX_ISSUE};
 use comic_renamer_core::normalize::squash;
 use comic_renamer_core::title::{is_volume_word, number_value, parse_title};
 
@@ -250,7 +250,20 @@ fn take_hash_issue(text: Option<String>) -> (Option<String>, Option<u32>) {
     let Some(issue) = last.strip_prefix('#').and_then(|d| d.parse::<u32>().ok()) else {
         return (Some(t), None);
     };
+    // Above the ceiling `MappingRow::validate` refuses the row outright, so
+    // taking the number would drop the whole file out of the table — worse
+    // than leaving it as the text it used to ship as.
+    if issue > MAX_ISSUE {
+        return (Some(t), None);
+    }
     let rest = trimmed[..trimmed.len() - last.len()].trim_end().to_string();
+    // `Vol. #3` is a volume written with a hash, not an issue — the same
+    // shape `take_trailing_issue` declines in core. This arm discards the
+    // volume, so taking it would lose the number and strand `Vol.` in the
+    // subtitle.
+    if rest.split_whitespace().next_back().is_some_and(is_volume_word) {
+        return (Some(t), None);
+    }
     ((!rest.is_empty()).then_some(rest), Some(issue))
 }
 
@@ -597,5 +610,62 @@ mod confirmed_issue_tests {
         assert_eq!(row.series, "Glarien: Origins");
         assert_eq!(row.subtitle.as_deref(), Some("The Dig"));
         assert_eq!(row.issue, Some(2));
+    }
+}
+
+#[cfg(test)]
+mod take_hash_issue_tests {
+    use super::*;
+
+    /// Its only coverage was through `build_row` on the two marketplace rows
+    /// that carry a fifth column. Both divergences below go live the moment
+    /// a third such entry is added, so they are pinned before that happens.
+    #[test]
+    fn a_plain_trailing_hash_number_is_taken() {
+        assert_eq!(take_hash_issue(Some("#1".into())), (None, Some(1)));
+        assert_eq!(
+            take_hash_issue(Some("The Dig #2".into())),
+            (Some("The Dig".into()), Some(2))
+        );
+    }
+
+    #[test]
+    fn a_volume_written_with_a_hash_is_not_an_issue() {
+        // `take_trailing_issue` in core declines exactly this shape. Without
+        // the same guard here the confirmed arm turned a volume marker into
+        // an issue and stranded "Vol." in the subtitle — and that arm drops
+        // the volume, so the number would have been lost entirely.
+        assert_eq!(
+            take_hash_issue(Some("Vol. #3".into())),
+            (Some("Vol. #3".into()), None)
+        );
+        assert_eq!(
+            take_hash_issue(Some("Volume #12".into())),
+            (Some("Volume #12".into()), None)
+        );
+    }
+
+    #[test]
+    fn a_number_past_the_ceiling_is_left_as_text() {
+        // `MappingRow::validate` refuses an issue above 9999, which made
+        // `build_row` error and dropped the whole row out of the table —
+        // worse than the subtitle it used to ship with.
+        assert_eq!(
+            take_hash_issue(Some("#99999".into())),
+            (Some("#99999".into()), None)
+        );
+        assert_eq!(take_hash_issue(Some("#9999".into())), (None, Some(9999)));
+    }
+
+    #[test]
+    fn anything_that_is_not_a_trailing_bare_number_is_untouched() {
+        for text in ["Issue #3 Special", "#", "#-1", "#1.5", "#1-6", "#4294967296", "Orphans"] {
+            assert_eq!(
+                take_hash_issue(Some(text.into())),
+                (Some(text.into()), None),
+                "{text:?} is not a trailing issue number"
+            );
+        }
+        assert_eq!(take_hash_issue(None), (None, None));
     }
 }

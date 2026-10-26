@@ -143,7 +143,7 @@ const MAX_VOLUME_COUNT: u32 = 9999;
 /// D60 pads an issue to a fixed four digits, so a larger number would widen
 /// the name past what the convention promises. The largest issue number in the
 /// corpus is 666.
-const MAX_ISSUE: u32 = 9999;
+pub const MAX_ISSUE: u32 = 9999;
 
 fn invalid(field: &'static str, reason: impl Into<String>) -> MappingError {
     MappingError::Invalid { field, reason: reason.into() }
