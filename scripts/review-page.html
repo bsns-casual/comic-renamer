@@ -1,0 +1,920 @@
+<title>Humble Table Review</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,600;1,6..72,400&family=Archivo:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  /* Layout: an archival review bench — sticky ledger header, then two sorted
+     stacks of record cards, each card filename -> fields -> resulting path. */
+  :root {
+    --bg: #f7f7f5;
+    --surface: #ffffff;
+    --surface-2: #eeeef0;
+    --fg: #1c1d22;
+    --fg-dim: #5d6070;
+    --fg-faint: #898d9e;
+    --rule: #dcdce2;
+    --accent: #2f4ba8;
+    --accent-fg: #ffffff;
+    --flag: #8a5a00;
+    --flag-bg: #fdf0d8;
+    --settled: #1f6b45;
+    --settled-bg: #e4f2e9;
+    --alarm: #a32020;
+    --alarm-bg: #fbe8e8;
+    --font-display: "Newsreader", Georgia, serif;
+    --font-body: "Archivo", system-ui, sans-serif;
+    --font-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #15161a;
+      --surface: #1d1f25;
+      --surface-2: #26282f;
+      --fg: #e9e9ee;
+      --fg-dim: #a3a7b8;
+      --fg-faint: #767b8d;
+      --rule: #32353e;
+      --accent: #8ca4f0;
+      --accent-fg: #11131a;
+      --flag: #e8bc6a;
+      --flag-bg: #3a2f17;
+      --settled: #7ed3a4;
+      --settled-bg: #17301f;
+      --alarm: #f09a9a;
+      --alarm-bg: #35191b;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #15161a;
+    --surface: #1d1f25;
+    --surface-2: #26282f;
+    --fg: #e9e9ee;
+    --fg-dim: #a3a7b8;
+    --fg-faint: #767b8d;
+    --rule: #32353e;
+    --accent: #8ca4f0;
+    --accent-fg: #11131a;
+    --flag: #e8bc6a;
+    --flag-bg: #3a2f17;
+    --settled: #7ed3a4;
+    --settled-bg: #17301f;
+    --alarm: #f09a9a;
+    --alarm-bg: #35191b;
+    color-scheme: dark;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-body);
+    font-size: 15px;
+    line-height: 1.45;
+  }
+  * { box-sizing: border-box; }
+
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0 0 auto;
+    height: env(safe-area-inset-top, 0px);
+    z-index: 10;
+    background: var(--surface);
+  }
+
+  .wrap {
+    max-width: 62rem;
+    margin: 0 auto;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    padding-block: 0 4rem;
+  }
+
+  /* ---- ledger header ---- */
+  header {
+    position: sticky;
+    top: env(safe-area-inset-top, 0px);
+    z-index: 9;
+    background: var(--surface);
+    border-bottom: 1px solid var(--rule);
+    margin-left: calc(-1 * max(16px, env(safe-area-inset-left, 0px)));
+    margin-right: calc(-1 * max(16px, env(safe-area-inset-right, 0px)));
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    padding-block: 0.85rem;
+  }
+  .hrow { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem 1rem; }
+  h1 {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 1.3rem;
+    margin: 0;
+    letter-spacing: -0.01em;
+  }
+  .tally {
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--fg-dim);
+    margin-left: auto;
+  }
+  .tally b { color: var(--fg); font-weight: 500; }
+  .meter {
+    height: 3px;
+    background: var(--surface-2);
+    border-radius: 2px;
+    margin-top: 0.7rem;
+    overflow: hidden;
+  }
+  .meter i { display: block; height: 100%; width: 0; background: var(--accent); transition: width 0.25s; }
+  .hopts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1.1rem;
+    margin-top: 0.6rem;
+    font-size: 0.82rem;
+    color: var(--fg-dim);
+  }
+  .hopts label { display: inline-flex; align-items: center; gap: 0.4rem; cursor: pointer; }
+
+  /* ---- notices ---- */
+  .notice {
+    margin-top: 1rem;
+    padding: 0.7rem 0.9rem;
+    border-radius: 6px;
+    border: 1px solid var(--rule);
+    background: var(--surface);
+    font-size: 0.88rem;
+    color: var(--fg-dim);
+  }
+  .notice.bad { background: var(--alarm-bg); border-color: var(--alarm); color: var(--fg); }
+  .notice strong { color: var(--fg); font-weight: 600; }
+
+  /* ---- sections ---- */
+  section { margin-top: 2.2rem; }
+  .shead { border-bottom: 2px solid var(--fg); padding-bottom: 0.4rem; margin-bottom: 0.3rem; }
+  .shead h2 {
+    font-family: var(--font-display);
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.6rem;
+  }
+  .shead .n {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    font-weight: 400;
+    color: var(--fg-dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .sblurb { font-size: 0.86rem; color: var(--fg-dim); margin: 0.5rem 0 1rem; max-width: 60ch; }
+
+  /* ---- record card ---- */
+  .rec {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 7px;
+    padding: 0.8rem 0.9rem;
+    margin-bottom: 0.6rem;
+    display: grid;
+    gap: 0.6rem;
+  }
+  .rec.done { border-color: var(--settled); background: var(--settled-bg); }
+  .rec.err { border-color: var(--alarm); background: var(--alarm-bg); }
+  .rec.skipped { background: var(--surface-2); border-style: dashed; }
+  .rec.skipped .verified, .rec.skipped .stem { opacity: 0.55; }
+
+  .ident { display: grid; gap: 0.15rem; min-width: 0; }
+  .stem {
+    font-family: var(--font-mono);
+    font-size: 0.86rem;
+    word-break: break-all;
+    color: var(--fg);
+  }
+  .bundle { font-size: 0.73rem; color: var(--fg-faint); }
+  .verified {
+    font-family: var(--font-display);
+    font-size: 1.02rem;
+    line-height: 1.3;
+    min-width: 0;
+    overflow-wrap: break-word;
+  }
+  .chips { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+  .chip {
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    padding: 0.12rem 0.42rem;
+    border-radius: 3px;
+    background: var(--flag-bg);
+    color: var(--flag);
+    white-space: nowrap;
+  }
+  .chip.calm { background: var(--surface-2); color: var(--fg-dim); }
+
+  .fields { display: grid; grid-template-columns: 1fr 5.5rem 5.5rem 1fr; gap: 0.5rem; }
+  @media (max-width: 860px) { .fields { grid-template-columns: 1fr 5.5rem 5.5rem; } }
+  @media (max-width: 620px) { .fields { grid-template-columns: 1fr; } }
+  .f { display: grid; gap: 0.2rem; min-width: 0; }
+  .f > span {
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--fg-faint);
+  }
+  .f input {
+    font-family: var(--font-body);
+    font-size: 0.92rem;
+    color: var(--fg);
+    background: var(--bg);
+    border: 1px solid var(--rule);
+    border-radius: 5px;
+    padding: 0.4rem 0.5rem;
+    width: 100%;
+    min-width: 0;
+  }
+  .f input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .f input[data-bad="1"] { border-color: var(--alarm); }
+
+  .outcome {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 0.8rem;
+    border-top: 1px dashed var(--rule);
+    padding-top: 0.6rem;
+  }
+  .path {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    color: var(--fg-dim);
+    word-break: break-all;
+    flex: 1 1 18rem;
+    min-width: 0;
+  }
+  .path b { color: var(--fg); font-weight: 500; }
+  .acts { display: flex; align-items: center; gap: 0.4rem; margin-left: auto; }
+  button {
+    font-family: var(--font-body);
+    font-size: 0.85rem;
+    font-weight: 600;
+    border-radius: 5px;
+    border: 1px solid transparent;
+    padding: 0.42rem 0.85rem;
+    cursor: pointer;
+    background: var(--accent);
+    color: var(--accent-fg);
+  }
+  button.ghost { background: transparent; color: var(--fg-dim); border-color: var(--rule); font-weight: 500; }
+  button.ghost:hover { color: var(--fg); }
+  button[disabled] { opacity: 0.5; cursor: default; }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .revert { padding: 0.42rem 0.55rem; font-size: 0.95rem; line-height: 1; }
+  .state { font-size: 0.78rem; font-weight: 600; color: var(--settled); }
+  .state.bad { color: var(--alarm); }
+  .state.dim { color: var(--fg-faint); font-weight: 500; }
+
+  .more { display: grid; justify-items: center; gap: 0.6rem; padding: 1.2rem 0; }
+  .more p { margin: 0; font-size: 0.82rem; color: var(--fg-faint); font-family: var(--font-mono); }
+  .bulk {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.6rem;
+    background: var(--surface-2);
+    border-radius: 6px;
+    padding: 0.7rem 0.9rem;
+    margin-bottom: 1rem;
+    font-size: 0.86rem;
+    color: var(--fg-dim);
+  }
+  .bulk span { flex: 1 1 14rem; min-width: 0; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="hrow">
+      <h1>Humble Table Review</h1>
+      <div class="tally"><b id="tConf">0</b> / <span id="tAll">—</span> confirmed<span id="tSkip"></span></div>
+    </div>
+    <div class="meter"><i id="bar"></i></div>
+    <div class="hopts">
+      <label><input type="checkbox" id="hideDone"> Hide confirmed</label>
+      <span id="loadState">Loading records…</span>
+    </div>
+  </header>
+
+  <div id="notices"></div>
+
+  <section id="secSuspect">
+    <div class="shead">
+      <h2>Needs a decision <span class="n" id="nSuspect">—</span></h2>
+    </div>
+    <p class="sblurb">The split disagreed with the verified title, or the title has a shape the
+      parser reads wrong. Sorted by filename. <b>Issue</b> is its own field now, so a single
+      issue files as <code>Series 0007</code> rather than carrying a <code>#</code> in its
+      subtitle; <code>seed</code> fills it in wherever the filename vouches for the number, and
+      decisions you confirmed before that column existed are still confirmed.</p>
+    <div id="listSuspect"></div>
+  </section>
+
+  <section id="secScan">
+    <div class="shead">
+      <h2>Scan <span class="n" id="nScan">—</span></h2>
+    </div>
+    <p class="sblurb">No heuristic fired on these, which is not the same as being right.
+      Sorted by filename.</p>
+    <div class="bulk">
+      <span id="bulkMsg">Confirm every remaining row here as proposed.</span>
+      <button class="ghost" id="bulkBtn" disabled>Confirm all remaining</button>
+    </div>
+    <div id="listScan"></div>
+    <div class="more" id="more" hidden>
+      <p id="moreTxt"></p>
+      <button class="ghost" id="moreBtn">Show more</button>
+    </div>
+  </section>
+</div>
+
+<script>
+  const CHUNK = 100;
+  const EXT = "cbz";
+
+  // Mirrors crates/core/src/preset/komga.rs. Truncation at 255 bytes and the
+  // Windows device-name guard are left out: no row here comes near either.
+  // Built from code points, never from literal escapes: the space variants and
+  // the invisible set are unreadable and fragile as source characters.
+  const SUBS = new Map([
+    [":", " - "], ["/", " - "], ["|", "-"], ['"', "'"],
+    ["<", "("], [">", ")"], ["?", ""], ["*", ""],
+    [String.fromCodePoint(0x5c), "-"],
+  ]);
+  for (const cp of [0xa0, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006,
+                    0x2007, 0x2008, 0x2009, 0x200a, 0x202f, 0x205f, 0x3000, 0x1680]) {
+    SUBS.set(String.fromCodePoint(cp), " ");
+  }
+  // normalize::is_invisible, range for range.
+  const INVIS = [[0xad, 0xad], [0x34f, 0x34f], [0x61c, 0x61c], [0x115f, 0x1160],
+                 [0x17b4, 0x17b5], [0x180b, 0x180f], [0x200b, 0x200f], [0x2028, 0x202e],
+                 [0x2060, 0x2064], [0x2066, 0x206f], [0x3164, 0x3164], [0xfe00, 0xfe0f],
+                 [0xfeff, 0xfeff], [0xffa0, 0xffa0], [0xfff9, 0xfffb], [0xe0000, 0xe007f]];
+  const isInvisible = (cp) => INVIS.some(([a, b]) => cp >= a && cp <= b);
+
+  function sanitize(s) {
+    let out = "";
+    for (const ch of (s || "").normalize("NFC")) {
+      const code = ch.codePointAt(0);
+      const isControl = code < 0x20 || (code >= 0x7f && code <= 0x9f);
+      if (isControl || isInvisible(code)) continue;
+      out += SUBS.has(ch) ? SUBS.get(ch) : ch;
+    }
+    out = out.replace(/  +/g, " ");
+    return out.replace(/[. ]+$/, "").replace(/^[.]+/, "");
+  }
+
+  // pad(volume, run) with run = 0, since volume_count ships empty: width 2.
+  const pad = (v) => String(v).padStart(2, "0");
+  // pad_issue: a fixed four digits and no `#` (D60). No run width, because the
+  // ceiling is known and low.
+  const padIssue = (v) => String(v).padStart(4, "0");
+
+  function komgaPath(series, volume, issue, subtitle) {
+    const folder = sanitize(series);
+    let stem = folder;
+    if (volume !== "") stem += " Vol. " + pad(volume);
+    if (issue !== "") stem += " " + padIssue(issue);
+    if (subtitle !== "") stem += " - " + subtitle;
+    return { folder, leaf: sanitize(stem) + "." + sanitize(EXT) };
+  }
+
+  // Moves a trailing number out of the name and into the ISSUE field. `seed`
+  // now does this for every row whose filename vouches for it (D61), so this
+  // is the manual case: a row where the filename says nothing and only the
+  // reader can tell a title from an issue number. Takes it from the subtitle
+  // when that is where the tail sits (`Protocol` / `Orphans 1`), otherwise
+  // from the series. Null when there is no trailing number to move, or when
+  // moving it would leave no series behind.
+  function asIssue(f) {
+    if (f.iss !== "") return null;
+    const tail = (s) => /^(.*?)[\s,]*([0-9]+)$/.exec(s);
+    const sub = f.sub.trim();
+    const inSub = sub && tail(sub);
+    if (inSub && inSub[1].trim()) {
+      return { s: f.s, v: f.v, iss: String(Number(inSub[2])), sub: inSub[1].trim() };
+    }
+    const inSeries = tail(f.s.trim());
+    if (inSeries && inSeries[1].trim()) {
+      return { s: inSeries[1].trim(), v: "", iss: String(Number(inSeries[2])), sub };
+    }
+    return null;
+  }
+
+  const el = (id) => document.getElementById(id);
+  const notices = el("notices");
+  function notice(html, bad) {
+    const d = document.createElement("div");
+    d.className = "notice" + (bad ? " bad" : "");
+    d.innerHTML = html;
+    notices.appendChild(d);
+    return d;
+  }
+
+  let db = null;
+  const chunks = new Map();   // chunk index -> {d: {rowIndex: decision}}
+  const queues = new Map();   // chunk index -> settled promise chain
+  const cards = new Map();    // row index -> card controller
+  let total = 0, confirmed = 0, skipped = 0;
+
+  function enqueue(c, fn) {
+    const prev = queues.get(c) || Promise.resolve();
+    const run = prev.catch(() => {}).then(fn);
+    queues.set(c, run.catch(() => {}));
+    return run;
+  }
+
+  // The store is keyed on a row's ordinal in `seed`'s output, which is the
+  // only stable handle the page has. A decision also carries the row's own
+  // key and bundle, so one written against a different file — because that
+  // output was regenerated between sittings and the order moved — is ignored
+  // rather than painted over this row as if it belonged to it. `orphaned`
+  // holds those so the page can say so instead of quietly dropping them.
+  const orphaned = new Set();
+  function decisionFor(row) {
+    const body = chunks.get(Math.floor(row.i / CHUNK));
+    const dec = body && body.d ? body.d[String(row.i)] : undefined;
+    if (!dec) return undefined;
+    return dec.k === row.k && dec.b === row.b ? dec : undefined;
+  }
+
+  // The mirror is updated only after the write resolves, so a failed save can
+  // never read back as a saved decision.
+  // A MERGE, never a replace. This rebuilt each block of 100 from the page's
+  // own mirror and wrote it whole, so a single failed read at load plus one
+  // Confirm in that block replaced the stored document with one decision and
+  // destroyed the other 99. `update` touches only the keys it carries, which
+  // also stops two open tabs overwriting each other.
+  function save(rows) {
+    const byChunk = new Map();
+    for (const { row, dec } of rows) {
+      const c = Math.floor(row.i / CHUNK);
+      if (!byChunk.has(c)) byChunk.set(c, []);
+      byChunk.get(c).push({ row, dec });
+    }
+    return Promise.all([...byChunk].map(([c, items]) => enqueue(c, async () => {
+      const patch = {};
+      for (const { row, dec } of items) patch[String(row.i)] = dec;
+      const ref = db.doc("decisions/c" + c);
+      try {
+        await ref.update({ d: patch });
+      } catch (e) {
+        // `update` refuses a document that does not exist. Creating one is
+        // the only write that cannot destroy anything, so it is the only
+        // place a full `set` is safe.
+        if (e && e.code === "invalid_argument") await ref.set({ d: patch });
+        else throw e;
+      }
+      const current = chunks.get(c) || { d: {} };
+      chunks.set(c, { d: { ...current.d, ...patch } });
+    })));
+  }
+
+  /// Removing a decision needs a replace, because the page API has no way to
+  /// delete one key of a nested map. The block is re-read first rather than
+  /// rebuilt from the mirror, so the write cannot drop what it never saw.
+  function forget(row) {
+    const c = Math.floor(row.i / CHUNK);
+    return enqueue(c, async () => {
+      const ref = db.doc("decisions/c" + c);
+      const snap = await ref.get();
+      const d = { ...((snap.exists && (snap.data() || {}).d) || {}) };
+      delete d[String(row.i)];
+      await ref.set({ d });
+      chunks.set(c, { d });
+    });
+  }
+
+  // Recomputed from the store rather than incremented, so skip and unskip
+  // cannot drift the counters.
+  function recount() {
+    confirmed = 0;
+    skipped = 0;
+    for (const body of chunks.values()) {
+      for (const [at, dec] of Object.entries(body.d || {})) {
+        // In the store but belonging to no row on this page, so not progress
+        // against this page's total — whichever kind it is.
+        if (orphaned.has(at)) continue;
+        if (dec && dec.skip) skipped++; else confirmed++;
+      }
+    }
+    el("tConf").textContent = confirmed.toLocaleString();
+    el("tSkip").textContent = skipped ? " · " + skipped.toLocaleString() + " skipped" : "";
+    const settled = confirmed + skipped;
+    el("bar").style.width = total ? (settled / total * 100) + "%" : "0";
+  }
+
+  function card(row) {
+    const node = document.createElement("div");
+    node.className = "rec";
+
+    const ident = document.createElement("div");
+    ident.className = "ident";
+    const stem = document.createElement("div");
+    stem.className = "stem";
+    stem.textContent = row.stem;
+    const bundle = document.createElement("div");
+    bundle.className = "bundle";
+    bundle.textContent = row.b;
+    ident.append(stem, bundle);
+
+    const verified = document.createElement("div");
+    verified.className = "verified";
+    verified.textContent = row.title;
+
+    const chips = document.createElement("div");
+    chips.className = "chips";
+    for (const f of row.flags) {
+      const c = document.createElement("span");
+      c.className = "chip";
+      c.textContent = f;
+      chips.appendChild(c);
+    }
+    if (row.src) {
+      const c = document.createElement("span");
+      c.className = "chip calm";
+      c.textContent =
+        row.src === "title" ? "issue " + row.iss + " from the title" : "filename says issue " + row.iss;
+      chips.appendChild(c);
+    }
+    if (row.corpus) {
+      const c = document.createElement("span");
+      c.className = "chip calm";
+      c.textContent = "corpus confirmed";
+      chips.appendChild(c);
+    }
+
+    const fields = document.createElement("div");
+    fields.className = "fields";
+    const inputs = {};
+    for (const [k, label] of [["s", "Series"], ["v", "Volume"], ["iss", "Issue"], ["sub", "Subtitle"]]) {
+      const f = document.createElement("label");
+      f.className = "f";
+      const sp = document.createElement("span");
+      sp.textContent = label;
+      const inp = document.createElement("input");
+      inp.type = "text";
+      inp.id = "r" + row.i + k;
+      if (k === "v" || k === "iss") { inp.inputMode = "numeric"; inp.autocomplete = "off"; }
+      f.append(sp, inp);
+      fields.appendChild(f);
+      inputs[k] = inp;
+    }
+
+    const outcome = document.createElement("div");
+    outcome.className = "outcome";
+    const path = document.createElement("div");
+    path.className = "path";
+    const acts = document.createElement("div");
+    acts.className = "acts";
+    const state = document.createElement("span");
+    state.className = "state";
+    const revert = document.createElement("button");
+    revert.className = "ghost revert";
+    revert.type = "button";
+    // Names what it restores. This is the only affordance that pulls in a
+    // proposal that changed since a row was confirmed — `seed` deriving an
+    // issue, say — and "reset to the proposed split" did not say what the
+    // proposal now is.
+    revert.title =
+      "Reset to seed's proposal: " +
+      [row.s, row.v && "Vol. " + row.v, row.iss && "issue " + row.iss, row.sub]
+        .filter(Boolean)
+        .join(" / ");
+    revert.textContent = "↺";
+    const issue = document.createElement("button");
+    issue.className = "ghost";
+    issue.type = "button";
+    issue.textContent = "Make issue";
+    issue.title = "Move the trailing number out of the name and into the Issue field";
+    const skip = document.createElement("button");
+    skip.className = "ghost";
+    skip.type = "button";
+    skip.textContent = "Skip";
+    skip.title = "Leave this file out of the table for now";
+    const confirm = document.createElement("button");
+    confirm.type = "button";
+    confirm.textContent = "Confirm";
+    acts.append(state, revert, issue, skip, confirm);
+    outcome.append(path, acts);
+
+    node.append(ident, verified);
+    if (chips.children.length) node.appendChild(chips);
+    node.append(fields, outcome);
+
+    const read = () => ({
+      s: inputs.s.value.trim(),
+      v: inputs.v.value.trim(),
+      iss: inputs.iss.value.trim(),
+      sub: inputs.sub.value.trim(),
+    });
+
+    function paint() {
+      const f = read();
+      const digits = (v) => v === "" || /^[0-9]+$/.test(v);
+      const badVol = !digits(f.v);
+      const badIssue = !digits(f.iss) || (f.iss !== "" && Number(f.iss) > 9999);
+      inputs.v.dataset.bad = badVol ? "1" : "";
+      inputs.iss.dataset.bad = badIssue ? "1" : "";
+      const badSeries = f.s === "";
+      inputs.s.dataset.bad = badSeries ? "1" : "";
+      if (badSeries) {
+        path.textContent = "A row with no series has no destination.";
+      } else if (badVol) {
+        path.textContent = "Volume must be digits, or empty.";
+      } else if (badIssue) {
+        path.textContent = "Issue must be digits up to 9999, or empty.";
+      } else {
+        const p = komgaPath(f.s, f.v, f.iss, f.sub);
+        path.innerHTML = "";
+        path.append(document.createTextNode(p.folder + "/"));
+        const b = document.createElement("b");
+        b.textContent = p.leaf;
+        path.appendChild(b);
+      }
+      const dec = decisionFor(row);
+      const isSkipped = !!dec && !!dec.skip;
+      // A decision saved before the issue column carries no `iss`. Absent
+      // reads as empty, so confirmations made earlier stay confirmed instead
+      // of being silently reopened.
+      const settled =
+        !!dec &&
+        !dec.skip &&
+        dec.s === f.s &&
+        dec.v === f.v &&
+        (dec.iss || "") === f.iss &&
+        dec.sub === f.sub;
+
+      for (const k of ["s", "v", "iss", "sub"]) inputs[k].disabled = isSkipped;
+      node.classList.toggle("done", settled);
+      node.classList.toggle("skipped", isSkipped);
+
+      state.classList.remove("bad", "dim");
+      if (isSkipped) {
+        state.textContent = "Skipped";
+        state.classList.add("dim");
+        path.textContent = "Left out of the table.";
+      } else {
+        state.textContent = settled ? "Confirmed" : "";
+      }
+
+      skip.disabled = !db;
+      skip.textContent = isSkipped ? "Put back" : "Skip";
+      issue.hidden = isSkipped || !asIssue(f);
+      confirm.hidden = isSkipped;
+      confirm.disabled = badSeries || badVol || badIssue || !db || settled;
+      confirm.textContent = dec && !isSkipped ? (settled ? "Confirmed" : "Save change") : "Confirm";
+      revert.hidden =
+        isSkipped || (f.s === row.s && f.v === row.v && f.iss === row.iss && f.sub === row.sub);
+      node.hidden = hideDone && (settled || isSkipped);
+    }
+
+    function fill(f) {
+      inputs.s.value = f.s;
+      inputs.v.value = f.v;
+      inputs.iss.value = f.iss;
+      inputs.sub.value = f.sub;
+      paint();
+    }
+
+    for (const k of ["s", "v", "iss", "sub"]) inputs[k].addEventListener("input", paint);
+    revert.addEventListener("click", () =>
+      fill({ s: row.s, v: row.v, iss: row.iss, sub: row.sub }));
+    // Changes the prefill only. Nothing is stored until Confirm.
+    issue.addEventListener("click", () => {
+      const next = asIssue(read());
+      if (next) fill(next);
+    });
+
+    // Both buttons write through here, so a failed write never repaints the row
+    // as settled: the mirror only moves on success.
+    async function commit(dec, btn, busy) {
+      const before = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = busy;
+      node.classList.remove("err");
+      try {
+        await (dec === null ? forget(row) : save([{ row, dec }]));
+        recount();
+        paint();
+      } catch (e) {
+        node.classList.add("err");
+        state.textContent = "Not saved: " + (e && e.code ? e.code : "failed");
+        state.classList.add("bad");
+        btn.disabled = false;
+        btn.textContent = before;
+      }
+    }
+
+    confirm.addEventListener("click", () => {
+      const f = read();
+      commit({ k: row.k, b: row.b, s: f.s, v: f.v, iss: f.iss, sub: f.sub }, confirm, "Saving…");
+    });
+
+    // Put back clears the row rather than confirming it: an un-skipped row is
+    // undecided again, not silently agreed to.
+    skip.addEventListener("click", () => {
+      const dec = decisionFor(row);
+      if (dec && dec.skip) {
+        commit(null, skip, "…");
+      } else {
+        commit({ k: row.k, b: row.b, skip: true }, skip, "…");
+      }
+    });
+
+    const ctl = {
+      node,
+      fill,
+      paint,
+      row,
+      settled: () => node.classList.contains("done"),
+      // Whether the inputs differ from seed's proposal, so bulk confirm can
+      // leave a row the user has touched alone.
+      dirty: () => {
+        const f = read();
+        return f.s !== row.s || f.v !== row.v || f.iss !== row.iss || f.sub !== row.sub;
+      },
+    };
+    cards.set(row.i, ctl);
+    const dec = decisionFor(row);
+    fill(
+      dec && !dec.skip
+        ? { s: dec.s, v: dec.v, iss: dec.iss || "", sub: dec.sub }
+        : { s: row.s, v: row.v, iss: row.iss, sub: row.sub }
+    );
+    return ctl;
+  }
+
+  let hideDone = false;
+  function sweepHidden() {
+    for (const ctl of cards.values()) {
+      ctl.node.hidden = hideDone && ctl.settled();
+    }
+  }
+  el("hideDone").addEventListener("change", (e) => {
+    hideDone = e.target.checked;
+    sweepHidden();
+  });
+
+  // ---- incremental render for the long stack ----
+  let scanRows = [], shown = 0;
+  const BATCH = 60;
+  function renderMore() {
+    const host = el("listScan");
+    const frag = document.createDocumentFragment();
+    const end = Math.min(shown + BATCH, scanRows.length);
+    for (; shown < end; shown++) frag.appendChild(card(scanRows[shown]).node);
+    host.appendChild(frag);
+    sweepHidden();
+    const left = scanRows.length - shown;
+    el("more").hidden = left === 0;
+    el("moreTxt").textContent = left ? left.toLocaleString() + " more below" : "";
+  }
+  el("moreBtn").addEventListener("click", renderMore);
+
+  async function boot() {
+    let data;
+    try {
+      const res = await fetch("rows.json");
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      data = await res.json();
+    } catch (e) {
+      el("loadState").textContent = "";
+      notice("<strong>The records did not load.</strong> " + e.message, true);
+      return;
+    }
+
+    total = data.total;
+    el("tAll").textContent = total.toLocaleString();
+    el("nSuspect").textContent = data.suspect.length.toLocaleString() + " rows";
+    el("nScan").textContent = data.scan.length.toLocaleString() + " rows";
+
+    db = await window.claude?.use?.("db") ?? null;
+    if (!db) {
+      notice("<strong>Decisions cannot be saved in this view.</strong> " +
+        "The store is unavailable, so Confirm is switched off. The proposed splits and " +
+        "the paths they produce are still shown.", true);
+    } else {
+      const n = Math.ceil(total / CHUNK);
+      const reads = await Promise.allSettled(
+        [...Array(n).keys()].map(async (c) => {
+          const snap = await db.doc("decisions/c" + c).get();
+          if (snap.exists) chunks.set(c, { d: (snap.data() || {}).d || {} });
+        })
+      );
+      const failed = reads.filter((r) => r.status === "rejected").length;
+      if (failed) {
+        notice("<strong>" + failed + " of " + n + " blocks of saved decisions could not be read.</strong> " +
+          "Rows in those blocks show the proposed split and may already have been confirmed. " +
+          "Reload before confirming them.", true);
+      }
+    }
+
+    // Any stored decision whose key and bundle do not match the row now at
+    // its index. Zero today, and it stayed zero when the data was
+    // regenerated — but the page cannot tell luck from a guarantee, and a
+    // decision silently attached to the wrong file is worse than one lost.
+    const all = data.suspect.concat(data.scan);
+    const byIndex = new Map(all.map((r) => [r.i, r]));
+    for (const body of chunks.values()) {
+      for (const [at, dec] of Object.entries(body.d || {})) {
+        const row = byIndex.get(Number(at));
+        if (!row || dec.k !== row.k || dec.b !== row.b) orphaned.add(at);
+      }
+    }
+    if (orphaned.size) {
+      notice(
+        "<strong>" + orphaned.size + " saved decision(s) no longer match the file they were made for.</strong> " +
+          "The row data was rebuilt and the order moved, so those are ignored rather than shown " +
+          "against the wrong file. They are still in the store; nothing was deleted.",
+        true
+      );
+    }
+
+    el("loadState").textContent = db ? "Saved as you go." : "Read only.";
+    recount();
+
+    const sus = document.createDocumentFragment();
+    for (const row of data.suspect) sus.appendChild(card(row).node);
+    el("listSuspect").appendChild(sus);
+
+    scanRows = data.scan;
+    renderMore();
+    if (db) el("bulkBtn").disabled = false;
+  }
+
+  // ---- bulk confirm, two-step ----
+  let armed = false;
+  el("bulkBtn").addEventListener("click", async () => {
+    const btn = el("bulkBtn"), msg = el("bulkMsg");
+    // `map`'s `^A` leaves a row the user has already edited alone, pinned by
+    // `approve_all_remaining_leaves_already_edited_rows_alone`. This button
+    // wrote the proposal over such an edit, so the two tools disagreed about
+    // what "confirm all remaining" means.
+    const touched = scanRows.filter((r) => {
+      const ctl = cards.get(r.i);
+      return !decisionFor(r) && ctl && ctl.dirty();
+    });
+    const pending = scanRows.filter((r) => {
+      const ctl = cards.get(r.i);
+      return !decisionFor(r) && !(ctl && ctl.dirty());
+    });
+    if (!pending.length) {
+      msg.textContent = "Every row here is already confirmed.";
+      btn.disabled = true;
+      return;
+    }
+    if (!armed) {
+      armed = true;
+      msg.textContent =
+        "This confirms " + pending.length.toLocaleString() +
+        " rows exactly as proposed, including the ones not yet on screen." +
+        (touched.length
+          ? " " + touched.length.toLocaleString() + " row(s) you have edited are left alone."
+          : "") +
+        " Press again to do it.";
+      btn.textContent = "Yes, confirm " + pending.length.toLocaleString();
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = "Saving…";
+    const batch = pending.map((row) => ({
+      row,
+      dec: { k: row.k, b: row.b, s: row.s, v: row.v, iss: row.iss, sub: row.sub },
+    }));
+    try {
+      await save(batch);
+      recount();
+      for (const { row } of batch) {
+        const ctl = cards.get(row.i);
+        if (ctl) ctl.paint();
+      }
+      msg.textContent =
+        pending.length.toLocaleString() + " rows confirmed as proposed." +
+        (touched.length ? " " + touched.length.toLocaleString() + " edited row(s) left for you." : "");
+      btn.textContent = "Done";
+      btn.hidden = true;
+    } catch (e) {
+      msg.textContent = "Some rows did not save (" + (e && e.code ? e.code : "failed") +
+        "). Reload to see which are stored.";
+      btn.disabled = false;
+      btn.textContent = "Retry";
+      armed = false;
+    }
+  });
+
+  boot();
+</script>

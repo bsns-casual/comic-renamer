@@ -164,6 +164,7 @@ pub fn seed() -> Result<(), String> {
     let mut rows = Vec::new();
     let mut classes: BTreeMap<&'static str, Vec<(String, MappingRow)>> = BTreeMap::new();
     let mut rejected: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut sidecar: Vec<String> = vec!["key\tbundle\tstem\ttitle\tclass".to_string()];
     for line in GROUND_TRUTH.lines().skip(1) {
         let f: Vec<&str> = line.split('\t').collect();
         let [bundle, title, stem] = f[..f.len().min(3)] else {
@@ -201,6 +202,13 @@ pub fn seed() -> Result<(), String> {
             classify(title, &row)
         };
         classes.entry(class).or_default().push((title.to_string(), row.clone()));
+        // The class, beside the row it describes. Without this the review
+        // page re-derived it in Python from the same titles, and the two
+        // disagreed: that copy's volume-word list carried `book`, `part` and
+        // `v`, which `title::is_volume_word` does not match. A second
+        // implementation of a judgement is a second thing to be wrong, and a
+        // page meant to drive 2,204 decisions should agree with the report.
+        sidecar.push(format!("{}\t{}\t{}\t{}\t{}", row.key, row.bundle, stem, title, class));
         rows.push(row);
     }
     // Exact repeats collapse; a pair that disagrees survives to be counted below.
@@ -210,9 +218,12 @@ pub fn seed() -> Result<(), String> {
     let out = root.join("target/seed/humble.tsv");
     std::fs::create_dir_all(out.parent().unwrap()).map_err(|e| e.to_string())?;
     std::fs::write(&out, to_tsv(&rows)).map_err(|e| e.to_string())?;
+    let classes_out = root.join("target/seed/humble-classes.tsv");
+    std::fs::write(&classes_out, sidecar.join("\n") + "\n").map_err(|e| e.to_string())?;
 
     let total: usize = classes.values().map(Vec::len).sum();
     println!("\nhumble candidates (NOT shipped): {} unique rows -> {}", rows.len(), out.display());
+    println!("classes -> {}", classes_out.display());
     println!(
         "{total} rows built; {} rejected; {} key collisions",
         rejected.values().map(Vec::len).sum::<usize>(),
@@ -266,9 +277,11 @@ fn take_hash_issue(text: Option<String>) -> (Option<String>, Option<u32>) {
         return (None, None);
     };
     let trimmed = t.trim_end();
-    let Some(last) = trimmed.rsplit(char::is_whitespace).next() else {
-        return (Some(t), None);
-    };
+    // `rsplit_once` yields nothing when there is no whitespace, which is the
+    // bare `#1` case — consumed here, where a whole title would keep it.
+    let (head, last) = trimmed
+        .rsplit_once(char::is_whitespace)
+        .map_or(("", trimmed), |(head, last)| (head, last));
     let Some(issue) = last.strip_prefix('#').and_then(|d| d.parse::<u32>().ok()) else {
         return (Some(t), None);
     };
@@ -278,7 +291,7 @@ fn take_hash_issue(text: Option<String>) -> (Option<String>, Option<u32>) {
     if issue > MAX_ISSUE {
         return (Some(t), None);
     }
-    let rest = trimmed[..trimmed.len() - last.len()].trim_end().to_string();
+    let rest = head.trim_end();
     // `Vol. #3` is a volume written with a hash, not an issue — the same
     // shape `take_trailing_issue` declines in core. This arm discards the
     // volume, so taking it would lose the number and strand `Vol.` in the
@@ -286,7 +299,7 @@ fn take_hash_issue(text: Option<String>) -> (Option<String>, Option<u32>) {
     if rest.split_whitespace().next_back().is_some_and(is_volume_word) {
         return (Some(t), None);
     }
-    ((!rest.is_empty()).then_some(rest), Some(issue))
+    ((!rest.is_empty()).then_some(rest.to_string()), Some(issue))
 }
 
 /// The issue number the FILENAME records, when the verified title ends in that
@@ -303,7 +316,7 @@ fn issue_from_stem(stem: &str, title: &str) -> Option<u32> {
     if title.contains('#') {
         return None;
     }
-    let tail = trailing_number(title)?;
+    let (_, tail) = split_trailing_number(title)?;
     (filename_issue(stem)? == tail).then_some(tail)
 }
 
@@ -320,18 +333,18 @@ fn filename_issue(stem: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// The bare whitespace-delimited number a string ends in, if it ends in one.
-fn trailing_number(text: &str) -> Option<u32> {
-    text.trim_end().rsplit(char::is_whitespace).next()?.parse().ok()
-}
-
-/// `text` without the trailing number `trailing_number` found, trimmed.
-/// `None` when there is none to remove.
-fn without_trailing_number(text: &str) -> Option<String> {
+/// The bare whitespace-delimited number a string ends in, and what comes
+/// before it. `None` when it does not end in one.
+///
+/// `rsplit_once` rather than `rsplit().next()`: the latter always yields, so
+/// its failure arm was unreachable. The `map_or` keeps the lone-number case —
+/// a title that is nothing but `8` has an empty head, not no match.
+fn split_trailing_number(text: &str) -> Option<(&str, u32)> {
     let trimmed = text.trim_end();
-    let last = trimmed.rsplit(char::is_whitespace).next()?;
-    last.parse::<u32>().ok()?;
-    Some(trimmed[..trimmed.len() - last.len()].trim_end().to_string())
+    let (head, last) = trimmed
+        .rsplit_once(char::is_whitespace)
+        .map_or(("", trimmed), |(head, last)| (head, last));
+    Some((head.trim_end(), last.parse().ok()?))
 }
 
 /// Neither is a known-bad class: the title said so, or the filename did.
@@ -452,18 +465,18 @@ fn build_row(
                     // matters — `Bee and PuppyCat 1` gave every issue its own
                     // series folder.
                     let taken = match subtitle.clone() {
-                        Some(sub) => match without_trailing_number(&sub) {
-                            Some(rest) => {
-                                subtitle = (!rest.is_empty()).then_some(rest);
+                        Some(sub) => match split_trailing_number(&sub) {
+                            Some((rest, _)) => {
+                                subtitle = (!rest.is_empty()).then_some(rest.to_string());
                                 true
                             }
                             None => false,
                         },
-                        None => match without_trailing_number(&series) {
+                        None => match split_trailing_number(&series) {
                             // Never empty the series: that row has no
                             // destination, and `validate` refuses it.
-                            Some(rest) if !rest.is_empty() => {
-                                series = rest;
+                            Some((rest, _)) if !rest.is_empty() => {
+                                series = rest.to_string();
                                 true
                             }
                             _ => false,

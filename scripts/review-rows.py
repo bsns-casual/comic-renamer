@@ -1,107 +1,101 @@
 #!/usr/bin/env python3
 """Builds the Humble review page's data from `cargo xtask seed`'s output.
 
-Run `cargo xtask seed` first; this reads `target/seed/humble.tsv` and joins it
-to `fixtures/humble-ground-truth.tsv` for the verified title each row was
-built from. The decomposition is never recomputed here — `seed` owns it, and a
-second implementation of the split is a second thing to be wrong.
+Run `cargo xtask seed` first, then:
 
     python3 scripts/review-rows.py <out.json>
 
-Flags mark rows whose split disagrees with the verified title. They are a
-review aid, not a gate: a wrong split costs the user a correction.
+This reads two files and judges nothing. `target/seed/humble.tsv` holds the
+decomposition and `target/seed/humble-classes.tsv` holds the class and the
+verified title per row, both written by `seed`.
+
+An earlier version re-derived the classification here, and the two
+implementations disagreed: this file's volume-word list carried `book`, `part`
+and `v`, which `title::is_volume_word` does not match, so the page flagged
+rows the report called clean. It also kept a Python copy of the frozen key
+rule (invariant 10). A second implementation of a judgement is a second thing
+to be wrong.
 """
 
 import csv
 import json
-import re
 import sys
-import unicodedata
 from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SEED = ROOT / "target/seed/humble.tsv"
-TRUTH = ROOT / "fixtures/humble-ground-truth.tsv"
-VOLUME_WORDS = {"vol", "vols", "vol.", "volume", "volumes", "v", "book", "part"}
+ROWS = ROOT / "target/seed/humble.tsv"
+CLASSES = ROOT / "target/seed/humble-classes.tsv"
+
+# Classes that mean a human has to look. Everything else `seed` either decided
+# from an authority or left alone with no heuristic firing.
+NEEDS_A_DECISION = {
+    "bare trailing number (not a marker)",
+    "volume marker swallowed into the subtitle (colon came first)",
+    "multiple colons (series may contain a colon)",
+}
+# Which authority decided an issue, for the chip on the card.
+ISSUE_SOURCE = {
+    "issue written in the verified title (#N)": "title",
+    "issue taken from the filename (D61)": "filename",
+}
+CORPUS_CONFIRMED = "corpus confirms the series (colon kept, volume recovered)"
 
 
-def key(text):
-    """The frozen key rule: NFC, lowercase, strip non-alphanumerics."""
-    folded = unicodedata.normalize("NFC", text).lower()
-    return "".join(c for c in folded if c.isalnum())
-
-
-def verified_titles():
-    titles = {}
-    with TRUTH.open(encoding="utf-8") as handle:
+def read_tsv(path, columns):
+    with path.open(encoding="utf-8") as handle:
         rows = csv.reader(handle, delimiter="\t")
-        next(rows)
-        for row in rows:
-            if len(row) >= 3:
-                titles[(key(row[2]), row[0])] = (row[1], row[2])
-    return titles
-
-
-def flags_for(title, volume, issue, subtitle):
-    """Why this row wants a human. Empty means no heuristic fired, which is
-    not the same as being right."""
-    found = []
-    if title.count(":") > 1:
-        found.append("two colons")
-    if volume or issue:
-        return found
-    words = subtitle.split()
-    if any(
-        words[i].lower() in VOLUME_WORDS and re.fullmatch(r"\d+", words[i + 1])
-        for i in range(len(words) - 1)
-    ):
-        found.append("marker in subtitle")
-    if title.split() and title.split()[-1].isdigit():
-        found.append("bare trailing number")
-    return found
+        header = next(rows)
+        if header != columns:
+            sys.exit(f"{path} has columns {header}; this build expects {columns}")
+        return list(rows)
 
 
 def main():
     if len(sys.argv) != 2:
         sys.exit(__doc__)
-    if not SEED.exists():
-        sys.exit(f"{SEED} is missing; run `cargo xtask seed` first")
+    for path in (ROWS, CLASSES):
+        if not path.exists():
+            sys.exit(f"{path} is missing; run `cargo xtask seed` first")
 
-    titles = verified_titles()
+    # The sidecar is written before de-duplication, so it can hold more rows
+    # than the table. Keyed by identity, which is what both files agree on.
+    classes = {
+        (key, bundle): (stem, title, name)
+        for key, bundle, stem, title, name in read_tsv(
+            CLASSES, ["key", "bundle", "stem", "title", "class"]
+        )
+    }
+
     rows, tally = [], Counter()
-    with SEED.open(encoding="utf-8") as handle:
-        reader = csv.reader(handle, delimiter="\t")
-        header = next(reader)
-        want = ["key", "series", "volume", "issue", "subtitle", "lang", "volume_count", "bundle"]
-        if header != want:
-            sys.exit(f"unexpected seed columns {header}; this build expects {want}")
-        for index, record in enumerate(reader):
-            row_key, series, volume, issue, subtitle, _lang, _count, bundle = record
-            found = titles.get((row_key, bundle))
-            if found is None:
-                sys.exit(f"row {index} has no verified title: {row_key!r} / {bundle!r}")
-            title, stem = found
-            flags = flags_for(title, volume, issue, subtitle)
-            tally["flagged" if flags else "clean"] += 1
-            rows.append(
-                {
-                    "i": index,
-                    "k": row_key,
-                    "b": bundle,
-                    "stem": stem,
-                    "title": title,
-                    "s": series,
-                    "v": volume,
-                    "iss": issue,
-                    "sub": subtitle,
-                    "flags": flags,
-                    # Which authority decided the issue, where one did. Shown
-                    # as a chip so a lookup is distinguishable from a guess.
-                    "src": ("title" if issue and "#" in title else "filename" if issue else ""),
-                    "corpus": bool(volume) and ":" in series,
-                }
-            )
+    table = read_tsv(
+        ROWS, ["key", "series", "volume", "issue", "subtitle", "lang", "volume_count", "bundle"]
+    )
+    for index, record in enumerate(table):
+        key, series, volume, issue, subtitle, _lang, _count, bundle = record
+        found = classes.get((key, bundle))
+        if found is None:
+            sys.exit(f"row {index} is in the table but not the classes file: {key!r} / {bundle!r}")
+        stem, title, name = found
+        tally[name] += 1
+        rows.append(
+            {
+                "i": index,
+                "k": key,
+                "b": bundle,
+                "stem": stem,
+                "title": title,
+                "s": series,
+                "v": volume,
+                "iss": issue,
+                "sub": subtitle,
+                # `seed`'s own class, never re-derived. A list because the
+                # page renders one chip per entry.
+                "flags": [name] if name in NEEDS_A_DECISION else [],
+                "src": ISSUE_SOURCE.get(name, ""),
+                "corpus": name == CORPUS_CONFIRMED,
+            }
+        )
 
     suspect = sorted((r for r in rows if r["flags"]), key=lambda r: r["stem"].lower())
     scan = sorted((r for r in rows if not r["flags"]), key=lambda r: r["stem"].lower())
@@ -112,11 +106,7 @@ def main():
 
     print(f"{len(rows)} rows -> {sys.argv[1]}")
     print(f"  {len(suspect)} need a decision, {len(scan)} to scan")
-    for name, count in [
-        ("issue written in the title", sum(1 for r in rows if r["src"] == "title")),
-        ("issue from the filename", sum(1 for r in rows if r["src"] == "filename")),
-        ("corpus confirmed the series", sum(1 for r in rows if r["corpus"])),
-    ]:
+    for name, count in tally.most_common():
         print(f"  {count:5}  {name}")
 
 

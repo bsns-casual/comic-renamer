@@ -35,24 +35,24 @@ pub fn parse_title(text: &str) -> ParsedTitle {
 /// its series, which is a row with no destination.
 fn take_trailing_issue(text: &str) -> (&str, Option<u32>) {
     let trimmed = text.trim_end();
-    let Some(last) = trimmed.rsplit(char::is_whitespace).next() else {
+    // No whitespace at all means nothing in front of the number, and taking
+    // it would leave no series — a row with no destination.
+    let Some((head, last)) = trimmed.rsplit_once(char::is_whitespace) else {
         return (text, None);
     };
-    let Some(digits) = last.strip_prefix('#') else {
+    let Some(issue) = last.strip_prefix('#').and_then(|d| d.parse::<u32>().ok()) else {
         return (text, None);
     };
+    let head = head.trim_end();
+    if head.is_empty() {
+        return (text, None);
+    }
     // `Foo Vol. #3` is a volume written with a hash, not an issue. Without
     // this the marker's own number is taken and the volume vanishes.
-    let head = &trimmed[..trimmed.len() - last.len()];
     if head.split_whitespace().next_back().is_some_and(is_volume_word) {
         return (text, None);
     }
-    match digits.parse::<u32>() {
-        Ok(issue) if last.len() < trimmed.len() => {
-            (trimmed[..trimmed.len() - last.len()].trim_end(), Some(issue))
-        }
-        _ => (text, None),
-    }
+    (head, Some(issue))
 }
 
 /// Splits at the first boundary: the series ends at whichever comes first of
