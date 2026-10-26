@@ -637,15 +637,32 @@ name above.
 
 ### Pick up here
 
-**-1. The issue column is done and NOT PUSHED.** 18 commits on `main`,
-`ef57cf6..8c5254f`, 595 of 604 passing with the volume suite run and clean,
-`check-mappings` and `check-review-page.cjs` both green, no compiler warnings.
-`cargo xtask seed` leaves `data/mappings/` byte-identical except the four rows
-that legitimately improved (`Hammer Head`, `Minotaur`, `DIE: Loaded`,
-`Glarien: Origins` each carried `#1` as subtitle text). Nothing is pushed
-because a push is the owner's call; `git push` is all that is owed.
+**-1. The issue column is merged and pushed.** 19 commits,
+`b1a9c2f..7428246` on `main`, pushed 2026-10-26. 595 of 604 passing with the
+volume suite run and clean, `check-mappings` and `check-review-page.cjs` both
+green, no compiler warnings. `cargo xtask seed` leaves `data/mappings/`
+byte-identical except the four rows that legitimately improved (`Hammer Head`,
+`Minotaur`, `DIE: Loaded`, `Glarien: Origins` each carried `#1` as subtitle
+text).
 
-One thing to carry forward about the review that produced those 18 commits:
+**CI run 40283202212: five of six jobs green at session close, and
+`rust-corpus` was still running.** Confirmed green: the `rust` job including
+its volume-gated tests, `mappings`, the corpus manifest, the licence check and
+the held-out fixtures. **`rust-corpus` is unverified** — it downloads the
+pinned release and runs the four `COMIC_RENAMER_TEST_ZIP` tests, which cannot
+be run locally here because the cache holds `gcd.sqlite` and not the zip.
+Those four go through `suggest_with` and the publisher hint, which Task 6
+touched when `Suggestion` gained its issue field, so it is the one job this
+work could plausibly have broken without a local signal. First thing to check:
+`gh run view 40283202212`.
+
+The licence gate was checked before pushing and is **not** crossed: the
+shipped table carries only Fanatical, Global Comix and Sweet Shop bundles,
+`target/seed/humble.tsv` is gitignored, and no Humble row reached
+`data/mappings/`. Individual Humble titles appear in tests and docs as before,
+which D31 already sanctions as test data.
+
+One thing to carry forward about the review that produced those commits:
 **four seats found nine real defects and three of them were in my own new
 tests.** A test that passes for the wrong reason is the recurring shape here —
 `!refused.is_empty()` satisfied by an unrelated refusal, a non-digit typed on
