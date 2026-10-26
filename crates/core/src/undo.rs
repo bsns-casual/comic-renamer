@@ -799,10 +799,9 @@ fn single_component(path: &Path) -> Result<&Path, String> {
 
 fn pending_fields(columns: &[String]) -> Option<Fields> {
     let get = |i: usize| columns.get(i).map(String::as_str);
-    let number = |i: usize| match get(i) {
-        Some("") => Some(None),
-        Some(v) => v.parse().ok().map(Some),
-        None => None,
+    let number = |i: usize| match get(i)? {
+        "" => Some(None),
+        v => v.parse().ok().map(Some),
     };
     Some(Fields {
         series: unprefix(get(9)?).to_string(),

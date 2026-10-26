@@ -1275,9 +1275,20 @@ fn undo_with_no_argument_steps_over_a_record_it_cannot_read() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(f.source.join("hellboy_vol1.pdf").exists());
 
+    // It IS listed, as unreadable. This assertion was the other way round
+    // until 2026-10-26, on the reasoning that a stray file with a
+    // record-shaped name is noise. The problem is that nothing can tell such
+    // a file from a record this tool wrote and can no longer read: both fail
+    // `summarise`, and hiding the second printed `no runs to reverse` over a
+    // store that held it, with the id `undo <run-id>` needs reachable from
+    // nowhere. One noise line costs less than a hidden record, and the reason
+    // column tells them apart — junk says it has no destination root, a real
+    // stale record says it was written by an older build.
     let listed = run_in(&f, &["undo", "--list"], "");
     assert!(listed.status.success(), "{}", stderr(&listed));
-    assert!(!stdout(&listed).contains("9000000000000000000"), "{}", stdout(&listed));
+    let shown = stdout(&listed);
+    assert!(shown.contains("9000000000000000000"), "{shown}");
+    assert!(shown.contains("unreadable"), "{shown}");
 }
 
 #[test]
@@ -1394,4 +1405,85 @@ fn undo_of_a_copy_says_where_the_library_file_was_moved_aside() {
         f.placed.file_name(),
         "the name is the leaf the library used"
     );
+}
+
+/// `record::list`'s contract is explicit: "the content is never read, so a
+/// record `summarise` refuses is still listed". Dropping one makes
+/// `no runs to reverse` an affirmative false statement — the library still
+/// holds the files and the record that could put them back is right there on
+/// disk. Reachable for real rather than theoretical: every record written
+/// before the issue column landed is in this class, and `--list` is the only
+/// command that prints the id `undo <run-id>` needs to surface the error, so
+/// a user in this state has no way out of it.
+#[test]
+fn undo_list_names_a_record_it_cannot_read_instead_of_reporting_none() {
+    let f = fixture(Mode::Move);
+    let id = stale_record(&f);
+
+    let out = run_in(&f, &["undo", "--list"], "");
+    assert!(out.status.success(), "listing is not an error: {}", stderr(&out));
+    let shown = stdout(&out);
+    assert!(
+        !shown.contains("no runs to reverse"),
+        "a record is on disk, so reporting none is false:\n{shown}"
+    );
+    assert!(
+        shown.contains(&id),
+        "the id `undo <run-id>` needs is not listed:\n{shown}"
+    );
+}
+
+/// Applies, then rewrites the record the way a build before the issue column
+/// wrote it: one column short, which trips the older-build guard in
+/// `summarise`. Returns the run id. The library file is left in place.
+fn stale_record(f: &Fixture) -> String {
+    assert!(run_in(f, &["apply", f.plan.to_str().unwrap(), "--yes"], "")
+        .status
+        .success());
+    let id = record_files(f)[0].clone();
+    let record = runs_dir(f).join(&id);
+    let text = std::fs::read_to_string(&record).unwrap();
+    let want = text.lines().next().unwrap().split(',').count();
+    let old: Vec<String> = text
+        .lines()
+        .map(|l| {
+            let mut c: Vec<&str> = l.split(',').collect();
+            if c.len() == want {
+                c.remove(11);
+            }
+            c.join(",")
+        })
+        .collect();
+    std::fs::write(&record, old.join("\n") + "\n").unwrap();
+    assert!(f.placed.exists(), "the library file must still be there");
+    id
+}
+
+/// The comment above this branch in `main.rs` already records the lesson for
+/// the live-run case: "`Nothing to undo` and `a run is writing right now` are
+/// different answers", after a run that had moved 156 of 600 files printed
+/// `0 restored · 0 skipped · 0 refused` and exited 0. A record the tool
+/// cannot read is the same shape of answer, and was left in the same trap.
+#[test]
+fn undo_refuses_rather_than_reporting_a_clean_zero_when_a_record_is_unreadable() {
+    let f = fixture(Mode::Move);
+    stale_record(&f);
+    let before = listing(&[&f.source, &f.dest]);
+
+    let out = run_in(&f, &["undo"], "");
+    assert!(
+        !out.status.success(),
+        "a zero exit says the library matches; it does not:\n{}",
+        stdout(&out)
+    );
+    let said = format!("{}{}", stdout(&out), stderr(&out));
+    assert!(
+        said.contains("--list"),
+        "the user needs pointing at the one command that names the record:\n{said}"
+    );
+    assert!(
+        !said.contains("0 restored"),
+        "a clean report is the false statement:\n{said}"
+    );
+    assert_eq!(before, listing(&[&f.source, &f.dest]), "nothing may move");
 }

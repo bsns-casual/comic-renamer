@@ -804,6 +804,16 @@ fn run_undo(run: Option<&str>, list: bool) -> Result<(), String> {
                     .into(),
             );
         }
+        // Same shape as the branch above: a record the tool cannot read is
+        // not the same answer as nothing to reverse, and a zero exit here
+        // would claim the library matches when nothing checked it.
+        if has_unreadable(&records) {
+            return Err(
+                "a record in the run store cannot be read, so whether the library still \
+                 holds files from that run is unknown; `undo --list` names it"
+                    .into(),
+            );
+        }
         // Nothing to reverse: never applied, or already reversed. Idempotent,
         // not an error.
         return print_report(&UndoReport::default(), None);
@@ -863,6 +873,15 @@ fn pick_record(records: &Path, run: Option<&str>) -> Result<Option<PathBuf>, Str
     }
 }
 
+/// Whether the store holds a record `summarise` refuses. Asked only to decide
+/// whether a clean "nothing to reverse" would be a false statement; the
+/// records themselves are listed by `undo --list`.
+fn has_unreadable(records: &Path) -> bool {
+    records.exists()
+        && record::list(records)
+            .is_ok_and(|found| found.iter().any(|p| undo::summarise(p).is_err()))
+}
+
 fn list_runs(records: &Path) -> Result<(), String> {
     let found = if records.exists() {
         record::list(records).map_err(|e| e.to_string())?
@@ -871,11 +890,23 @@ fn list_runs(records: &Path) -> Result<(), String> {
     };
     let mut shown = 0;
     for path in found {
-        let Ok(summary) = undo::summarise(&path) else {
-            continue;
-        };
         let Some(id) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
+        };
+        let summary = match undo::summarise(&path) {
+            Ok(summary) => summary,
+            // `record::list` hands these back on purpose — "the content is
+            // never read, so a record `summarise` refuses is still listed" —
+            // because a record the tool cannot read must not look identical
+            // to no record at all. Dropping it printed `no runs to reverse`
+            // over a store that held one. This line is also the only place a
+            // run id reaches the user, and `undo <run-id>` needs that id to
+            // report the real reason.
+            Err(e) => {
+                println!("{id}  unreadable  {e}");
+                shown += 1;
+                continue;
+            }
         };
         let state = if record::is_live(&path).unwrap_or(true) {
             "running"

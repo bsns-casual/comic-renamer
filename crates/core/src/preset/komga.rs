@@ -122,7 +122,7 @@ pub fn pad(volume: u32, run: u32) -> String {
 /// real issue and there is no per-series count to store or get wrong. A `#`
 /// would sort and display badly everywhere outside Komga and buys nothing
 /// inside it, where the number comes from filename order anyway.
-pub fn pad_issue(issue: u32) -> String {
+fn pad_issue(issue: u32) -> String {
     format!("{issue:04}")
 }
 
