@@ -21,11 +21,11 @@ use std::path::{Component, Path, PathBuf};
 /// a record reverses without the plan that produced it. The roots row carries
 /// the preset id and the planned count in the last two columns.
 pub const COLUMNS: &str = "seq,status,mode,mechanism,source_name,dest_relative,\
-    size,inode,mtime_ns,series,volume,subtitle,run,extension,preset,planned";
+    size,inode,mtime_ns,series,volume,issue,subtitle,run,extension,preset,planned";
 
 /// Trailing columns after `mtime_ns` on rows that do not carry the pending
-/// fields: series, volume, subtitle, run, extension, preset, planned.
-const PAD: &str = ",,,,,,,";
+/// fields: series, volume, issue, subtitle, run, extension, preset, planned.
+const PAD: &str = ",,,,,,,,";
 
 /// What a record says about its run, read without reversing anything.
 #[derive(Clone, Debug)]
@@ -100,7 +100,7 @@ impl UndoWriter {
         writeln!(file, "{COLUMNS}")?;
         writeln!(
             file,
-            "0,roots,,,{},{},,,{started},,,,,,{},{planned}",
+            "0,roots,,,{},{},,,{started},,,,,,,{},{planned}",
             path_field(source_root),
             path_field(dest_root),
             field(preset),
@@ -125,6 +125,7 @@ impl UndoWriter {
         source: &Path,
         series: &str,
         volume: Option<u32>,
+        issue: Option<u32>,
         subtitle: Option<&str>,
         run: u32,
         extension: &str,
@@ -134,7 +135,7 @@ impl UndoWriter {
         let (size, inode, mtime) = identity_of(&meta);
         writeln!(
             self.file,
-            "{},pending,{},{},{},{},{size},{inode},{mtime},{},{},{},{run},{},,",
+            "{},pending,{},{},{},{},{size},{inode},{mtime},{},{},{},{},{run},{},,",
             self.seq,
             field(mode_name(mode)),
             field(mechanism_name(mechanism)),
@@ -142,6 +143,7 @@ impl UndoWriter {
             path_field(dest_relative),
             field(&format!("'{series}")),
             volume.map(|v| v.to_string()).unwrap_or_default(),
+            issue.map(|v| v.to_string()).unwrap_or_default(),
             subtitle.map(|t| field(&format!("'{t}"))).unwrap_or_default(),
             field(&format!("'{extension}")),
         )?;
@@ -247,6 +249,7 @@ struct Row {
 struct Fields {
     series: String,
     volume: Option<u32>,
+    issue: Option<u32>,
     subtitle: Option<String>,
     run: u32,
     extension: String,
@@ -402,9 +405,7 @@ pub fn reverse(manifest: &Path) -> Result<UndoReport, UndoError> {
         let resolved = Resolved {
             series: f.series.clone(),
             volume: f.volume,
-            // TASK 5 OWNS THIS. The record has no `issue` column yet, so a
-            // reverse of an issue row rebuilds the wrong leaf until it does.
-            issue: None,
+            issue: f.issue,
             subtitle: f.subtitle.clone(),
             run: f.run,
             status: MapStatus::Mapped,
@@ -798,19 +799,21 @@ fn single_component(path: &Path) -> Result<&Path, String> {
 
 fn pending_fields(columns: &[String]) -> Option<Fields> {
     let get = |i: usize| columns.get(i).map(String::as_str);
-    let volume = match get(10)? {
-        "" => None,
-        v => Some(v.parse().ok()?),
+    let number = |i: usize| match get(i) {
+        Some("") => Some(None),
+        Some(v) => v.parse().ok().map(Some),
+        None => None,
     };
     Some(Fields {
         series: unprefix(get(9)?).to_string(),
-        volume,
-        subtitle: match get(11)? {
+        volume: number(10)?,
+        issue: number(11)?,
+        subtitle: match get(12)? {
             "" => None,
             t => Some(unprefix(t).to_string()),
         },
-        run: get(12)?.parse().ok()?,
-        extension: unprefix(get(13)?).to_string(),
+        run: get(13)?.parse().ok()?,
+        extension: unprefix(get(14)?).to_string(),
     })
 }
 
@@ -885,8 +888,11 @@ fn read_manifest(manifest: &Path) -> Result<Manifest, UndoError> {
                 PathBuf::from(unprefix(&columns[4])),
                 PathBuf::from(unprefix(&columns[5])),
             ));
-            preset = columns.get(14).cloned().unwrap_or_default();
-            planned = columns.get(15).and_then(|c| c.parse().ok()).unwrap_or(0);
+            // Indices into COLUMNS. Inserting a column ahead of these moves
+            // them, which reads as `unknown preset ""` — pinned by
+            // `the_column_list_is_read_at_the_indices_this_code_uses`.
+            preset = columns.get(15).cloned().unwrap_or_default();
+            planned = columns.get(16).and_then(|c| c.parse().ok()).unwrap_or(0);
             started = columns[8]
                 .parse::<u64>()
                 .ok()

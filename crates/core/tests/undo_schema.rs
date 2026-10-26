@@ -37,7 +37,7 @@ fn written(mv: bool, same_root: bool) -> (TempDir, PathBuf) {
     let seq = w
         .record_pending(
             Path::new("Hellboy_v01.pdf"), &rel, mechanism, mode, &file,
-            "Hellboy", Some(1), None, 3, "pdf",
+            "Hellboy", Some(1), None, None, 3, "pdf",
         )
         .unwrap();
     let dest = library.join(&rel);
@@ -255,7 +255,7 @@ fn an_unreadable_row_is_reported_by_reverse() {
 
 /// A `pending` row short enough to parse but too short to rebuild anything
 /// from. Nothing this build writes produces one — the writer always emits all
-/// sixteen columns — but a record is a file a human can edit, which is what
+/// seventeen columns — but a record is a file a human can edit, which is what
 /// invariant 1 exists for, and a row nothing can reverse must be *reported*
 /// rather than quietly dropped: a dropped row leaves a file in the library
 /// while the report says the undo was clean.
@@ -288,7 +288,7 @@ fn an_extension_is_prefixed_like_every_other_text_field() {
     std::fs::write(&file, b"x").unwrap();
     let record = dir.path().join("r.record");
     let mut w = UndoWriter::create(&record, dir.path(), dir.path(), "komga", 1).unwrap();
-    w.record_pending(Path::new("f.pdf"), Path::new("a/b"), Mechanism::Clone, Mode::Copy, &file, "S", None, None, 0, "=cmd").unwrap();
+    w.record_pending(Path::new("f.pdf"), Path::new("a/b"), Mechanism::Clone, Mode::Copy, &file, "S", None, None, None, 0, "=cmd").unwrap();
     let text = std::fs::read_to_string(&record).unwrap();
     assert!(text.contains(",'=cmd,"), "{text}");
 }
@@ -334,7 +334,7 @@ fn run_of(planned: u32, statuses: &[&str]) -> (TempDir, PathBuf) {
         let seq = w
             .record_pending(
                 Path::new("Hellboy_v01.pdf"), &dest_for(), Mechanism::Stream, Mode::Move, &file,
-                "Hellboy", Some(1), None, 3, "pdf",
+                "Hellboy", Some(1), None, None, 3, "pdf",
             )
             .unwrap();
         // A `Stream` row that finished was `placed` first: streaming makes a
@@ -408,4 +408,60 @@ fn a_record_that_understates_what_it_planned_is_still_read_from_its_rows() {
     let s = summarise(&record).unwrap();
     assert_eq!((s.reversible, s.planned), (1, 0), "the count vouches for nothing here");
     assert!(s.interrupted);
+}
+
+// --- D60: the issue column in the record ---------------------------------
+
+#[test]
+fn the_column_list_places_issue_between_volume_and_subtitle() {
+    // Position is the contract: `pending_fields` reads by index, so moving
+    // this column silently reinterprets every row ever written.
+    let c: Vec<&str> = COLUMNS.split(',').map(str::trim).collect();
+    let v = c.iter().position(|f| *f == "volume").unwrap();
+    assert_eq!(c[v + 1], "issue");
+    assert_eq!(c[v + 2], "subtitle");
+}
+
+/// Every index `undo.rs` hard-codes, in one place. Inserting `issue` moved
+/// `preset` and `planned` and the roots row came back as `unknown preset ""`;
+/// this is the test that names the cause instead of fifteen failing fixtures.
+#[test]
+fn the_column_list_is_read_at_the_indices_this_code_uses() {
+    let c: Vec<&str> = COLUMNS.split(',').map(str::trim).collect();
+    for (i, name) in [
+        (4, "source_name"), (5, "dest_relative"), (8, "mtime_ns"),
+        (9, "series"), (10, "volume"), (11, "issue"), (12, "subtitle"),
+        (13, "run"), (14, "extension"), (15, "preset"), (16, "planned"),
+    ] {
+        assert_eq!(c[i], name, "column {i} moved; undo.rs reads it by index");
+    }
+    assert_eq!(c.len(), 17);
+}
+
+#[test]
+fn a_record_in_the_old_sixteen_column_format_is_reported_not_silently_reparsed() {
+    // No release has shipped, so there is no migration. What matters is that
+    // a stale record cannot be read as if its columns meant what they say
+    // now: the old `subtitle` sits where `issue` is, so the row must be
+    // reported rather than rebuilt from shifted fields.
+    let (_dir, record) = a_written_record();
+    let text = std::fs::read_to_string(&record).unwrap();
+    let old: Vec<String> = text
+        .lines()
+        .map(|l| {
+            let mut f: Vec<&str> = l.split(',').collect();
+            if f.len() == COLUMNS.split(',').count() {
+                f.remove(11); // drop the issue column, as a pre-D60 writer would
+            }
+            f.join(",")
+        })
+        .collect();
+    std::fs::write(&record, old.join("\n") + "\n").unwrap();
+    // Refused as a whole, before any row is rebuilt: a short record already
+    // trips the older-build guard, which is stronger than per-row refusal.
+    let err = reverse(&record).unwrap_err();
+    assert!(
+        format!("{err}").contains("older build"),
+        "a stale record must say so rather than rebuild from shifted fields: {err}"
+    );
 }

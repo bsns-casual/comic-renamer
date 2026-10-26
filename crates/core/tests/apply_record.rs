@@ -863,11 +863,12 @@ fn a_record_carries_the_run_that_set_its_padding() {
         f.rows[0].destination_preview
     );
 
-    // Volume 1, no subtitle, run 100, extension pdf — the run column itself,
-    // not a number that happens to appear in an identity column.
+    // Volume 1, no issue, no subtitle, run 100, extension pdf — the run
+    // column itself, not a number that happens to appear in an identity
+    // column. The empty slot between the volume and the subtitle is `issue`.
     let text = std::fs::read_to_string(&record).unwrap();
     assert!(
-        text.contains(",1,,100,'pdf,"),
+        text.contains(",1,,,100,'pdf,"),
         "the run column is not the row's:\n{text}"
     );
 

@@ -467,7 +467,7 @@ mod tests {
         let row = |w: &mut UndoWriter| {
             w.record_pending(
                 Path::new("a.cbz"), Path::new("S/a.cbz"), Mechanism::Rename, Mode::Move,
-                &src, "S", Some(1), None, 1, "cbz",
+                &src, "S", Some(1), None, None, 1, "cbz",
             )
             .unwrap()
         };

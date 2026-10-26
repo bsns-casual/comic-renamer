@@ -254,7 +254,7 @@ fn write_run(
     let seq = writer
         .record_pending(
             Path::new("a.pdf"), Path::new("A/A - Vol. 01.pdf"), Mechanism::Rename, Mode::Move,
-            &file, "A", Some(1), None, 1, "pdf",
+            &file, "A", Some(1), None, None, 1, "pdf",
         )
         .unwrap();
     if done {

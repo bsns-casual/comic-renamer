@@ -92,6 +92,7 @@ fn planted(mode: Mode) -> Fixture {
             "Hellboy",
             Some(1),
             None,
+            None,
             3,
             "pdf",
         )
@@ -131,6 +132,7 @@ fn real_copy_of(payload: &[u8]) -> Fixture {
             "Hellboy",
             Some(1),
             None,
+            None,
             3,
             "pdf",
         )
@@ -161,6 +163,7 @@ fn real_move() -> Fixture {
             &source_file,
             "Hellboy",
             Some(1),
+            None,
             None,
             3,
             "pdf",
@@ -299,6 +302,7 @@ fn a_fifo_at_the_source_is_refused_rather_than_blocking() {
             "Hellboy",
             Some(1),
             None,
+            None,
             3,
             "pdf",
         )
@@ -345,6 +349,7 @@ fn a_character_device_at_the_source_is_refused_rather_than_read_forever() {
             "Hellboy",
             Some(1),
             None,
+            None,
             3,
             "pdf",
         )
@@ -389,6 +394,7 @@ fn a_fifo_at_the_destination_is_refused_rather_than_blocking() {
             &source_file,
             "Hellboy",
             Some(1),
+            None,
             None,
             3,
             "pdf",
@@ -624,5 +630,69 @@ fn nothing_is_lost_when_the_source_is_truncated_inside_the_gate() {
         raced > 0,
         "the window was never entered, so this proved nothing:\n  {}",
         outcomes.join("\n  ")
+    );
+}
+
+// --- D60: an issue must travel with the record ----------------------------
+
+/// The destination of a single issue. Nothing else in this file uses one.
+fn issue_dest() -> PathBuf {
+    let resolved = Resolved {
+        series: "Curse".into(),
+        volume: None,
+        issue: Some(3),
+        subtitle: None,
+        run: 0,
+        status: Status::Mapped,
+        record: None,
+    };
+    preset_by_id("komga").unwrap().destination(&resolved, "pdf")
+}
+
+#[test]
+fn a_reverse_rebuilds_the_destination_of_an_issue_row() {
+    // The record is the only input — `reverse` reads no plan, by design. If
+    // `issue` does not travel with the row, the rebuilt leaf is `Curse.pdf`,
+    // the library file sitting at `Curse 0003.pdf` is "not a destination this
+    // plan produces", and the reverse refuses a row it should have put back.
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source");
+    let library = dir.path().join("library");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::create_dir_all(library.join(issue_dest()).parent().unwrap()).unwrap();
+    let source = source.canonicalize().unwrap();
+    let library = library.canonicalize().unwrap();
+
+    let source_file = source.join("curse_issue3.pdf");
+    std::fs::write(&source_file, b"an issue of Curse").unwrap();
+    let library_file = library.join(issue_dest());
+
+    let record = dir.path().join("run.record");
+    let mut w = UndoWriter::create(&record, &source, &library, "komga", 1).unwrap();
+    let seq = w
+        .record_pending(
+            Path::new("curse_issue3.pdf"),
+            &issue_dest(),
+            Mechanism::Clone,
+            Mode::Copy,
+            &source_file,
+            "Curse",
+            None,
+            Some(3),
+            None,
+            0,
+            "pdf",
+        )
+        .unwrap();
+    std::fs::copy(&source_file, &library_file).unwrap();
+    w.record_placed(seq, identity_of(&library_file)).unwrap();
+    w.record_done(seq).unwrap();
+    drop(w);
+
+    let report = reverse(&record).unwrap();
+    assert_eq!(report.restored, 1, "an issue row must be reversible: {report:?}");
+    assert!(
+        !library_file.exists(),
+        "D58 moves the library file aside, so it must not still be at the destination"
     );
 }

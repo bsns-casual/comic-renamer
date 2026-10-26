@@ -355,6 +355,7 @@ fn execute(
         &row.source,
         &row.series,
         row.volume,
+        row.issue,
         row.subtitle.as_deref(),
         row.run,
         &row.extension,
