@@ -128,13 +128,29 @@ pub enum Action {
     Cancel,
 }
 
-pub(super) fn show(series: &str, volume: Option<u32>, subtitle: Option<&str>) -> String {
+/// The sentence the text box holds and `^R` re-parses, so every field has to
+/// be written where `parse_title` finds it again.
+///
+/// The issue goes **last**, after the subtitle, even though the preset renders
+/// it before: `take_trailing_issue` only takes a trailing `#N`, so a `#3`
+/// written mid-sentence would not come back and an edited issue would
+/// silently revert. `show_writes_an_issue_where_the_parser_finds_it_again`
+/// pins the round trip.
+pub(super) fn show(
+    series: &str,
+    volume: Option<u32>,
+    issue: Option<u32>,
+    subtitle: Option<&str>,
+) -> String {
     let mut s = series.to_string();
     if let Some(v) = volume {
         s.push_str(&format!(" Volume {v}"));
     }
     if let Some(t) = subtitle {
         s.push_str(&format!(": {t}"));
+    }
+    if let Some(i) = issue {
+        s.push_str(&format!(" #{i}"));
     }
     s
 }
@@ -205,7 +221,7 @@ impl Table {
             let guess = match e.guess() {
                 None => "(no guess)".to_string(),
                 Some(g) => {
-                    let name = show(&g.series, g.volume, g.subtitle.as_deref());
+                    let name = show(&g.series, g.volume, g.issue, g.subtitle.as_deref());
                     if e.is_ambiguous() {
                         format!("[{} candidates] {name}", e.candidates.len())
                     } else if e.has_squashed_subtitle() {
@@ -216,7 +232,7 @@ impl Table {
                 }
             };
             let fin = e.final_fields.as_ref().map_or(String::new(), |f| {
-                let name = show(&f.series, f.volume, f.subtitle.as_deref());
+                let name = show(&f.series, f.volume, f.issue, f.subtitle.as_deref());
                 if e.approved { format!("✓ {name}") } else { name }
             });
             Row::new([Cell::from(e.stem.clone()), Cell::from(guess), Cell::from(fin)])

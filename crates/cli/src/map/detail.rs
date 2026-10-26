@@ -51,10 +51,11 @@ pub struct Detail<'a> {
     preset: &'a dyn Preset,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Field {
     Series,
     Volume,
+    Issue,
     Subtitle,
 }
 
@@ -75,7 +76,7 @@ impl<'a> Detail<'a> {
         let candidates = entry.candidates().to_vec();
         let picked = (!candidates.is_empty()).then_some(0);
         Detail {
-            text: show(&parsed.series, parsed.volume, parsed.subtitle.as_deref()),
+            text: show(&parsed.series, parsed.volume, parsed.issue, parsed.subtitle.as_deref()),
             prefill: entry.guess().map_or_else(|| parse_title(""), as_parsed),
             parsed,
             picked,
@@ -93,12 +94,14 @@ impl<'a> Detail<'a> {
         self.parsed = parse_title(&self.text);
     }
 
-    /// Tab: sentence box, then series, volume, subtitle, then back.
+    /// Tab: sentence box, then series, volume, issue, subtitle, then back.
+    /// The order matches the preset's rendering, not `show`'s sentence.
     fn next_field(&mut self) {
         self.field = match self.field {
             None => Some(Field::Series),
             Some(Field::Series) => Some(Field::Volume),
-            Some(Field::Volume) => Some(Field::Subtitle),
+            Some(Field::Volume) => Some(Field::Issue),
+            Some(Field::Issue) => Some(Field::Subtitle),
             Some(Field::Subtitle) => None,
         };
     }
@@ -120,13 +123,22 @@ impl<'a> Detail<'a> {
                 }
                 p.volume = v.parse().ok();
             }
+            Field::Issue => {
+                let mut v = p.issue.map(|v| v.to_string()).unwrap_or_default();
+                match c {
+                    Some(c) if c.is_ascii_digit() => v.push(c),
+                    Some(_) => return,
+                    None => { v.pop(); }
+                }
+                p.issue = v.parse().ok();
+            }
             Field::Subtitle => {
                 let mut t = p.subtitle.take().unwrap_or_default();
                 match c { Some(c) => t.push(c), None => { t.pop(); } }
                 p.subtitle = (!t.is_empty()).then_some(t);
             }
         }
-        self.text = show(&p.series, p.volume, p.subtitle.as_deref());
+        self.text = show(&p.series, p.volume, p.issue, p.subtitle.as_deref());
         self.structured = true;
         self.edited = true;
     }
@@ -171,7 +183,7 @@ impl<'a> Detail<'a> {
         let c = &self.candidates[at];
         self.parsed = as_parsed(c);
         self.confirmed = (!c.is_unsplit()).then(|| self.parsed.clone());
-        self.text = show(&self.parsed.series, self.parsed.volume, self.parsed.subtitle.as_deref());
+        self.text = show(&self.parsed.series, self.parsed.volume, self.parsed.issue, self.parsed.subtitle.as_deref());
     }
 
     /// Whether the fields may be accepted. A flagged row needs a change the
@@ -179,7 +191,7 @@ impl<'a> Detail<'a> {
     /// to — and never another garbled candidate.
     ///
     /// Compared as the path the preset renders, not as raw fields. The preset
-    /// trims edge spaces and dots and collapses runs, so `e` Tab Tab Tab Space
+    /// trims edge spaces and dots and collapses runs, so `e` Tab Tab Tab Tab Space
     /// Enter leaves a committed filename byte-identical to the squashed guess:
     /// a change that normalises away is not engagement with the problem the
     /// flag exists to force.
@@ -207,8 +219,7 @@ impl<'a> Detail<'a> {
             key: String::new(),
             series: fields.series.clone(),
             volume: fields.volume,
-            // Task 7 wires `fields.issue` once ParsedTitle carries one.
-            issue: None,
+            issue: fields.issue,
             subtitle: fields.subtitle.clone(),
             lang: String::new(),
             volume_count: super::table::run_length(&self.candidates, &fields.series),
@@ -284,16 +295,23 @@ impl<'a> Detail<'a> {
         frame.render_widget(ratatui::widgets::Paragraph::new(format!("{}▏", self.text)).block(boxed), input);
         let p = &self.parsed;
         let mark = |f| if self.field == Some(f) { '>' } else { ' ' };
+        // A `Paragraph`, not a bare `String`: a bare one renders as a single
+        // line and drops the newlines, so the four fields ran together on one
+        // row and the last of them was clipped at the terminal's width. That
+        // was invisible while they fitted; adding `issue` pushed `subtitle`
+        // off the end of a 100-column screen.
         frame.render_widget(
-            format!(
-                " parsed as\n  {}series   {}\n  {}volume   {}\n  {}subtitle {}",
+            ratatui::widgets::Paragraph::new(format!(
+                " parsed as\n  {}series   {}\n  {}volume   {}\n  {}issue    {}\n  {}subtitle {}",
                 mark(Field::Series),
                 p.series,
                 mark(Field::Volume),
                 p.volume.map_or("(none)".to_string(), |v| v.to_string()),
+                mark(Field::Issue),
+                p.issue.map_or("(none)".to_string(), |v| v.to_string()),
                 mark(Field::Subtitle),
                 p.subtitle.as_deref().unwrap_or("(none)"),
-            ),
+            )),
             parsed,
         );
         // Wrapped: a long path must not clip the extension off the end.
@@ -306,7 +324,7 @@ impl<'a> Detail<'a> {
             let lines: Vec<String> = std::iter::once(" our candidates (↑↓ to pick)".to_string())
                 .chain(self.candidates.iter().enumerate().map(|(i, c)| {
                     let mark = if self.picked == Some(i) { '>' } else { ' ' };
-                    format!("  {mark} {}", show(&c.series, c.volume, c.subtitle.as_deref()))
+                    format!("  {mark} {}", show(&c.series, c.volume, c.issue, c.subtitle.as_deref()))
                 }))
                 .collect();
             frame.render_widget(lines.join("\n"), menu);
@@ -498,10 +516,30 @@ mod tests {
             "thecompleteelfquest_vol1",
             "series   The Complete ElfQuest",
             "volume   1",
+            "issue    (none)",
             "subtitle The Original Quest TPB",
             "files to   The Complete ElfQuest/The Complete ElfQuest Vol. 01 - The Original Quest TPB.cbz",
         ] {
             assert!(s.contains(want), "missing {want:?}\n{s}");
+        }
+
+        // One field per row. Nothing asserted this, and the block was in fact
+        // rendering as a single line that the terminal's width clipped — a
+        // bare `String` widget drops the newlines. Adding `issue` pushed
+        // `subtitle` off the end of a 100-column screen, which is the only
+        // reason it surfaced.
+        for (label, row) in [
+            ("series", "The Complete ElfQuest"),
+            ("volume", "1"),
+            ("issue", "(none)"),
+            ("subtitle", "The Original Quest TPB"),
+        ] {
+            let found = s
+                .lines()
+                .filter(|l| l.contains(label))
+                .collect::<Vec<_>>();
+            assert_eq!(found.len(), 1, "{label} is not on exactly one row: {found:?}");
+            assert!(found[0].contains(row), "{label}'s row lost its value: {:?}", found[0]);
         }
     }
 
@@ -572,8 +610,8 @@ mod tests {
     #[test]
     fn a_field_can_be_cleared_and_the_subtitle_removed() {
         let mut d = Detail::from_text("Series Volume 1: Sub", &Komga);
-        for _ in 0..3 {
-            d.on_key(key(KeyCode::Tab));
+        for _ in 0..4 {
+            d.on_key(key(KeyCode::Tab)); // series, volume, issue, subtitle
         }
         for _ in 0..3 {
             d.on_key(key(KeyCode::Backspace));
@@ -585,7 +623,8 @@ mod tests {
     #[test]
     fn tab_cycles_back_to_the_text_box_and_the_footer_is_honest() {
         let mut d = Detail::from_text("A Volume 2", &Komga);
-        for _ in 0..4 {
+        // Five fields now: series, volume, issue, subtitle, then the box.
+        for _ in 0..5 {
             d.on_key(key(KeyCode::Tab));
         }
         type_str(&mut d, "!");
@@ -679,8 +718,8 @@ mod tests {
         let mut d = Detail::from_text("Nemesis Volume 1", &Komga);
         d.on_key(key(KeyCode::Tab)); // series
         type_str(&mut d, ": Rogues' Gallery");
-        for _ in 0..3 {
-            d.on_key(key(KeyCode::Tab)); // volume, subtitle, sentence box
+        for _ in 0..4 {
+            d.on_key(key(KeyCode::Tab)); // volume, issue, subtitle, sentence box
         }
         type_str(&mut d, "x");
         assert_eq!(d.parsed.series, "Nemesis: Rogues' Gallery");
@@ -751,7 +790,7 @@ mod tests {
         assert!(matches!(d.on_key(key(KeyCode::Enter)), Step::Accept), "its content already differs from the guess");
     }
 
-    /// `e`, Tab, Tab, Tab, Space, Enter. The preset's `trim_hostile_edges`
+    /// `e`, Tab, Tab, Tab, Tab, Space, Enter. The preset's `trim_hostile_edges`
     /// strips the space, so the committed filename would be byte-identical to
     /// the squashed guess — six keystrokes producing exactly the outcome the
     /// flag exists to prevent, with no trace.
@@ -759,8 +798,8 @@ mod tests {
     fn a_trailing_space_is_not_a_correction() {
         let mut d = Detail::for_entry(&squashed_entry(), &Komga);
         let before = d.destination_line();
-        for _ in 0..3 {
-            d.on_key(key(KeyCode::Tab)); // series, volume, subtitle
+        for _ in 0..4 {
+            d.on_key(key(KeyCode::Tab)); // series, volume, issue, subtitle
         }
         d.on_key(key(KeyCode::Char(' ')));
         assert_eq!(d.parsed.subtitle.as_deref(), Some("seedofdestruction "), "the space is in the field");
@@ -787,8 +826,8 @@ mod tests {
             ],
         );
         let mut d = Detail::for_entry(&e, &Komga);
-        for _ in 0..3 {
-            d.on_key(key(KeyCode::Tab)); // series, volume, subtitle
+        for _ in 0..4 {
+            d.on_key(key(KeyCode::Tab)); // series, volume, issue, subtitle
         }
         d.on_key(key(KeyCode::Char('l')));
         assert_eq!(d.parsed.subtitle.as_deref(), Some("wakethedevil"), "typed, not picked");
@@ -863,8 +902,8 @@ mod tests {
         let mut d = Detail::for_entry(&Entry::new("n".into(), vec![]), &Komga);
         d.on_key(key(KeyCode::Tab));
         type_str(&mut d, "Nemesis: Gallery");
-        for _ in 0..3 {
-            d.on_key(key(KeyCode::Tab));
+        for _ in 0..4 {
+            d.on_key(key(KeyCode::Tab)); // volume, issue, subtitle, sentence box
         }
         type_str(&mut d, "x");
         assert_eq!(d.text, "Nemesis: Gallery", "the box is a view while fields were edited");
@@ -874,5 +913,84 @@ mod tests {
         type_str(&mut d, "!");
         assert_eq!(d.text, "Nemesis: Gallery!");
         assert_eq!(d.parsed.subtitle.as_deref(), Some("Gallery!"));
+    }
+}
+
+// --- D60: the issue is an editable field ---------------------------------
+
+#[cfg(test)]
+mod issue_tests {
+    use super::*;
+    use comic_renamer_core::preset::komga::Komga;
+
+    fn at(field: Field) -> Detail<'static> {
+        Detail { ext: "cbz".into(), field: Some(field), ..Detail::from_text("Curse", &Komga) }
+    }
+
+    #[test]
+    fn tab_reaches_the_issue_between_the_volume_and_the_subtitle() {
+        let mut d = Detail::from_text("Curse", &Komga);
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            d.next_field();
+            seen.push(d.field);
+        }
+        assert_eq!(
+            seen,
+            vec![
+                Some(Field::Series),
+                Some(Field::Volume),
+                Some(Field::Issue),
+                Some(Field::Subtitle),
+                None
+            ]
+        );
+    }
+
+    #[test]
+    fn typing_digits_into_the_issue_field_sets_the_issue() {
+        let mut d = at(Field::Issue);
+        for c in "12".chars() {
+            d.on_input(c);
+        }
+        assert_eq!(d.parsed.issue, Some(12));
+        assert!(d.parsed.subtitle.is_none(), "digits must not leak into the subtitle");
+    }
+
+    #[test]
+    fn the_issue_field_refuses_a_non_digit() {
+        let mut d = at(Field::Issue);
+        d.on_input('x');
+        assert_eq!(d.parsed.issue, None);
+    }
+
+    #[test]
+    fn the_issue_reaches_the_destination_line() {
+        let mut d = at(Field::Issue);
+        d.on_input('3');
+        let line = d.destination_line();
+        assert!(line.contains("Curse 0003."), "{line}");
+    }
+
+    /// `show` writes the sentence the text box holds, and `^R` re-parses it.
+    /// A `#N` written anywhere but the very end does not come back, so an
+    /// edited issue would silently revert — one of the five guard bypasses
+    /// this project has already paid for once.
+    #[test]
+    fn show_writes_an_issue_where_the_parser_finds_it_again() {
+        for (series, volume, issue, subtitle) in [
+            ("Curse", None, Some(3), None),
+            ("Love and Rockets", Some(4), Some(9), None),
+            ("DIE", None, Some(1), Some("Loaded")),
+            ("Hellboy", Some(1), Some(2), Some("Seed of Destruction")),
+        ] {
+            let sentence = show(series, volume, issue, subtitle);
+            let p = parse_title(&sentence);
+            assert_eq!(
+                (p.series.as_str(), p.volume, p.issue, p.subtitle.as_deref()),
+                (series, volume, issue, subtitle),
+                "{sentence:?} did not round-trip"
+            );
+        }
     }
 }

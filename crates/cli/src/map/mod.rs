@@ -106,8 +106,7 @@ fn row_for(stem: &str, fields: &ParsedTitle, count: Option<u32>, bundle: &str, l
         key: key(stem)?,
         series: fields.series.clone(),
         volume: fields.volume,
-        // Task 7 wires `fields.issue` once ParsedTitle carries one.
-        issue: None,
+        issue: fields.issue,
         subtitle: fields.subtitle.clone(),
         lang: lang.to_string(),
         volume_count: count,
@@ -394,7 +393,7 @@ fn confirmation(
         out.push_str(&format!(
             "  {}  ->  {}\n",
             e.stem,
-            table::show(&fields.series, fields.volume, fields.subtitle.as_deref())
+            table::show(&fields.series, fields.volume, fields.issue, fields.subtitle.as_deref())
         ));
     }
     if listed.len() > ROWS_LISTED {
