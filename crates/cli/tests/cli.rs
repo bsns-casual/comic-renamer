@@ -126,6 +126,7 @@ fn write_plan_as(
         extension: "pdf".into(),
         series: resolved.series.clone(),
         volume: resolved.volume,
+        issue: resolved.issue,
         subtitle: None,
         run: resolved.run,
         status: resolved.status.clone(),

@@ -133,6 +133,10 @@ pub struct PlanRow {
     pub extension: String,
     pub series: String,
     pub volume: Option<u32>,
+    /// A single issue (D60). Plan v3 added it; a v2 plan is refused rather
+    /// than read as issue-less, because `apply` recomputes the destination
+    /// from these fields and would place the file under the wrong name.
+    pub issue: Option<u32>,
     pub subtitle: Option<String>,
     pub run: u32,
     pub status: Status,
@@ -148,9 +152,7 @@ impl PlanRow {
         Resolved {
             series: self.series.clone(),
             volume: self.volume,
-            // Task 4 gives `PlanRow` its own issue; until then a plan cannot
-            // carry one, so this is None rather than a dropped field.
-            issue: None,
+            issue: self.issue,
             subtitle: self.subtitle.clone(),
             run: self.run,
             status: self.status.clone(),

@@ -52,6 +52,7 @@ fn row(id: &str, series: &str, volume: Option<u32>, run: u32, ino: u64) -> PlanR
         extension: "pdf".into(),
         series: series.into(),
         volume,
+        issue: None,
         subtitle: None,
         run,
         status: Status::Mapped,

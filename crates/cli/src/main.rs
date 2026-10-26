@@ -1119,6 +1119,7 @@ mod tests {
             extension: "pdf".into(),
             series: "S".into(),
             volume: None,
+            issue: None,
             subtitle: None,
             run: 0,
             status: Status::Unmapped,

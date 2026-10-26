@@ -7,8 +7,10 @@ use std::path::{Component, Path};
 
 /// The plan format this build writes and reads. v2: statuses are
 /// `mapped`/`unmapped`; a v1 plan carries resolver statuses `apply` no longer
-/// understands.
-pub const PLAN_VERSION: u32 = 2;
+/// understands. v3: rows carry `issue` (D60); a v2 row has none, and `apply`
+/// recomputes the destination from the row's fields, so reading one would
+/// place a single issue under a volume-less, issue-less name.
+pub const PLAN_VERSION: u32 = 3;
 
 pub fn write(header: &PlanHeader, rows: &[PlanRow], path: &Path) -> Result<(), PlanError> {
     let stamped = PlanHeader {

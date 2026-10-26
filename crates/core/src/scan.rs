@@ -134,6 +134,7 @@ pub fn scan(
             extension,
             series: resolved.series.clone(),
             volume: resolved.volume,
+            issue: resolved.issue,
             subtitle: resolved.subtitle.clone(),
             run: resolved.run,
             status: resolved.status,

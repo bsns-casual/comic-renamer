@@ -34,6 +34,10 @@ fn row(id: &str, destination_preview: &str) -> PlanRow {
         extension: "pdf".into(),
         series: "Hellboy Omnibus".into(),
         volume: Some(1),
+        // Non-None for the same reason `unmapped` is non-zero above: with
+        // `None` here, `round_trips_every_field` passes against a `write`
+        // that drops the field.
+        issue: Some(7),
         subtitle: None,
         run: 4,
         status: Status::Mapped,
@@ -218,4 +222,23 @@ fn a_v1_header_is_refused_for_its_version_not_for_a_missing_field() {
         read(&path),
         Err(PlanError::UnsupportedVersion { found: 1, .. })
     ));
+}
+
+#[test]
+fn a_version_2_plan_is_refused() {
+    // v2 rows carry no issue, so apply would recompute a destination without
+    // one and silently place the file under the wrong name.
+    let dir = TempDir::new().unwrap();
+    let (h, rows) = sample_plan();
+    let path = in_dir(&dir);
+    write(&h, &rows, &path).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    let downgraded = text.replacen("\"version\":3", "\"version\":2", 1);
+    assert_ne!(downgraded, text, "the header must carry version 3 to downgrade");
+    std::fs::write(&path, downgraded).unwrap();
+    assert!(
+        matches!(read(&path), Err(PlanError::UnsupportedVersion { found: 2, expected: 3 })),
+        "{:?}",
+        read(&path)
+    );
 }

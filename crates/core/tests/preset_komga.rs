@@ -232,6 +232,7 @@ fn plan_row(id: &str, series: &str) -> PlanRow {
         extension: "pdf".into(),
         series: series.into(),
         volume: None,
+        issue: None,
         subtitle: None,
         run: 1,
         status: Status::Mapped,
