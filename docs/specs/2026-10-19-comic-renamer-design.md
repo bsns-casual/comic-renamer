@@ -43,8 +43,16 @@ It is not a reader, not a library manager, not a metadata tagger.
 Measured against a real bundle — `HumbleDarkHorseAnniversaryBundle`, 40 files,
 **31.2 GiB**, largest single file 2.54 GiB:
 
-1. **No issue numbers.** Every file is a collected edition — omnibuses, `vol1`,
-   archives, one-shots. Nothing maps to `{series} - #{issue}`.
+1. **Mostly collected editions, but single issues are real.** ~~No issue
+   numbers.~~ *Corrected 2026-10-26 (D59).* The Dark Horse bundle this section
+   measured is all collected editions — omnibuses, `vol1`, archives, one-shots —
+   and that was generalised into a property of the problem. It is not one.
+   Across the 2,204 generated Humble rows: **1,305 carry a volume, 151 are
+   single issues, and 748 are books with neither.** Humble wrote the `#` itself
+   on those 151. The marketplaces queued behind Humble — Sweet Shop, GlobalComix,
+   DriveThru Comics — sell single issues as their primary unit, so the shape is
+   growing, not shrinking. All three kinds ship in the MVP; §6.8.1 gives the
+   naming for each.
 2. **No word boundaries.** `plantsvszombieszomnibusvolume3`, `xomnibusvolume1`,
    `mazebook`. Separators, where present, are inconsistent: the underscore in
    `hellboyomnibusvolume1_seedofdestruction` marks a subtitle, while those in
@@ -400,7 +408,8 @@ our output is the entire metadata record** — nothing else is ever read.
 | `Book.name` = filename without extension; `BookMetadata.title` = that | The filename *is* the displayed title. |
 | `number`/`numberSort` assigned **positionally** after a natural sort | Filename sort order *is* reading order. Volume must precede subtitle. |
 | Natural sort compares digit runs numerically | Komga does not need zero-padding — `Vol. 2` precedes `Vol. 10` unpadded. **We pad anyway** (D37), because every other tool sorts lexically. |
-| A volume-numbered file with no issue number is an ordinary book | **No "Special" bucket.** Our entire corpus shelves normally. This is why Komga is the launch target. |
+| A volume-numbered file with no issue number is an ordinary book | **No "Special" bucket** for a volume or a one-shot: both shelve normally, which is why Komga is the launch target. Komga has no issue-vs-volume distinction to satisfy — a book is a book and its number comes from filename order — so a single issue shelves normally too. |
+| Nothing parses the number out of the name | **Issues are rendered, not encoded.** The leaf is `<Series>[ Vol. NN][ IIII][ - Subtitle]`: volume padded to its run width (D37/D44), **issue padded to a fixed four digits, with no `#`** (D60). Order is volume, then issue, then subtitle, because filename sort order is reading order. The `#` is dropped because it neither sorts nor displays well outside Komga, and four digits needs no run width — the largest issue number in the corpus is 666. |
 | Colon, apostrophe, `#` | No parsing or display effect; they land verbatim in the title. Filesystem and transport only — `:` is legal on Linux but breaks over SMB, `#` is harmlessly percent-encoded in the stored URL. |
 | One-shots are **folder**-triggered | Library option `oneshotsDirectory`, case-insensitive substring match on the full path. Never emit into such a path unintentionally. |
 | Collections and read lists | From ComicInfo `SeriesGroup` / `AlternateSeries`, both **CBZ/CBR only** — so for PDFs they are UI/API only and out of scope. |
@@ -696,10 +705,15 @@ passes while a symlinked subdirectory writes outside the tree. The attack that
 defeats human review: `C:\...` and `\\server\share` are inert strings on a macOS
 reviewer's machine and absolute paths on a contributor's Windows box.
 
-**Rules carry metadata fields only** — series, volume, format class, edition
-class, subtitle — from a closed vocabulary. Rules never contain paths or
+**Rules carry metadata fields only** — series, volume, issue, format class,
+edition class, subtitle — from a closed vocabulary. Rules never contain paths or
 separators. The preset is the sole path constructor. A bad rule can then produce
 a wrong *name*, never a wrong *location*.
+
+`volume`, `issue` and `volume_count` are numeric and carry no text, so the
+forbid-list below does not reach them; each has a ceiling of **9999** instead
+(D60). A number cannot be path-shaped, which is the whole reason the issue is a
+column rather than text inside the subtitle.
 
 **This forbid-list governs contributed rule data, not corpus-derived titles.**
 The two are validated at different points by different rules, and conflating them
@@ -1536,3 +1550,40 @@ record cannot authorise anything. *Reconciled 2026-10-24:* the design said
 undo, because they touch disjoint files. Re-running the same bundle into the
 same library supersedes its own previous record. The owner may want a retention
 age or a count instead.
+
+**D59 — Single issues are in scope for the MVP, and §1.1's first assumption was
+wrong.** That assumption — "no issue numbers; every file is a collected
+edition" — was measured against one Dark Horse bundle and generalised into a
+property of the problem. Across the generated Humble table it is false for 151
+of 2,204 rows, and the marketplaces queued behind Humble sell single issues as
+their primary unit. The premise is recorded as corrected rather than quietly
+widened, because every downstream claim that leaned on it — §6.8.1's "our
+entire corpus shelves normally", §8's Kavita reasoning — has to be re-read
+knowing it was never true. Volumes and one-shots were already handled: a
+volume sets `volume`, a book sets neither field, and both render correctly, so
+the scope correction costs one column rather than three features.
+
+**D60 — An issue is its own column, zero-padded to a fixed four digits, with no
+`#` in the name.** The subtitle could already hold `#7` and 151 rows do, which
+is how the tool shipped a working representation while the spec denied the case
+existed. It is not good enough: a free-text subtitle gets none of D37's
+padding, so one series' issues sort `#1 #10 #2` everywhere but Komga, whose
+comparator is numeric. §6.8.1 already answers why we pad anyway. A *fixed*
+width is right here where a per-series width was right for volumes (D44),
+because the ceiling is known and low — the largest issue number in the corpus
+is 666 — so there is no `issue_count` column and nothing to get wrong. The `#`
+goes because it sorts and displays badly outside Komga and buys nothing inside
+it. Rendered order is series, volume, issue, subtitle.
+
+**D61 — `seed` derives an issue from the filename only when the filename
+corroborates the title.** Where the stem records `issue<N>` and the verified
+title ends in that same bare `N`, the number is an issue and the parser's
+having absorbed it into the series name is a defect: `Bee and PuppyCat 1` gave
+every issue its own series folder. 59 rows qualify. Where the filename does not
+corroborate, the trailing number stays where the parser put it, because the
+corpus confirms some of them as whole titles — `RoboCop 2`, `B.P.R.D.: 1948` —
+and inferring from a trailing digit alone would cost real titles to save
+typing. This is the same shape as
+`docs/research/2026-10-25-the-corpus-can-confirm-a-colon.md`: ask an authority
+that actually knows, and bound what it may decide. Here the authority is the
+filename the marketplace itself wrote.
