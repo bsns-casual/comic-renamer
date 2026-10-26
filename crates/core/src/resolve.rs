@@ -116,6 +116,7 @@ fn filename_suggestion(stem: &str, marketplace: &str, humble: bool) -> Option<Su
     Some(Suggestion {
         series: parsed.series,
         volume: parsed.volume,
+        issue: parsed.issue,
         subtitle: parsed.subtitle,
         volume_count: None,
         source: SuggestionSource::Filename,
@@ -123,7 +124,8 @@ fn filename_suggestion(stem: &str, marketplace: &str, humble: bool) -> Option<Su
 }
 
 /// `-issue-3`, `-anthology`, `-graphicnovel`: the type suffix is not a title.
-/// The issue number is kept as `#3`, which the title parser drops.
+/// The issue number is kept as `#3`, which the title parser now takes into
+/// `ParsedTitle::issue` (D60) rather than dropping.
 fn sweet_shop_title(s: &str) -> String {
     for suffix in ["-anthology", "-graphicnovel"] {
         if let Some(t) = s.strip_suffix(suffix) {
@@ -178,6 +180,13 @@ fn corpus_suggestion(
     Suggestion {
         series: series.to_string(),
         volume,
+        // The corpus ladder reads a tokenised stem, and that tokeniser has no
+        // issue token: `Token::Volume` is the only number it recognises. So
+        // this path cannot offer one, and a single issue arrives here as a
+        // suggestion with no issue rather than a wrong one. It costs the user
+        // typing, never data — the resolver is a suggestion engine, and the
+        // mapping table is what carries confirmed titles.
+        issue: None,
         subtitle: subtitle.clone(),
         volume_count: run,
         source: SuggestionSource::Corpus,
@@ -195,6 +204,11 @@ fn override_suggestion(stem: &str, ctx: &Context) -> Option<Suggestion> {
     Some(Suggestion {
         series: entry.series.clone(),
         volume: entry.volume,
+        // Layer B's own format carries no issue. Adding one is a change to
+        // `data/overrides.toml` and its parser, and the mapping table already
+        // expresses an issue — an override exists to correct a wrong corpus
+        // match, not to be a second mapping store.
+        issue: None,
         subtitle: entry.subtitle.clone(),
         volume_count: None,
         source: SuggestionSource::Override,

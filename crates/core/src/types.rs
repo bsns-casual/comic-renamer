@@ -42,6 +42,8 @@ pub struct SeriesRecord {
 pub struct Suggestion {
     pub series: String,
     pub volume: Option<u32>,
+    /// A single issue (D60).
+    pub issue: Option<u32>,
     pub subtitle: Option<String>,
     /// The corpus's `issue_count` for this record; the preset's `run`.
     pub volume_count: Option<u32>,

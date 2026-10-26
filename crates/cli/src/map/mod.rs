@@ -799,6 +799,7 @@ mod tests {
         Suggestion {
             series: series.into(),
             volume,
+            issue: None,
             subtitle: subtitle.map(String::from),
             volume_count: count,
             source: SuggestionSource::Corpus,
@@ -807,7 +808,7 @@ mod tests {
 
     fn approved(stem: &str, series: &str, volume: Option<u32>, count: Option<u32>) -> table::Entry {
         let mut e = table::Entry::new(stem.into(), vec![sug(series, volume, None, count)]).with_extension("cbz");
-        assert!(e.accept_edit(ParsedTitle { series: series.into(), volume, subtitle: None }));
+        assert!(e.accept_edit(ParsedTitle { series: series.into(), volume, issue: None, subtitle: None }));
         e
     }
 
@@ -832,7 +833,7 @@ mod tests {
     #[test]
     fn distinct_destinations_and_unapproved_rows_are_not_collisions() {
         let mut pending = unapproved("c", "Usagi Yojimbo");
-        pending.final_fields = Some(ParsedTitle { series: "Usagi Yojimbo".into(), volume: Some(1), subtitle: None });
+        pending.final_fields = Some(ParsedTitle { series: "Usagi Yojimbo".into(), volume: Some(1), issue: None, subtitle: None });
         let entries = vec![approved("a", "Usagi Yojimbo", Some(1), None), approved("b", "Usagi Yojimbo", Some(2), None), pending];
         assert!(intra_session_collisions(&entries, &Komga).is_empty(), "an unapproved row is never written, so never collides");
     }
@@ -873,7 +874,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let local = dir.path().join("mappings.tsv");
         let mut e = table::Entry::new("x".into(), vec![sug("Lone Wolf", Some(1), None, Some(128))]).with_extension("cbz");
-        assert!(e.accept_edit(ParsedTitle { series: "Something Else".into(), volume: Some(1), subtitle: None }));
+        assert!(e.accept_edit(ParsedTitle { series: "Something Else".into(), volume: Some(1), issue: None, subtitle: None }));
         commit_session(&[e], &local, "B", "en").unwrap();
         assert_eq!(read_rows(&local)[0].volume_count, None);
     }
@@ -1016,7 +1017,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let local = dir.path().join("mappings.tsv");
         let mut e = table::Entry::new("x".into(), vec![sug("Black is the Color", Some(1), None, Some(128))]).with_extension("cbz");
-        assert!(e.accept_edit(ParsedTitle { series: "Black Is the Color".into(), volume: Some(1), subtitle: None }));
+        assert!(e.accept_edit(ParsedTitle { series: "Black Is the Color".into(), volume: Some(1), issue: None, subtitle: None }));
         commit_session(&[e], &local, "B", "en").unwrap();
         assert_eq!(read_rows(&local)[0].volume_count, Some(128));
     }

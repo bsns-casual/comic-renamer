@@ -80,7 +80,12 @@ impl Entry {
     /// The guess as final fields, when it is safe to take without a human edit.
     fn clean_guess(&self) -> Option<ParsedTitle> {
         let g = self.guess().filter(|_| !self.needs_review())?;
-        Some(ParsedTitle { series: g.series.clone(), volume: g.volume, subtitle: g.subtitle.clone() })
+        Some(ParsedTitle {
+            series: g.series.clone(),
+            volume: g.volume,
+            issue: g.issue,
+            subtitle: g.subtitle.clone(),
+        })
     }
 
     /// Approves with the user's fields, else the clean guess. Returns false
@@ -270,6 +275,7 @@ mod tests {
         Suggestion {
             series: series.into(),
             volume,
+            issue: None,
             subtitle: subtitle.map(String::from),
             volume_count: None,
             source,
@@ -380,7 +386,7 @@ mod tests {
     #[test]
     fn approve_all_remaining_leaves_already_edited_rows_alone() {
         let mut edited = clean("a", "Guessed");
-        edited.final_fields = Some(ParsedTitle { series: "Typed By Hand".into(), volume: Some(7), subtitle: None });
+        edited.final_fields = Some(ParsedTitle { series: "Typed By Hand".into(), volume: Some(7), issue: None, subtitle: None });
         let mut t = table(vec![edited, clean("b", "Other")]);
         t.on_key(ctrl('a'));
         assert!(t.entries.iter().all(|e| e.approved));
@@ -446,6 +452,7 @@ mod tests {
         e.final_fields = Some(ParsedTitle {
             series: "Hellboy Omnibus".into(),
             volume: Some(1),
+            issue: None,
             subtitle: Some("Seed of Destruction".into()),
         });
         let mut t = table(vec![e]);

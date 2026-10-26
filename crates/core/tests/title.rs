@@ -12,7 +12,9 @@ fn parses_the_elfquest_example_from_the_spec() {
 fn preserves_case_and_punctuation_verbatim() {
     let p = parse_title("DIE: Loaded #1");
     assert_eq!(p.series, "DIE", "case is never folded");
-    assert_eq!(p.subtitle.as_deref(), Some("Loaded #1"), "the issue number is what tells issues apart");
+    // Still what tells two issues apart, now as a field rather than text.
+    assert_eq!(p.issue, Some(1), "the issue number is what tells issues apart");
+    assert_eq!(p.subtitle.as_deref(), Some("Loaded"), "the arc is the subtitle");
     let p = parse_title("Hack/Slash: Back to School");
     assert_eq!(p.series, "Hack/Slash");
     assert_eq!(p.subtitle.as_deref(), Some("Back to School"));
@@ -64,8 +66,10 @@ fn a_roman_numeral_must_be_the_whole_token() {
 fn no_boundary_means_the_whole_text_is_the_series() {
     let p = parse_title("Saga");
     assert_eq!((p.series.as_str(), p.volume, p.subtitle), ("Saga", None, None));
+    // The trailing number used to land in the subtitle, which is where it
+    // lived before it had a field (D60).
     let p = parse_title("Red Sonja #7");
-    assert_eq!((p.series.as_str(), p.volume, p.subtitle.as_deref()), ("Red Sonja", None, Some("#7")));
+    assert_eq!((p.series.as_str(), p.volume, p.issue, p.subtitle), ("Red Sonja", None, Some(7), None));
 }
 
 #[test]
@@ -86,7 +90,7 @@ fn two_issues_of_one_series_render_to_different_paths() {
         let r = Resolved {
             series: p.series,
             volume: p.volume,
-            issue: None,
+            issue: p.issue,
             subtitle: p.subtitle,
             run: 0,
             status: Status::Mapped,
@@ -97,7 +101,9 @@ fn two_issues_of_one_series_render_to_different_paths() {
     for (a, b) in [("Minotaur #1", "Minotaur #2"), ("DIE: Loaded #1", "DIE: Loaded #2")] {
         assert_ne!(dest(a), dest(b), "{a} vs {b}");
     }
-    assert_eq!(dest("Minotaur #1").to_string_lossy(), "Minotaur/Minotaur - #1.pdf");
+    // D60's convention: four digits, no `#`, and the subtitle stays last.
+    assert_eq!(dest("Minotaur #1").to_string_lossy(), "Minotaur/Minotaur 0001.pdf");
+    assert_eq!(dest("DIE: Loaded #1").to_string_lossy(), "DIE/DIE 0001 - Loaded.pdf");
 }
 
 #[test]
@@ -135,4 +141,52 @@ fn wrapping_punctuation_around_the_number_is_stripped() {
 fn split_at_boundary_returns_slices_of_the_input() {
     let (series, volume, subtitle) = split_at_boundary("Harbinger, Vol. 2: Renegades");
     assert_eq!((series, volume, subtitle), ("Harbinger", Some(2), "Renegades"));
+}
+
+// --- D60: a trailing issue number is its own field ------------------------
+
+#[test]
+fn a_trailing_hash_number_becomes_the_issue_not_the_subtitle() {
+    let p = parse_title("Red Sonja #7");
+    assert_eq!(p.series, "Red Sonja");
+    assert_eq!((p.volume, p.issue), (None, Some(7)));
+    assert_eq!(p.subtitle, None, "the issue has a field now, so it is not text");
+}
+
+#[test]
+fn a_volume_and_a_trailing_issue_both_survive() {
+    // 17 rows of the Humble table are both at once.
+    let p = parse_title("Love and Rockets Vol. IV #9");
+    assert_eq!(p.series, "Love and Rockets");
+    assert_eq!((p.volume, p.issue), (Some(4), Some(9)));
+}
+
+#[test]
+fn an_issue_past_a_colon_still_leaves_the_arc_as_the_subtitle() {
+    let p = parse_title("DIE: Loaded #1");
+    assert_eq!(p.series, "DIE");
+    assert_eq!(p.issue, Some(1));
+    assert_eq!(p.subtitle.as_deref(), Some("Loaded"));
+}
+
+#[test]
+fn a_collected_editions_issue_range_is_not_an_issue() {
+    // 31 titles carry a range. It describes what the collection contains,
+    // not which issue this is, and stays dropped as before.
+    for title in ["Alex + Ada Vol. 1 (#1-5)", "Invincible Compendium (Issues #1-47)"] {
+        let p = parse_title(title);
+        assert_eq!(p.issue, None, "{title}: a range is not an issue number");
+    }
+}
+
+#[test]
+fn a_hash_that_is_the_whole_title_yields_no_issue_and_no_series() {
+    // The rule declines it, because taking the number would leave no series.
+    // `drop_trailing_issue` then empties the series anyway, which predates
+    // D60 — and an empty series is refused downstream by both
+    // `MappingRow::validate` and `Entry::accept_edit`, so this is a title
+    // that cannot become a row rather than one that becomes a wrong row.
+    let p = parse_title("#1");
+    assert_eq!(p.issue, None, "the rule needs something in front of the number");
+    assert_eq!(p.series, "", "and the series is empty, which is refused later");
 }

@@ -9,15 +9,49 @@
 pub struct ParsedTitle {
     pub series: String,
     pub volume: Option<u32>,
+    /// A single issue (D60). Taken before the boundary split, because the
+    /// number sits at the end of the whole title and the split cuts at the
+    /// first colon — `DIE: Loaded #1` would otherwise hide it in a subtitle.
+    pub issue: Option<u32>,
     pub subtitle: Option<String>,
 }
 
 pub fn parse_title(text: &str) -> ParsedTitle {
+    let (text, issue) = take_trailing_issue(text);
     let (series, volume, subtitle) = split_at_boundary(text);
     ParsedTitle {
         series: series.to_string(),
         volume,
+        issue,
         subtitle: (!subtitle.is_empty()).then(|| subtitle.to_string()),
+    }
+}
+
+/// A trailing `#N` and the title without it (D60).
+///
+/// Only a bare number, and only with something in front of it. `(#1-6)` is a
+/// collected edition's contents rather than one issue — `drop_trailing_issue`
+/// goes on discarding those — and a title that is nothing but `#1` would lose
+/// its series, which is a row with no destination.
+fn take_trailing_issue(text: &str) -> (&str, Option<u32>) {
+    let trimmed = text.trim_end();
+    let Some(last) = trimmed.rsplit(char::is_whitespace).next() else {
+        return (text, None);
+    };
+    let Some(digits) = last.strip_prefix('#') else {
+        return (text, None);
+    };
+    // `Foo Vol. #3` is a volume written with a hash, not an issue. Without
+    // this the marker's own number is taken and the volume vanishes.
+    let head = &trimmed[..trimmed.len() - last.len()];
+    if head.split_whitespace().next_back().is_some_and(is_volume_word) {
+        return (text, None);
+    }
+    match digits.parse::<u32>() {
+        Ok(issue) if last.len() < trimmed.len() => {
+            (trimmed[..trimmed.len() - last.len()].trim_end(), Some(issue))
+        }
+        _ => (text, None),
     }
 }
 

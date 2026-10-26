@@ -445,3 +445,13 @@ fn an_override_fires_for_every_marketplace_deliberately() {
         assert_eq!(found[0].source, SuggestionSource::Override, "{marketplace}");
     }
 }
+
+/// `sweet_shop_title` already rewrites `-issue-3` to `-#3`; the parser used to
+/// drop it, so the number that told two issues apart reached no field at all.
+#[test]
+fn a_sweet_shop_issue_suffix_sets_the_issue() {
+    let ctx = Context::default();
+    let found = suggest_with("young-shadow-the-watchdogs-issue-3", "Sweet Shop", None, &ctx);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].issue, Some(3), "{found:?}");
+}

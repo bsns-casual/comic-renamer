@@ -324,7 +324,12 @@ impl<'a> Detail<'a> {
 }
 
 fn as_parsed(s: &Suggestion) -> ParsedTitle {
-    ParsedTitle { series: s.series.clone(), volume: s.volume, subtitle: s.subtitle.clone() }
+    ParsedTitle {
+        series: s.series.clone(),
+        volume: s.volume,
+        issue: s.issue,
+        subtitle: s.subtitle.clone(),
+    }
 }
 
 enum Step {
@@ -369,6 +374,7 @@ mod tests {
         Suggestion {
             series: series.into(),
             volume,
+            issue: None,
             subtitle: subtitle.map(String::from),
             volume_count: count,
             source: SuggestionSource::Corpus,
@@ -738,6 +744,7 @@ mod tests {
         e.final_fields = Some(ParsedTitle {
             series: "Hellboy Omnibus".into(),
             volume: Some(1),
+            issue: None,
             subtitle: Some("Seed of Destruction".into()),
         });
         let mut d = Detail::for_entry(&e, &Komga);
