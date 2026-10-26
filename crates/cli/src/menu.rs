@@ -113,10 +113,23 @@ fn first_completed(waiting: &[(PathBuf, Summary)]) -> Option<&(PathBuf, Summary)
 /// filtered out of `waiting` — offering to reverse what an `apply` is still
 /// writing is the worse error — so without this line the screen was silent at
 /// the one moment a library is being changed underneath it.
-pub fn render(waiting: &[(PathBuf, Summary)], session_run: bool, running: bool) -> String {
+pub fn render(
+    waiting: &[(PathBuf, Summary)],
+    session_run: bool,
+    running: bool,
+    unreadable: bool,
+) -> String {
     let mut out = String::from("comic-renamer\n\n");
     if running {
         out += "A run is in progress. Nothing here can undo it until it finishes.\n\n";
+    }
+    // `waiting` drops a record `summarise` refuses, so without this line the
+    // screen is identical to an empty store and the undo keys answer `not an
+    // option here` — the same words an invalid key gets. Same argument as
+    // `running` above: silence at the one moment it matters.
+    if unreadable {
+        out += "A record in the run store cannot be read, so this menu cannot offer it. \
+                Run `comic-renamer undo --list` to see it and why.\n\n";
     }
     if let Some((_, s)) = first_interrupted(waiting) {
         out += &format!(
@@ -255,7 +268,10 @@ pub fn run(records: &Path) -> Result<(), String> {
         let (waiting, mine) =
             offers(waiting(records).map_err(|e| e.to_string())?, session.as_deref());
         let running = record::any_live(records).unwrap_or(false);
-        print!("\n{}", render(&waiting, mine, running));
+        // Defined in main.rs, the crate root, so it is in scope for its own
+        // child modules.
+        let unreadable = crate::has_unreadable(records);
+        print!("\n{}", render(&waiting, mine, running, unreadable));
         let choice = ask("choose", None)?;
         let Some(typed) = choice.chars().next() else { continue };
         let Some(key) = dispatch(typed, &waiting) else {
@@ -366,16 +382,16 @@ mod tests {
     #[test]
     fn the_two_offers_are_worded_differently_and_interrupted_comes_first() {
         let w = vec![(p("a"), interrupted(312, 400)), (p("b"), completed(400))];
-        let screen = render(&w, false, false);
+        let screen = render(&w, false, false, false);
         assert!(screen.contains("interrupted (312 of 400 rows placed)"), "{screen}");
         assert!(screen.contains("placed 400 files on 2026-10-23"), "{screen}");
         assert!(screen.find("interrupted").unwrap() < screen.find("placed 400").unwrap());
         // The completed offer must never be called a crash, nor the crash a
         // finished run: that is the defect the split exists to prevent.
-        let completed_only = render(&[(p("b"), completed(400))], false, false);
+        let completed_only = render(&[(p("b"), completed(400))], false, false, false);
         assert!(!completed_only.contains("interrupted"), "{completed_only}");
         assert!(!completed_only.contains("partly migrated"), "{completed_only}");
-        let interrupted_only = render(&[(p("a"), interrupted(3, 4))], false, false);
+        let interrupted_only = render(&[(p("a"), interrupted(3, 4))], false, false, false);
         assert!(!interrupted_only.contains("placed 3 files"), "{interrupted_only}");
         assert!(interrupted_only.contains("r  "));
         assert!(!interrupted_only.contains("u  undo"));
@@ -387,11 +403,11 @@ mod tests {
     /// changed underneath it. Only `undo --list` had the word `running`.
     #[test]
     fn the_screen_says_when_a_run_is_in_progress() {
-        let screen = render(&[], false, true);
+        let screen = render(&[], false, true, false);
         assert!(screen.contains("A run is in progress"), "{screen}");
         // And it is not said when nothing is running, or it would read as a
         // permanent notice about the tool rather than about right now.
-        assert!(!render(&[], false, false).contains("in progress"));
+        assert!(!render(&[], false, false, false).contains("in progress"));
         // Still a report about runs: no record path, same as every other line.
         for leak in [".record", "/runs"] {
             assert!(!screen.contains(leak), "{leak}: {screen}");
@@ -400,8 +416,8 @@ mod tests {
 
     #[test]
     fn item_four_appears_only_with_a_run_from_this_session() {
-        assert!(!render(&[], false, false).contains("  4  "));
-        assert!(render(&[], true, false).contains("  4  "));
+        assert!(!render(&[], false, false, false).contains("  4  "));
+        assert!(render(&[], true, false, false).contains("  4  "));
     }
 
     #[test]
@@ -412,7 +428,7 @@ mod tests {
             (p(&format!("{store}/.r2.record")), completed(2)),
         ];
         for session in [false, true] {
-            let screen = render(&w, session, false);
+            let screen = render(&w, session, false, false);
             for leak in ["Application Support", ".record", "/runs"] {
                 assert!(!screen.contains(leak), "{leak}: {screen}");
             }
@@ -516,7 +532,7 @@ mod tests {
             offered.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(),
             vec![crashed]
         );
-        let screen = render(&offered, false, false);
+        let screen = render(&offered, false, false, false);
         assert!(screen.contains("was interrupted (1 of 2 rows placed)"), "{screen}");
         assert!(matches!(dispatch('r', &offered), Some(Key::Reverse(_))), "{screen}");
     }
@@ -638,7 +654,7 @@ mod tests {
         // and `4` is the only way to reach the run.
         let (alone, item_four) = offers(vec![(mine.clone(), completed(2))], Some(&mine));
         assert!(alone.is_empty());
-        let screen = render(&alone, item_four, false);
+        let screen = render(&alone, item_four, false, false);
         assert!(!screen.contains("An earlier run"), "{screen}");
         assert!(screen.contains("  4  "), "{screen}");
         assert_eq!(dispatch('k', &alone), None);
@@ -647,5 +663,38 @@ mod tests {
         let (all, item_four) = offers(w, None);
         assert_eq!(all.len(), 2);
         assert!(!item_four);
+    }
+}
+
+#[cfg(test)]
+mod unreadable_tests {
+    use super::*;
+
+    /// The menu is the entry point for people who do not use flags, which is
+    /// the population that will never reach `undo --list`. With a record the
+    /// tool cannot read, the screen was byte-identical to an empty store and
+    /// `u`, `r` and `l` each answered `not an option here` — the same words
+    /// an invalid key gets, which is an affirmative claim that no such run
+    /// exists. Worst for an interrupted record: the one screen whose job is
+    /// to say "your library is partly migrated" stayed silent, and `l`'s
+    /// promise that it stays until dealt with was unreachable.
+    ///
+    /// Same remedy as `running`, whose own line exists because "the screen
+    /// was silent at the one moment a library is being changed underneath
+    /// it".
+    #[test]
+    fn an_unreadable_record_is_named_on_the_screen() {
+        let screen = render(&[], false, false, true);
+        assert!(screen.contains("cannot be read"), "{screen}");
+        assert!(
+            screen.contains("undo --list"),
+            "the screen must name the one command that can show it: {screen}"
+        );
+    }
+
+    #[test]
+    fn a_store_with_nothing_unreadable_says_nothing_about_it() {
+        let screen = render(&[], false, false, false);
+        assert!(!screen.contains("cannot be read"), "{screen}");
     }
 }
