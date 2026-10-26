@@ -547,7 +547,11 @@
       const c = document.createElement("span");
       c.className = "chip calm";
       c.textContent =
-        row.src === "title" ? "issue " + row.iss + " from the title" : "filename says issue " + row.iss;
+        row.src === "title"
+          ? "issue " + row.iss + " from the title"
+          : row.src === "sibling"
+            ? "issue " + row.iss + " from a file of the same title"
+            : "filename says issue " + row.iss;
       chips.appendChild(c);
     }
     if (row.corpus) {

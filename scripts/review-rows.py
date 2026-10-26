@@ -27,17 +27,30 @@ ROOT = Path(__file__).resolve().parent.parent
 ROWS = ROOT / "target/seed/humble.tsv"
 CLASSES = ROOT / "target/seed/humble-classes.tsv"
 
-# Classes that mean a human has to look. Everything else `seed` either decided
-# from an authority or left alone with no heuristic firing.
+# Classes that mean a human has to look.
+#
+# The two derived-issue classes are in here on purpose. A filename is evidence
+# and a sibling of the same title is evidence, but neither is a keystroke
+# (D50, D51) — and before this they left the reviewable pile entirely, taking
+# with them rows the old `bare trailing number` class would have caught. One
+# of the 59 is wrong in a way only a reader can see: `"Shrine of the Monkey
+# God!" in Kramers Ergot 9` is one story inside the ninth book of a numbered
+# anthology, and the rule makes the quoted story the series and 9 the issue.
+# Every derived row arrives with a better proposal than before; none arrives
+# confirmed.
 NEEDS_A_DECISION = {
     "bare trailing number (not a marker)",
     "volume marker swallowed into the subtitle (colon came first)",
     "multiple colons (series may contain a colon)",
+    "issue taken from the filename (D61)",
+    "issue copied from a sibling of the same title",
+    "siblings of one title decomposed differently",
 }
 # Which authority decided an issue, for the chip on the card.
 ISSUE_SOURCE = {
     "issue written in the verified title (#N)": "title",
     "issue taken from the filename (D61)": "filename",
+    "issue copied from a sibling of the same title": "sibling",
 }
 CORPUS_CONFIRMED = "corpus confirms the series (colon kept, volume recovered)"
 

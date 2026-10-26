@@ -7,7 +7,7 @@
 //! keystroke (D50, D51), so that file stays out of the tree until the owner
 //! picks a review method.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 
 use comic_renamer_core::corpus::Corpus;
@@ -165,6 +165,7 @@ pub fn seed() -> Result<(), String> {
     let mut classes: BTreeMap<&'static str, Vec<(String, MappingRow)>> = BTreeMap::new();
     let mut rejected: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut sidecar: Vec<String> = vec!["key\tbundle\tstem\ttitle\tclass".to_string()];
+    let mut built: Vec<Built> = Vec::new();
     for line in GROUND_TRUTH.lines().skip(1) {
         let f: Vec<&str> = line.split('\t').collect();
         let [bundle, title, stem] = f[..f.len().min(3)] else {
@@ -201,15 +202,25 @@ pub fn seed() -> Result<(), String> {
         } else {
             classify(title, &row)
         };
-        classes.entry(class).or_default().push((title.to_string(), row.clone()));
+        built.push(Built { title: title.to_string(), stem: stem.to_string(), row, class });
+    }
+
+    let propagated = propagate_within_titles(&mut built)?;
+    flag_disagreeing_siblings(&mut built);
+
+    for b in built {
+        classes.entry(b.class).or_default().push((b.title.clone(), b.row.clone()));
         // The class, beside the row it describes. Without this the review
         // page re-derived it in Python from the same titles, and the two
         // disagreed: that copy's volume-word list carried `book`, `part` and
         // `v`, which `title::is_volume_word` does not match. A second
         // implementation of a judgement is a second thing to be wrong, and a
         // page meant to drive 2,204 decisions should agree with the report.
-        sidecar.push(format!("{}\t{}\t{}\t{}\t{}", row.key, row.bundle, stem, title, class));
-        rows.push(row);
+        sidecar.push(format!(
+            "{}\t{}\t{}\t{}\t{}",
+            b.row.key, b.row.bundle, b.stem, b.title, b.class
+        ));
+        rows.push(b.row);
     }
     // Exact repeats collapse; a pair that disagrees survives to be counted below.
     let mut seen = HashSet::new();
@@ -224,6 +235,9 @@ pub fn seed() -> Result<(), String> {
     let total: usize = classes.values().map(Vec::len).sum();
     println!("\nhumble candidates (NOT shipped): {} unique rows -> {}", rows.len(), out.display());
     println!("classes -> {}", classes_out.display());
+    println!(
+        "{propagated} rows took a sibling's decomposition: one verified title, one split (D61 as amended)"
+    );
     println!(
         "{total} rows built; {} rejected; {} key collisions",
         rejected.values().map(Vec::len).sum::<usize>(),
@@ -347,11 +361,97 @@ fn split_trailing_number(text: &str) -> Option<(&str, u32)> {
     Some((head.trim_end(), last.parse().ok()?))
 }
 
+/// One verified title, one decomposition.
+///
+/// Humble ships the same comic under several stems and only the `issue<N>`
+/// spelling corroborates, so D61 applied per filename split 57 titles:
+/// `hacktivistissue1…` became `Hacktivist` issue 1 while `hacktivist001…`
+/// stayed `Hacktivist 1`, and one comic landed in two Komga series folders.
+/// Invisible to every check the project has — the full paths differ and so do
+/// the folder collision keys (`hacktivist` against `hacktivist1`), so
+/// `find_collisions` reports nothing.
+///
+/// The identical **verified** title is the authority here, not an inference:
+/// two files Humble published under one title are one comic, which is
+/// stronger evidence than either the filename or the corpus. Amends D61,
+/// which considered one filename at a time.
+///
+/// Returns how many rows took a sibling's decomposition.
+fn propagate_within_titles(built: &mut [Built]) -> Result<usize, String> {
+    let derived: BTreeMap<(String, String), ParsedFields> = built
+        .iter()
+        .filter(|b| b.class == ISSUE_FROM_FILENAME)
+        .map(|b| {
+            (
+                (b.row.bundle.clone(), b.title.clone()),
+                (b.row.series.clone(), b.row.volume, b.row.issue, b.row.subtitle.clone()),
+            )
+        })
+        .collect();
+    let mut propagated = 0;
+    for b in built.iter_mut() {
+        if b.class == ISSUE_FROM_FILENAME {
+            continue;
+        }
+        let Some((series, volume, issue, subtitle)) =
+            derived.get(&(b.row.bundle.clone(), b.title.clone()))
+        else {
+            continue;
+        };
+        b.row.series = series.clone();
+        b.row.volume = *volume;
+        b.row.issue = *issue;
+        b.row.subtitle = subtitle.clone();
+        b.row.validate().map_err(|e| format!("{:?}: {e}", b.title))?;
+        b.class = ISSUE_FROM_SIBLING;
+        propagated += 1;
+    }
+    Ok(propagated)
+}
+
+/// Anything still disagreeing per title after that, reported as its own class
+/// rather than left for a reader to notice. Zero today; the check is what
+/// makes that a fact rather than an assumption.
+fn flag_disagreeing_siblings(built: &mut [Built]) {
+    let mut shapes: BTreeMap<(String, String), BTreeSet<ParsedFields>> = BTreeMap::new();
+    for b in built.iter() {
+        shapes.entry((b.row.bundle.clone(), b.title.clone())).or_default().insert((
+            b.row.series.clone(),
+            b.row.volume,
+            b.row.issue,
+            b.row.subtitle.clone(),
+        ));
+    }
+    for b in built.iter_mut() {
+        if shapes[&(b.row.bundle.clone(), b.title.clone())].len() > 1 {
+            b.class = SIBLINGS_DISAGREE;
+        }
+    }
+}
+
+/// A row and what `seed` decided about it, held until every row exists: the
+/// per-title checks below cannot run inside the per-row loop.
+struct Built {
+    title: String,
+    stem: String,
+    row: MappingRow,
+    class: &'static str,
+}
+
+/// The four fields a decomposition is, for comparing two rows of one title.
+type ParsedFields = (String, Option<u32>, Option<u32>, Option<String>);
+
 /// Neither is a known-bad class: the title said so, or the filename did.
 /// Kept apart because they are different evidence — the first is written in
 /// the verified title, the second is an inference D61 bounds.
 const ISSUE_IN_TITLE: &str = "issue written in the verified title (#N)";
 const ISSUE_FROM_FILENAME: &str = "issue taken from the filename (D61)";
+/// The same verified title in the same bundle, decomposed from a sibling
+/// whose filename corroborated it.
+const ISSUE_FROM_SIBLING: &str = "issue copied from a sibling of the same title";
+/// Still disagreeing after that. A known-bad class: one title must not
+/// produce two decompositions, or one comic splits across two series folders.
+const SIBLINGS_DISAGREE: &str = "siblings of one title decomposed differently";
 
 /// The confirmed series and whatever the title leaves after it. A strip, not a
 /// guess: the series is always a prefix of the verified title, so anything
@@ -739,5 +839,82 @@ mod dedup_tests {
     #[test]
     fn the_collision_gate_reports_a_pair_that_disagrees_on_the_issue() {
         assert!(!find_key_collisions(&[row(Some(1)), row(Some(2))]).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod sibling_tests {
+    use super::*;
+
+    fn built(stem: &str, title: &str, series: &str, issue: Option<u32>, class: &'static str) -> Built {
+        Built {
+            title: title.into(),
+            stem: stem.into(),
+            row: MappingRow {
+                key: key(stem).unwrap(),
+                series: series.into(),
+                volume: None,
+                issue,
+                subtitle: None,
+                lang: LANG.to_string(),
+                volume_count: None,
+                bundle: "Humble BOOM! Bundle".into(),
+            },
+            class,
+        }
+    }
+
+    /// The real shape, from the BOOM! bundle: three files of one comic, and
+    /// only the `issue<N>` spelling corroborates. Left alone, one comic lands
+    /// in two Komga series folders — `Hacktivist/Hacktivist 0001.cbz` beside
+    /// `Hacktivist 1/Hacktivist 1.cbz` — and nothing reports it, because the
+    /// paths differ and so do the folder collision keys.
+    #[test]
+    fn a_sibling_of_the_same_title_takes_the_derived_decomposition() {
+        let mut rows = vec![
+            built("hacktivist0011407188013", "Hacktivist 1", "Hacktivist 1", None, "bare"),
+            built("hacktivist0011407270741", "Hacktivist 1", "Hacktivist 1", None, "bare"),
+            built("hacktivistissue11406925491", "Hacktivist 1", "Hacktivist", Some(1), ISSUE_FROM_FILENAME),
+        ];
+        assert_eq!(propagate_within_titles(&mut rows).unwrap(), 2);
+        for b in &rows {
+            assert_eq!(b.row.series, "Hacktivist", "{}", b.stem);
+            assert_eq!(b.row.issue, Some(1), "{}", b.stem);
+        }
+        assert_eq!(rows[0].class, ISSUE_FROM_SIBLING);
+        assert_eq!(rows[2].class, ISSUE_FROM_FILENAME, "the source keeps its own class");
+    }
+
+    /// Only within one title. A different title is a different comic, however
+    /// similar its stem.
+    #[test]
+    fn a_different_title_is_not_a_sibling() {
+        let mut rows = vec![
+            built("hacktivist0021407188013", "Hacktivist 2", "Hacktivist 2", None, "bare"),
+            built("hacktivistissue11406925491", "Hacktivist 1", "Hacktivist", Some(1), ISSUE_FROM_FILENAME),
+        ];
+        assert_eq!(propagate_within_titles(&mut rows).unwrap(), 0);
+        assert_eq!(rows[0].row.series, "Hacktivist 2");
+        assert_eq!(rows[0].row.issue, None);
+    }
+
+    #[test]
+    fn a_title_whose_rows_still_disagree_is_reported() {
+        let mut rows = vec![
+            built("a", "Curse 1", "Curse", Some(1), "clean"),
+            built("b", "Curse 1", "Curse 1", None, "clean"),
+        ];
+        flag_disagreeing_siblings(&mut rows);
+        assert!(rows.iter().all(|b| b.class == SIBLINGS_DISAGREE), "{:?}", rows[0].class);
+    }
+
+    #[test]
+    fn a_title_whose_rows_agree_keeps_its_class() {
+        let mut rows = vec![
+            built("a", "Curse 1", "Curse", Some(1), "clean"),
+            built("b", "Curse 1", "Curse", Some(1), "clean"),
+        ];
+        flag_disagreeing_siblings(&mut rows);
+        assert!(rows.iter().all(|b| b.class == "clean"));
     }
 }

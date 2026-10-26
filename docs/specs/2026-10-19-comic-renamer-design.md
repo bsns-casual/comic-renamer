@@ -1587,3 +1587,27 @@ typing. This is the same shape as
 `docs/research/2026-10-25-the-corpus-can-confirm-a-colon.md`: ask an authority
 that actually knows, and bound what it may decide. Here the authority is the
 filename the marketplace itself wrote.
+
+*Amended 2026-10-26, same day, by review.* D61 considered one filename at a
+time, and that is not enough: Humble ships the same comic under several stems
+and only the `issue<N>` spelling corroborates. Applied per filename the rule
+split **57 titles** — `hacktivistissue1…` became `Hacktivist` issue 1 while
+`hacktivist001…` stayed `Hacktivist 1` — so one comic landed in two Komga
+series folders. Nothing reported it: the full paths differ and so do the
+folder collision keys (`hacktivist` against `hacktivist1`), so
+`find_collisions` is silent by construction. **A derived decomposition now
+applies to every row sharing its `(bundle, verified title)`**, because two
+files Humble published under one title are one comic — the identical verified
+title is stronger evidence than the filename or the corpus, so this is
+identity rather than inference. 117 rows take a sibling's decomposition, the
+`bare trailing number` class falls from 138 to 21, and a separate class
+reports any title whose rows still disagree (zero today, which the check makes
+a fact rather than an assumption).
+
+**A derived issue is not a confirmed one.** Both derived classes stay in the
+review pile: a filename is evidence and a sibling is evidence, neither is a
+keystroke (D50, D51). One of the 59 is wrong in a way only a reader catches —
+`"Shrine of the Monkey God!" in Kramers Ergot 9` is one story inside the ninth
+book of a numbered anthology, and the rule makes the quoted story the series.
+Routing derived rows out of the reviewable pile would have hidden exactly
+that.
