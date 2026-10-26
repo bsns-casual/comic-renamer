@@ -190,3 +190,16 @@ fn a_hash_that_is_the_whole_title_yields_no_issue_and_no_series() {
     assert_eq!(p.issue, None, "the rule needs something in front of the number");
     assert_eq!(p.series, "", "and the series is empty, which is refused later");
 }
+
+/// Review Focus 4's parser half. Nothing ran `parse_title` on a series whose
+/// name ends in digits and which also carries an issue, so a plausible
+/// hardening of `take_trailing_issue` — "bail when the token before the `#`
+/// is numeric" — would silently drop the issue for every digit-ending series
+/// and no test would notice.
+#[test]
+fn a_series_ending_in_digits_still_gives_up_its_issue() {
+    let p = parse_title("Elephantmen 2260 #5");
+    assert_eq!(p.series, "Elephantmen 2260");
+    assert_eq!((p.volume, p.issue), (None, Some(5)));
+    assert_eq!(p.subtitle, None);
+}

@@ -560,9 +560,14 @@ fn a_headerless_record_from_an_older_build_is_unreadable_rather_than_clean() {
         .collect();
     // Guards a vacuous pass: a comma inside TMPDIR would quote the roots row,
     // skip the removal, and leave this testing the current format.
+    // The ROOTS row specifically: it is what carries `preset`, and moving
+    // that is the whole mechanism here. Asserting "some line" let the roots
+    // row stay full-width — the comma-in-TMPDIR case — and the test then
+    // failed loudly for the wrong reason.
     assert!(
-        old.iter().any(|l| l.split(',').count() == want - 1),
-        "nothing was shortened, so this is not an old-format record: {old:?}"
+        old.iter()
+            .any(|l| l.starts_with("0,roots") && l.split(',').count() == want - 1),
+        "the roots row was not shortened, so this is not an old-format record: {old:?}"
     );
 
     let stale = dir.path().join("headerless.record");

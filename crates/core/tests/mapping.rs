@@ -126,6 +126,10 @@ fn resolved_carries_the_row_into_the_preset_unchanged() {
     let r = row().resolved();
     assert_eq!(r.series, "Hack/Slash: Back to School");
     assert_eq!(r.volume, Some(3));
+    // Zero, and asserted: this test covered six of the seven fields and the
+    // missing one was the one the issue column added, which left a filter in
+    // `resolved()` catchable only by a CLI test.
+    assert_eq!(r.issue, Some(0));
     assert_eq!(r.subtitle.as_deref(), Some("A: B"));
     assert_eq!(r.run, 12);
     assert_eq!(r.status, Status::Mapped);

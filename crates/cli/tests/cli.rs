@@ -1431,6 +1431,7 @@ fn undo_list_names_a_record_it_cannot_read_instead_of_reporting_none() {
         shown.contains(&id),
         "the id `undo <run-id>` needs is not listed:\n{shown}"
     );
+    assert!(shown.contains("unreadable"), "and the listing must say why:\n{shown}");
 }
 
 /// Applies, then rewrites the record the way a build before the issue column
@@ -1456,6 +1457,14 @@ fn stale_record(f: &Fixture) -> String {
         .collect();
     std::fs::write(&record, old.join("\n") + "\n").unwrap();
     assert!(f.placed.exists(), "the library file must still be there");
+    // The helper proves its own premise. Without this, disabling the removal
+    // left a perfectly readable record and
+    // `undo_list_names_a_record_it_cannot_read_instead_of_reporting_none`
+    // still passed — both its assertions are true of a readable record too.
+    assert!(
+        comic_renamer_core::undo::summarise(&record).is_err(),
+        "the record is still readable, so nothing downstream is being tested"
+    );
     id
 }
 

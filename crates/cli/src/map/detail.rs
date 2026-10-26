@@ -962,6 +962,15 @@ mod issue_tests {
         let mut d = at(Field::Issue);
         d.on_input('x');
         assert_eq!(d.parsed.issue, None);
+        // On a field that already holds digits, which is the case that can
+        // fail: `"x".parse()` is `None` either way on an empty one, so the
+        // line above passed with the digit guard deleted. A refused
+        // keystroke still sets `structured` and `edited`, one half of the
+        // flagged-row guard — the same class as the five bypasses already
+        // paid for. The volume field's own test does it this way.
+        d.on_input('3');
+        d.on_input('x');
+        assert_eq!(d.parsed.issue, Some(3), "a non-digit must not disturb the field");
     }
 
     #[test]
