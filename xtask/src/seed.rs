@@ -62,12 +62,15 @@ mod tests {
         let sweet = &rows["Sweet Shop"];
         let die = sweet.iter().find(|r| r.key == "dieloadedissue1").expect("the DIE row");
         assert_eq!(die.series, "DIE: Loaded");
-        assert_eq!(die.subtitle.as_deref(), Some("#1"));
-        assert_eq!(die.volume, None, "#1 is an issue, not a volume");
+        // This comment used to sit beside `subtitle == Some("#1")`, and said
+        // what the row could not: "#1 is an issue, not a volume". D60 gave it
+        // a field, so it is the row that says it now.
+        assert_eq!((die.volume, die.issue), (None, Some(1)), "#1 is an issue, not a volume");
+        assert_eq!(die.subtitle, None);
 
         let g = sweet.iter().find(|r| r.key == "glarienoriginsissue1").expect("the Glarien row");
         assert_eq!(g.series, "Glarien: Origins");
-        assert_eq!(g.subtitle.as_deref(), Some("#1"));
+        assert_eq!((g.volume, g.issue), (None, Some(1)));
 
         // Left to the parser, the colon splits and both become arcs.
         assert_eq!(build_row("DIE: Loaded #1", "d", "x", None, None).unwrap().series, "DIE");
@@ -184,7 +187,19 @@ pub fn seed() -> Result<(), String> {
                 continue;
             }
         };
-        let class = if confirmed { CORPUS_CONFIRMED } else { classify(title, &row) };
+        let class = if confirmed {
+            CORPUS_CONFIRMED
+        } else if row.issue.is_some() {
+            // The parser owns a `#N`; `issue_from_stem` refuses any title
+            // carrying one, so the `#` says which of the two fired.
+            if title.contains('#') {
+                ISSUE_IN_TITLE
+            } else {
+                ISSUE_FROM_FILENAME
+            }
+        } else {
+            classify(title, &row)
+        };
         classes.entry(class).or_default().push((title.to_string(), row.clone()));
         rows.push(row);
     }
@@ -220,6 +235,75 @@ pub fn seed() -> Result<(), String> {
     }
     Ok(())
 }
+
+/// A trailing `#N` taken out of a leftover, the way `parse_title` takes one
+/// out of a whole title. `("#1")` leaves nothing behind, which is a subtitle
+/// of `None` rather than an empty one.
+fn take_hash_issue(text: Option<String>) -> (Option<String>, Option<u32>) {
+    let Some(t) = text else {
+        return (None, None);
+    };
+    let trimmed = t.trim_end();
+    let Some(last) = trimmed.rsplit(char::is_whitespace).next() else {
+        return (Some(t), None);
+    };
+    let Some(issue) = last.strip_prefix('#').and_then(|d| d.parse::<u32>().ok()) else {
+        return (Some(t), None);
+    };
+    let rest = trimmed[..trimmed.len() - last.len()].trim_end().to_string();
+    ((!rest.is_empty()).then_some(rest), Some(issue))
+}
+
+/// The issue number the FILENAME records, when the verified title ends in that
+/// same bare number (D61).
+///
+/// Three conditions, each one paid for. The stem must say `issue<N>`, because
+/// a trailing digit alone is not evidence: the corpus confirms `RoboCop 2` and
+/// `B.P.R.D.: 1948` as whole titles, so inferring from the number would cost
+/// real titles to save typing. The title must end in that same number, so a
+/// filename naming a different issue cannot rewrite it. And the title must
+/// carry no `#`, because `parse_title` already takes those into
+/// `ParsedTitle::issue` and taking one twice would strip the series down.
+fn issue_from_stem(stem: &str, title: &str) -> Option<u32> {
+    if title.contains('#') {
+        return None;
+    }
+    let tail = trailing_number(title)?;
+    (filename_issue(stem)? == tail).then_some(tail)
+}
+
+/// The number after the last `issue` or `issues` in `stem`, however it is
+/// separated: `_issue1_`, `-issue3`, `issue635`. No regex crate in this
+/// workspace, and this needs no dependency.
+fn filename_issue(stem: &str) -> Option<u32> {
+    let lower = stem.to_ascii_lowercase();
+    let at = lower.rfind("issue")?;
+    let rest = &lower[at + "issue".len()..];
+    let rest = rest.strip_prefix('s').unwrap_or(rest);
+    let rest = rest.trim_start_matches(['-', '_']);
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+/// The bare whitespace-delimited number a string ends in, if it ends in one.
+fn trailing_number(text: &str) -> Option<u32> {
+    text.trim_end().rsplit(char::is_whitespace).next()?.parse().ok()
+}
+
+/// `text` without the trailing number `trailing_number` found, trimmed.
+/// `None` when there is none to remove.
+fn without_trailing_number(text: &str) -> Option<String> {
+    let trimmed = text.trim_end();
+    let last = trimmed.rsplit(char::is_whitespace).next()?;
+    last.parse::<u32>().ok()?;
+    Some(trimmed[..trimmed.len() - last.len()].trim_end().to_string())
+}
+
+/// Neither is a known-bad class: the title said so, or the filename did.
+/// Kept apart because they are different evidence — the first is written in
+/// the verified title, the second is an inference D61 bounds.
+const ISSUE_IN_TITLE: &str = "issue written in the verified title (#N)";
+const ISSUE_FROM_FILENAME: &str = "issue taken from the filename (D61)";
 
 /// The confirmed series and whatever the title leaves after it. A strip, not a
 /// guess: the series is always a prefix of the verified title, so anything
@@ -306,22 +390,63 @@ fn build_row(
     // Either source replaces the split whole. The fifth column drops the
     // parser's volume with it, because that volume came from reading the
     // title the other way; the corpus supplies its own.
-    let (series, subtitle, volume) = match (confirmed, corpus_series) {
+    let (series, subtitle, volume, issue) = match (confirmed, corpus_series) {
         // A keystroke outranks a lookup, and the fifth column is a keystroke.
         (Some(c), _) => {
             let (s, sub) = confirmed_split(&strip_promo(title), c)?;
-            (s, sub, None)
+            // The fifth column confirms the *series*. Whatever follows it is
+            // still a remainder that decomposes, and a trailing `#N` left
+            // sitting in the subtitle would keep exactly the shape D60
+            // replaced — unpadded, with a `#`, sorting wrongly outside Komga.
+            let (sub, issue) = take_hash_issue(sub);
+            (s, sub, None, issue)
         }
         // The stem is the whole title bar the marker, so nothing is left over.
-        (None, Some((series, volume))) => (series, None, Some(volume)),
-        (None, None) => (parsed.series, parsed.subtitle, parsed.volume),
+        (None, Some((series, volume))) => (series, None, Some(volume), None),
+        (None, None) => {
+            let mut series = parsed.series;
+            let mut subtitle = parsed.subtitle;
+            let mut issue = parsed.issue;
+            // Only one of the two can fire: the parser takes a `#N`, and
+            // `issue_from_stem` refuses any title carrying a `#`.
+            if issue.is_none() {
+                if let Some(n) = issue_from_stem(stem, &strip_promo(title)) {
+                    // The title's trailing number sits in the last field with
+                    // content: the subtitle where there is one, else the
+                    // series. Taking it from the series is the case that
+                    // matters — `Bee and PuppyCat 1` gave every issue its own
+                    // series folder.
+                    let taken = match subtitle.clone() {
+                        Some(sub) => match without_trailing_number(&sub) {
+                            Some(rest) => {
+                                subtitle = (!rest.is_empty()).then_some(rest);
+                                true
+                            }
+                            None => false,
+                        },
+                        None => match without_trailing_number(&series) {
+                            // Never empty the series: that row has no
+                            // destination, and `validate` refuses it.
+                            Some(rest) if !rest.is_empty() => {
+                                series = rest;
+                                true
+                            }
+                            _ => false,
+                        },
+                    };
+                    if taken {
+                        issue = Some(n);
+                    }
+                }
+            }
+            (series, subtitle, parsed.volume, issue)
+        }
     };
     let row = MappingRow {
         key,
         series,
         volume,
-        // Task 8 derives a real issue; the parser cannot see the filename.
-        issue: None,
+        issue,
         subtitle,
         lang: LANG.to_string(),
         volume_count: None,
@@ -351,5 +476,126 @@ fn classify(title: &str, row: &MappingRow) -> &'static str {
         "bare trailing number (not a marker)"
     } else {
         "clean"
+    }
+}
+
+#[cfg(test)]
+mod issue_tests {
+    use super::*;
+
+    #[test]
+    fn a_filename_that_corroborates_the_trailing_number_gives_an_issue() {
+        assert_eq!(issue_from_stem("beeandpuppycat_issue1_1406925491", "Bee and PuppyCat 1"), Some(1));
+        assert_eq!(issue_from_stem("protocol_orphans_issue4_1406925491", "Protocol: Orphans 4"), Some(4));
+        assert_eq!(issue_from_stem("Robocop_issue2_1406925491", "RoboCop 2"), Some(2));
+        assert_eq!(issue_from_stem("rai-issue3_1410824697", "Rai 3"), Some(3));
+    }
+
+    #[test]
+    fn a_bare_trailing_number_with_no_corroborating_filename_is_left_alone() {
+        // D61: the corpus confirms some of these as whole titles, so a
+        // trailing digit alone is not evidence.
+        assert_eq!(issue_from_stem("10dance_1", "10 Dance 1"), None);
+        assert_eq!(issue_from_stem("altair_arecordofbattles_vol1", "Altair: A Record of Battles Vol. 1"), None);
+        assert_eq!(issue_from_stem("elephantmen2260_bookone", "Elephantmen 2260 Book One"), None);
+    }
+
+    #[test]
+    fn a_filename_issue_that_disagrees_with_the_title_is_left_alone() {
+        // The filename says issue 1 and the title does not end in 1 at all.
+        assert_eq!(issue_from_stem("fairyquest_issue1_1406925491", "Fairy Quest Outlaws"), None);
+        assert_eq!(issue_from_stem("robocop_vol3_laststand_issue4-optimized", "RoboCop: Last Stand"), None);
+        // Says 9, ends in 8.
+        assert_eq!(issue_from_stem("curse_issue9", "Curse 8"), None);
+    }
+
+    #[test]
+    fn a_title_humble_already_hashed_needs_no_filename_rule() {
+        // `parse_title` owns these, and taking the number twice would strip
+        // the series down.
+        assert_eq!(issue_from_stem("archie_issue635", "Archie #635"), None);
+        assert_eq!(issue_from_stem("lumberjanes_issue1_1406925491", "Lumberjanes #1"), None);
+    }
+
+    #[test]
+    fn a_derived_issue_strips_the_number_from_the_series() {
+        let row = build_row(
+            "Bee and PuppyCat 1",
+            "beeandpuppycat_issue1_1406925491",
+            "Humble BOOM! Bundle",
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(row.series, "Bee and PuppyCat");
+        assert_eq!((row.volume, row.issue), (None, Some(1)));
+        assert_eq!(row.subtitle, None);
+    }
+
+    #[test]
+    fn a_derived_issue_strips_the_number_from_the_subtitle_when_that_is_where_it_sits() {
+        let row = build_row(
+            "Protocol: Orphans 4",
+            "protocol_orphans_issue4_1406925491",
+            "Humble BOOM! Bundle",
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(row.series, "Protocol");
+        assert_eq!(row.subtitle.as_deref(), Some("Orphans"));
+        assert_eq!((row.volume, row.issue), (None, Some(4)));
+    }
+
+    #[test]
+    fn a_keystroke_still_outranks_the_filename_rule() {
+        // D50/D51: the fifth column is a confirmed series and replaces the
+        // split whole, so the rule must not reach past it.
+        let row = build_row(
+            "Bee and PuppyCat 1",
+            "beeandpuppycat_issue1_1406925491",
+            "Humble BOOM! Bundle",
+            Some("Bee and PuppyCat 1"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(row.series, "Bee and PuppyCat 1");
+        assert_eq!(row.issue, None);
+    }
+}
+
+#[cfg(test)]
+mod confirmed_issue_tests {
+    use super::*;
+
+    /// A confirmed series does not make the leftover exempt from D60.
+    #[test]
+    fn a_confirmed_series_still_gives_up_a_trailing_hash_issue() {
+        let row = build_row(
+            "DIE: Loaded #1",
+            "die-loaded-issue-1",
+            "Sweet Shop",
+            Some("DIE: Loaded"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(row.series, "DIE: Loaded", "the keystroke still owns the series");
+        assert_eq!((row.volume, row.issue), (None, Some(1)));
+        assert_eq!(row.subtitle, None, "nothing is left of the leftover");
+    }
+
+    #[test]
+    fn a_confirmed_series_keeps_a_real_subtitle_beside_the_issue() {
+        let row = build_row(
+            "Glarien: Origins The Dig #2",
+            "glarien-origins-issue-2",
+            "Sweet Shop",
+            Some("Glarien: Origins"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(row.series, "Glarien: Origins");
+        assert_eq!(row.subtitle.as_deref(), Some("The Dig"));
+        assert_eq!(row.issue, Some(2));
     }
 }

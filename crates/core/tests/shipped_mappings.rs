@@ -5,22 +5,27 @@ use comic_renamer_core::mapping::{
 /// The 12 marketplace titles the maintainer confirmed one by one on
 /// 2026-10-23, with the decomposition checked by hand: (marketplace, stem,
 /// series, volume, subtitle).
-const EXPECTED: [(&str, &str, &str, Option<u32>, Option<&str>); 12] = [
-    ("Fanatical", "68 Vol. 6 Last Rites", "'68", Some(6), Some("Last Rites")),
-    ("Fanatical", "Dracula Motherfker", "Dracula, Motherf**ker!", None, None),
-    ("Fanatical", "HackSlash Back to School", "Hack/Slash", None, Some("Back to School")),
-    ("Fanatical", "Killadelphia Vol. 4 The End of All", "Killadelphia", Some(4), Some("The End of All")),
-    ("Fanatical", "Moonshine Vol. 1", "Moonshine", Some(1), None),
-    ("Global Comix", "hammer-head-1_release-0001_978-1-5458-3063-5", "Hammer Head", None, Some("#1")),
-    ("Global Comix", "toxic-man_release-0001", "Toxic Man", None, None),
+/// `(marketplace, stem, series, volume, issue, subtitle)`. The issue column
+/// is D60's: four of these rows carried `#1` as subtitle text before it
+/// existed, which is the shape that sorts wrongly outside Komga.
+const EXPECTED: [(&str, &str, &str, Option<u32>, Option<u32>, Option<&str>); 12] = [
+    ("Fanatical", "68 Vol. 6 Last Rites", "'68", Some(6), None, Some("Last Rites")),
+    ("Fanatical", "Dracula Motherfker", "Dracula, Motherf**ker!", None, None, None),
+    ("Fanatical", "HackSlash Back to School", "Hack/Slash", None, None, Some("Back to School")),
+    ("Fanatical", "Killadelphia Vol. 4 The End of All", "Killadelphia", Some(4), None, Some("The End of All")),
+    ("Fanatical", "Moonshine Vol. 1", "Moonshine", Some(1), None, None),
+    ("Global Comix", "hammer-head-1_release-0001_978-1-5458-3063-5", "Hammer Head", None, Some(1), None),
+    ("Global Comix", "toxic-man_release-0001", "Toxic Man", None, None, None),
     // Its own series, not an arc within `DIE` (maintainer's ruling,
     // 2026-10-24). The colon is part of the name, which is why the fixture
-    // carries a confirmed series and the parser is not asked to guess.
-    ("Sweet Shop", "die-loaded-issue-1", "DIE: Loaded", None, Some("#1")),
-    ("Sweet Shop", "glarien-origins-issue-1", "Glarien: Origins", None, Some("#1")),
-    ("Sweet Shop", "minotaur-issue-1", "Minotaur", None, Some("#1")),
-    ("Sweet Shop", "the-spawn-of-venus-and-other-stories-anthology", "The Spawn of Venus and Other Stories", None, None),
-    ("Sweet Shop", "young-shadow-the-watchdogs-graphicnovel", "Young Shadow", None, Some("The Watchdogs")),
+    // carries a confirmed series and the parser is not asked to guess. The
+    // confirmed series owns the series only: the `#1` after it still becomes
+    // an issue, or it would keep a shape D60 replaced.
+    ("Sweet Shop", "die-loaded-issue-1", "DIE: Loaded", None, Some(1), None),
+    ("Sweet Shop", "glarien-origins-issue-1", "Glarien: Origins", None, Some(1), None),
+    ("Sweet Shop", "minotaur-issue-1", "Minotaur", None, Some(1), None),
+    ("Sweet Shop", "the-spawn-of-venus-and-other-stories-anthology", "The Spawn of Venus and Other Stories", None, None, None),
+    ("Sweet Shop", "young-shadow-the-watchdogs-graphicnovel", "Young Shadow", None, None, Some("The Watchdogs")),
 ];
 
 fn all_rows() -> Vec<MappingRow> {
@@ -56,13 +61,16 @@ fn the_marketplace_fixture_is_fully_covered() {
     assert_eq!(stems.len(), EXPECTED.len());
 
     let m = Mappings::load(&shipped_mappings(), None).unwrap();
-    for ((market, stem), (e_market, e_stem, series, volume, subtitle)) in stems.iter().zip(EXPECTED) {
+    for ((market, stem), (e_market, e_stem, series, volume, issue, subtitle)) in
+        stems.iter().zip(EXPECTED)
+    {
         assert_eq!((*market, *stem), (e_market, e_stem));
         let row = m
             .lookup(&key(stem).unwrap(), market)
             .unwrap_or_else(|| panic!("{stem} did not resolve"));
         assert_eq!(row.series, series, "{stem}");
         assert_eq!(row.volume, volume, "{stem}");
+        assert_eq!(row.issue, issue, "{stem}");
         assert_eq!(row.subtitle.as_deref(), subtitle, "{stem}");
         assert_eq!(row.bundle, *market, "{stem}");
     }
