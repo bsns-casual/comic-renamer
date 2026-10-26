@@ -425,43 +425,144 @@ fn the_column_list_places_issue_between_volume_and_subtitle() {
 /// Every index `undo.rs` hard-codes, in one place. Inserting `issue` moved
 /// `preset` and `planned` and the roots row came back as `unknown preset ""`;
 /// this is the test that names the cause instead of fifteen failing fixtures.
+///
+/// All seventeen are listed deliberately. An earlier version pinned only
+/// 4, 5 and 8-16 while its comment claimed to pin every one, and swapping
+/// `size,inode` to `inode,size` in `COLUMNS` passed it — the length held and
+/// every pinned index still named its field, while `read_manifest` went on
+/// reading `columns[6]` as size. A reorder among same-typed adjacent columns
+/// is the one mutation a partial list cannot see.
 #[test]
 fn the_column_list_is_read_at_the_indices_this_code_uses() {
     let c: Vec<&str> = COLUMNS.split(',').map(str::trim).collect();
     for (i, name) in [
-        (4, "source_name"), (5, "dest_relative"), (8, "mtime_ns"),
-        (9, "series"), (10, "volume"), (11, "issue"), (12, "subtitle"),
-        (13, "run"), (14, "extension"), (15, "preset"), (16, "planned"),
+        (0, "seq"), (1, "status"), (2, "mode"), (3, "mechanism"),
+        (4, "source_name"), (5, "dest_relative"), (6, "size"), (7, "inode"),
+        (8, "mtime_ns"), (9, "series"), (10, "volume"), (11, "issue"),
+        (12, "subtitle"), (13, "run"), (14, "extension"), (15, "preset"),
+        (16, "planned"),
     ] {
         assert_eq!(c[i], name, "column {i} moved; undo.rs reads it by index");
     }
     assert_eq!(c.len(), 17);
 }
 
-#[test]
-fn a_record_in_the_old_sixteen_column_format_is_reported_not_silently_reparsed() {
-    // No release has shipped, so there is no migration. What matters is that
-    // a stale record cannot be read as if its columns meant what they say
-    // now: the old `subtitle` sits where `issue` is, so the row must be
-    // reported rather than rebuilt from shifted fields.
-    let (_dir, record) = a_written_record();
-    let text = std::fs::read_to_string(&record).unwrap();
-    let old: Vec<String> = text
+/// Drops the issue column from every full-width line of `record`, the way a
+/// build before D60 wrote it. Returns false when nothing was shortened, which
+/// a comma inside `TMPDIR` causes: `split(',')` would then find the roots row
+/// over-wide, skip the removal, and leave a caller testing the current format
+/// while believing it tested the old one.
+fn downgrade_to_sixteen_columns(record: &Path) -> bool {
+    let text = std::fs::read_to_string(record).unwrap();
+    let want = COLUMNS.split(',').count();
+    let mut shortened = false;
+    let out: Vec<String> = text
         .lines()
-        .map(|l| {
-            let mut f: Vec<&str> = l.split(',').collect();
-            if f.len() == COLUMNS.split(',').count() {
-                f.remove(11); // drop the issue column, as a pre-D60 writer would
+        .map(|line| {
+            let mut f: Vec<&str> = line.split(',').collect();
+            if f.len() == want {
+                f.remove(11);
+                shortened = true;
             }
             f.join(",")
         })
         .collect();
-    std::fs::write(&record, old.join("\n") + "\n").unwrap();
-    // Refused as a whole, before any row is rebuilt: a short record already
-    // trips the older-build guard, which is stronger than per-row refusal.
+    std::fs::write(record, out.join("\n") + "\n").unwrap();
+    shortened
+}
+
+/// The whole record is refused up front, which is stronger than per-row
+/// refusal: a header one column short trips the older-build guard and
+/// `read_manifest` returns before any row is examined. That is all this test
+/// claims. The row-shift case the header hides is
+/// `a_short_pending_row_under_a_good_header_is_refused_per_row` below.
+#[test]
+fn a_record_whose_header_is_one_column_short_is_refused_whole() {
+    let (_dir, record) = a_written_record();
+    assert!(downgrade_to_sixteen_columns(&record));
     let err = reverse(&record).unwrap_err();
     assert!(
         format!("{err}").contains("older build"),
         "a stale record must say so rather than rebuild from shifted fields: {err}"
+    );
+}
+
+/// The case the header guard hides, and the one the issue column actually
+/// created: a row one column short under a header this build wrote. Nothing
+/// refuses the file as a whole, so each such row must be *reported* and the
+/// library left alone — a dropped row leaves a file in the library while the
+/// report calls the undo clean.
+#[test]
+fn a_short_pending_row_under_a_good_header_is_refused_per_row() {
+    let (dir, record) = a_written_record();
+    let text = std::fs::read_to_string(&record).unwrap();
+    let want = COLUMNS.split(',').count();
+    let mut shortened = false;
+    let rows: Vec<String> = text
+        .lines()
+        .map(|l| {
+            let mut f: Vec<&str> = l.split(',').collect();
+            // Header and roots row kept intact. Shortening the header trips
+            // the older-build guard and shortening the roots row moves
+            // `preset`, and either one refuses the file before a row is read
+            // — which is the whole point of this test being separate.
+            let structural = f.first().is_some_and(|c| *c == "seq" || *c == "0");
+            if !structural && f.len() == want {
+                f.remove(11);
+                shortened = true;
+            }
+            f.join(",")
+        })
+        .collect();
+    assert!(shortened, "no row was shortened: {rows:?}");
+    std::fs::write(&record, rows.join("\n") + "\n").unwrap();
+
+    let placed = dir.path().join("library").join(dest_for());
+    let before = placed.exists();
+    assert!(before, "the fixture must have placed a library file");
+    let report = reverse(&record).unwrap();
+    assert_eq!(report.restored, 0, "a shifted row must not be rebuilt: {report:?}");
+    assert!(!report.refused.is_empty(), "and it must be reported: {report:?}");
+    assert_eq!(placed.exists(), before, "the library must be untouched");
+}
+
+/// Without a header there is nothing to trip the older-build guard, and every
+/// row of an old-format record is dropped at parse time — which leaves both
+/// interrupted signals reading false over no rows at all. The record then
+/// looks like a finished run with nothing left to reverse, which is exactly
+/// the shape `record::forget`'s sweep deletes, while `reverse` would have
+/// refused it honestly with `unknown preset "1"`. The preset is the one field
+/// still able to prove the columns mean what this build thinks they mean: it
+/// is read at an index the insertion moved, so a stale row yields the old
+/// `planned` value there instead of a preset id.
+#[test]
+fn a_headerless_record_from_an_older_build_is_unreadable_rather_than_clean() {
+    let (dir, record) = a_written_record();
+    let text = std::fs::read_to_string(&record).unwrap();
+    let want = text.lines().next().unwrap().split(',').count();
+    let old: Vec<String> = text
+        .lines()
+        .skip(1)
+        .map(|l| {
+            let mut c: Vec<&str> = l.split(',').collect();
+            if c.len() == want {
+                c.remove(11);
+            }
+            c.join(",")
+        })
+        .collect();
+    // Guards a vacuous pass: a comma inside TMPDIR would quote the roots row,
+    // skip the removal, and leave this testing the current format.
+    assert!(
+        old.iter().any(|l| l.split(',').count() == want - 1),
+        "nothing was shortened, so this is not an old-format record: {old:?}"
+    );
+
+    let stale = dir.path().join("headerless.record");
+    std::fs::write(&stale, old.join("\n") + "\n").unwrap();
+    assert!(
+        summarise(&stale).is_err(),
+        "read as a clean run: {:?}",
+        summarise(&stale).map(|s| (s.reversible, s.planned, s.interrupted))
     );
 }

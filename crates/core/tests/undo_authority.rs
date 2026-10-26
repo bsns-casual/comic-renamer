@@ -696,3 +696,56 @@ fn a_reverse_rebuilds_the_destination_of_an_issue_row() {
         "D58 moves the library file aside, so it must not still be at the destination"
     );
 }
+
+/// The arm CLAUDE.md warns about, now carrying an issue. `expected()` has
+/// `(Pending, Rename) => source_identity`, because a rename moves the inode
+/// so the recorded source identity still describes the destination — which
+/// makes a crash in move mode's one-syscall window a *reversible* row with no
+/// terminal status. That is the default mode, and the count disagreeing with
+/// `expected()` there once produced a record every automatic path read as
+/// empty and the next run deleted. `a_reverse_rebuilds_the_destination_of_an_issue_row`
+/// uses Copy/Clone, so without this no issue row ever reaches that arm.
+#[test]
+fn an_issue_row_interrupted_in_move_modes_rename_window_is_still_reversible() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source");
+    let library = dir.path().join("library");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::create_dir_all(library.join(issue_dest()).parent().unwrap()).unwrap();
+    let source = source.canonicalize().unwrap();
+    let library = library.canonicalize().unwrap();
+
+    let source_file = source.join("curse_issue3.pdf");
+    std::fs::write(&source_file, b"an issue of Curse").unwrap();
+    let library_file = library.join(issue_dest());
+
+    let record = dir.path().join("run.record");
+    let mut w = UndoWriter::create(&record, &source, &library, "komga", 1).unwrap();
+    w.record_pending(
+        Path::new("curse_issue3.pdf"),
+        &issue_dest(),
+        Mechanism::Rename,
+        Mode::Move,
+        &source_file,
+        "Curse",
+        None,
+        Some(3),
+        None,
+        0,
+        "pdf",
+    )
+    .unwrap();
+    // The rename happened; the process died before any terminal row. One
+    // syscall, so there is no state between source and destination.
+    std::fs::rename(&source_file, &library_file).unwrap();
+    drop(w);
+
+    let summary = comic_renamer_core::undo::summarise(&record).unwrap();
+    assert_eq!(summary.reversible, 1, "the count must come from expected(): {summary:?}");
+    assert!(summary.interrupted, "no terminal row, so the run did not finish");
+
+    let report = reverse(&record).unwrap();
+    assert_eq!(report.restored, 1, "{report:?}");
+    assert!(source_file.exists(), "the file belongs back in the bundle folder");
+    assert!(!library_file.exists());
+}

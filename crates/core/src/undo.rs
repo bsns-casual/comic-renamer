@@ -454,9 +454,21 @@ fn reverse_one(
     // preset still produces it. Without this a hand-written manifest names an
     // arbitrary relative path.
     if !recomputed.iter().any(|p| p == &row.dest_relative) {
+        // Both sides, because four causes reach this line and only one of
+        // them is the user's doing: a forged `dest_relative`, a field the
+        // record does not carry, a field the parser drops, and a preset whose
+        // rendering changed. Naming only the recorded path made the message
+        // read as an accusation of tampering and gave nobody anything to act
+        // on — the issue column hit it and the cause was legible only from
+        // the source. Every field added to `Resolved` lands here.
         return Err(format!(
-            "{} is not a destination this plan produces",
-            row.dest_relative.display()
+            "{} is not a destination this plan produces; it produces {}",
+            row.dest_relative.display(),
+            recomputed
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
     plain_relative(&row.dest_relative)?;
@@ -949,6 +961,23 @@ fn read_manifest(manifest: &Path) -> Result<Manifest, UndoError> {
     }
 
     let (source_root, dest_root) = roots.ok_or(UndoError::NoRoot)?;
+    // The preset is the one field that proves the roots row's columns mean
+    // what this build thinks they mean: it is read at an index that moves
+    // whenever a column is inserted, so a record from another build yields
+    // some other field's value here. Checked for every reader rather than
+    // only in `reverse`, because without it a headerless record from an
+    // older build summarises as `(reversible 0, planned 0, interrupted
+    // false)` — a finished run with nothing left to put back, which is
+    // exactly the shape `record::forget`'s sweep deletes. `reverse` would
+    // have refused the same record honestly.
+    if preset_by_id(&preset).is_none() {
+        return Err(UndoError::Parse {
+            line: 1,
+            message: format!(
+                "unknown preset {preset:?}; this record was not written by this build"
+            ),
+        });
+    }
     Ok(Manifest { source_root, dest_root, preset, planned, started, rows, unreadable })
 }
 
