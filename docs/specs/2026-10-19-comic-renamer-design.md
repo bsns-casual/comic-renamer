@@ -1611,3 +1611,54 @@ keystroke (D50, D51). One of the 59 is wrong in a way only a reader catches —
 book of a numbered anthology, and the rule makes the quoted story the series.
 Routing derived rows out of the reviewable pile would have hidden exactly
 that.
+
+**D62 — A series the marketplace typesets in capitals is settled by the corpus
+where the corpus can decide it by case alone, and guessed where it cannot.**
+§1.1 never considered casing, and it is the second assumption that generalised
+one bundle's habit into a property of the problem: Humble ships
+`BLACK SCIENCE, Vol. 6`, the parser keeps the casing it is handed, and the row
+is well-formed and still wrong. 182 of the 2,223 generated rows carry a
+shouting series, and 181 of them were classed `clean`, so nothing asked anyone
+about them.
+
+Same shape as D61 and as the colon research: ask an authority that knows, and
+bound what it may decide. The authority is the corpus's own `name`, and the
+bound is **letter case alone**. A squashed-key match is too loose — it pairs
+`FEAR AGENT FINAL EDITION` with `Fear Agent: Final Edition`, `D ORC` with
+`D'Orc`, and `I.D.` with `Id`. The first two insert punctuation the verified
+title does not have; the last is a different series. Requiring
+`to_uppercase()` to agree on both sides keeps every real win — `Blame!`,
+`Ody-C`, `Seven to Eternity`, `We're Taking Everyone Down with Us` — and
+leaves the rest to a reader. Two mixed-case spellings that disagree count as
+no answer; none do today.
+
+Two further bounds, each measured:
+
+- **Orthography is not casing.** GCD records `Bttm Fdrs` and `W0rldtr33`, its
+  house style imposed on names whose covers shout deliberately. A token
+  holding a digit or a dot, or holding no vowel, vetoes the corpus spelling and
+  the row stays in the review pile. Four rows. The same predicate decides which
+  tokens `titlecase` leaves alone, so `SFSX` and `DLX` survive both paths.
+- **Agreement is an answer.** Where the corpus shouts the same way — `B.P.R.D.`
+  is 20 rows, `C.O.W.L.` and `I.D.` the remaining four — the row is settled
+  unchanged rather than sent back. An earlier cut applied the orthography veto
+  before the match and sent all 24 to the pile, which is the opposite of help.
+
+Where the corpus has no record, 54 rows take a conventional title-case guess
+and **keep their flag**: a small-word list lowercased except at the ends,
+styled tokens untouched. `Department of Truth`, `Kill 6 Billion Demons`,
+`Eight Billion Genies DLX Ed`. A guess is a typing aid and never a stored fact
+(D50, D51), which is also why a stored decision still fills its row from the
+store: the four titles whose owner has already ruled against the corpus —
+`BLAME!`, `DIE`, `CURSE WORDS`, `ODY-C` — keep the ruling, and the new
+proposal reaches them only through `↺`.
+
+**The gap this leaves is a future bundle.** The Humble path has no equivalent
+of the fifth column in `fixtures/marketplace-ground-truth.tsv`, so a later
+`DIE` volume arrives proposing `Die` again. A ruling column for the Humble
+table is the fix, and nobody is waiting on it.
+
+The 128 settled rows leave the review pile and the 54 guessed ones stay in it.
+`data/mappings/` is byte-identical after a regeneration, so `DIE: Loaded` —
+which is a keystroke — is untouched, and the shipped table remains the one
+place a human decided every row.

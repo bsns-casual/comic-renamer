@@ -6,7 +6,7 @@ identifies each file, shows a reviewable plan, and changes nothing until the use
 approves it.
 
 **Read `docs/specs/2026-10-19-comic-renamer-design.md` before changing anything.**
-Its §13 decision log records every call and why; D1–D57. If you think a decision
+Its §13 decision log records every call and why; D1–D62. If you think a decision
 is wrong, read its entry first — most have survived an adversarial review and the
 reasoning is written down. Say what's wrong with the reasoning rather than
 re-deciding silently.
@@ -197,6 +197,8 @@ done   R1-R14  the rebuild: frozen key and TSV I/O, §6.11 validation, the
 done   D59-D61  single issues are first class: an `issue` column, rendered as
                four padded digits with no `#`, derived where a filename or a
                sibling of the same verified title vouches for it
+done   D62  a shouting series is settled by the corpus where case alone decides
+               it, guessed and still reviewed where the corpus is silent
 todo   T15  Homebrew — see below
 ```
 
@@ -248,7 +250,9 @@ Two things inserting a column broke that nothing would have caught:
 
 **Measured 2026-10-26, so nobody re-derives it.** The five
 `COMIC_RENAMER_TEST_VOLUME` tests were run against this branch: **604 of 604
-pass**, the first time every gated test has run locally here. Three of the
+pass**, the first time every gated test has run locally here. The suite is 615
+now, and those five have not been re-run since; D62 touches none of their
+code. Three of the
 five call `reverse_run` or `record_pending`, which is exactly the code the
 issue column changed — and that does **not** mean they protect it. Each of
 these record-format mutations **survives all five** and is caught by the
@@ -355,14 +359,16 @@ untracked. It waits for the maintainer to review it, because D51 and the rebuild
 the first commit would do exactly that. On its last run (2026-10-25) the
 generator built 2,223 rows, rejected 1 (a short line), found 0 key collisions, and
 de-duplicated to 2,204. Its own classification of the 2,223, after the issue
-column (D59–D61) landed on 2026-10-26:
+column (D59–D61) and the casing rule (D62) landed on 2026-10-26 and 2026-10-27:
 
 ```
-1707   76.8%  clean
+1525   68.6%  clean
  189    8.5%  issue written in the verified title (#N)
+ 128    5.8%  corpus settled the series casing          (D62, not reviewed)
  117    5.3%  issue copied from a sibling of the same title
  111    5.0%  corpus confirms the series (colon kept, volume recovered)
   59    2.7%  issue taken from the filename (D61)
+  54    2.4%  series casing guessed, corpus silent      (D62, reviewed)
   21    0.9%  bare trailing number in the series (not a volume marker)
   18    0.8%  volume marker swallowed into the subtitle (colon came first)
    1    0.0%  multiple colons
@@ -380,9 +386,9 @@ nothing could report it, because the paths differ and so do the folder
 collision keys.
 
 **A derived issue is not a confirmed one.** `scripts/review-rows.py` keeps
-both derived classes in the review pile, so the page still puts 212 rows in
-front of a human — the same count as before, every one of them now arriving
-with a better proposal. One of the 59 is wrong in a way only a reader catches:
+both derived classes in the review pile. With D62's guessed class beside them
+the page puts **266 rows** in front of a human, every one arriving with a
+better proposal than before. One of the 59 is wrong in a way only a reader catches:
 `"Shrine of the Monkey God!" in Kramers Ergot 9` is one story inside the ninth
 book of a numbered anthology, and the rule makes the quoted story the series.
 Routing derived rows out of that pile would have hidden it.
@@ -410,15 +416,19 @@ each of which cost something to find:
 A missing corpus is "no guess", not an error (D49): `seed` prints one line and
 falls back to the parser for every row. `measure` still requires one.
 
-**Tests:** `cargo test --workspace` runs 595 and ignores 9 (counted 2026-10-26
-by summing the `test result:` lines: 595 passed, 0 failed, 9 ignored; 537 before
+**Tests:** `cargo test --workspace` runs 606 and ignores 9 (counted 2026-10-27
+by `awk`-summing the `test result:` lines, which is the number to quote: 606
+passed, 0 failed, 9 ignored; 596 before the casing rule, 537 before
 the issue column, 534 before
 the corpus-confirms-a-colon change, 530 before
 D58, 510 before a four-seat adversarial review, 500 before the whole-branch
 review's fix wave, 409 and 7 before session-scoped undo), with no compiler
-warnings. **The five volume-gated tests were run on 2026-10-26 and pass, so
-604 of 604 is the whole-suite number** — see "What the volume-gated suite does
-and does not protect" above before assuming a change needs them. The nine `#[ignore]`d
+warnings. **The 595 this file carried until 2026-10-27 was one short** — it was
+summed by hand; the baseline measured mechanically on the same tree is 596.
+**The whole suite is 615, and the nine ignored have not been run since
+2026-10-26**, when the five volume-gated ones passed — the casing rule touches
+none of their code. See "What the volume-gated suite does and does not
+protect" above before assuming a change needs them. The nine `#[ignore]`d
 tests need real hardware or the real corpus release, and **CI runs all nine**:
 five are volume-gated (`COMIC_RENAMER_TEST_VOLUME`; four in `apply_exec.rs`,
 one in `cli.rs`) and four are corpus tests (`COMIC_RENAMER_TEST_ZIP`, in
@@ -637,24 +647,44 @@ name above.
 
 ### Pick up here
 
-**-1. The issue column is merged and pushed.** 19 commits,
-`b1a9c2f..7428246` on `main`, pushed 2026-10-26. 595 of 604 passing with the
-volume suite run and clean, `check-mappings` and `check-review-page.cjs` both
-green, no compiler warnings. `cargo xtask seed` leaves `data/mappings/`
-byte-identical except the four rows that legitimately improved (`Hammer Head`,
-`Minotaur`, `DIE: Loaded`, `Glarien: Origins` each carried `#1` as subtitle
-text).
+**-1. CI for the casing rule has not been looked at.** Three commits went to
+`main` on 2026-10-27 — `98bab1b` (hide skipped), `71f480b` (the all-caps class
+and confirm-what-is-shown) and `cee4822` (D62, the corpus casing) — plus the
+docs commit that closed the session. They were pushed and the run was never
+opened. **First thing to check: `gh run list --limit 3`.** Locally: 606
+passing, 9 ignored, `check-mappings` green, `check-review-page.cjs` green, no
+compiler warnings, `data/mappings/` byte-identical after a regeneration.
 
-**CI run 40283202212: five of six jobs green at session close, and
-`rust-corpus` was still running.** Confirmed green: the `rust` job including
-its volume-gated tests, `mappings`, the corpus manifest, the licence check and
-the held-out fixtures. **`rust-corpus` is unverified** — it downloads the
-pinned release and runs the four `COMIC_RENAMER_TEST_ZIP` tests, which cannot
-be run locally here because the cache holds `gcd.sqlite` and not the zip.
-Those four go through `suggest_with` and the publisher hint, which Task 6
-touched when `Suggestion` gained its issue field, so it is the one job this
-work could plausibly have broken without a local signal. First thing to check:
-`gh run view 40283202212`.
+The job most worth reading is `rust-corpus`, for the opposite reason to last
+session: D62's corpus branches cannot be unit-tested here, because the cache
+holds `gcd.sqlite` and not the zip the job downloads. `casing_outcome` is
+split out from the lookup precisely so the *decision* is testable without a
+corpus — but `corpus_casing`, which reads `Corpus::lookup`, is exercised only
+by `cargo xtask seed` against the local cache.
+
+**CI run 40283202212 for the issue column came back green on all six jobs**,
+including `rust-corpus` in 1m47s, which was the open question at the previous
+close. The only annotations are advisory: `actions/checkout@v4` targets the
+deprecated Node 20 and is being forced onto Node 24, and `ubuntu-latest`
+migrates to Ubuntu 26 from 2026-10-19. Neither fails anything yet.
+
+**The issue column before it** is 19 commits, `b1a9c2f..7428246`, pushed
+2026-10-26. `cargo xtask seed` leaves `data/mappings/` byte-identical except
+the four rows that legitimately improved (`Hammer Head`, `Minotaur`,
+`DIE: Loaded`, `Glarien: Origins` each carried `#1` as subtitle text).
+
+**D62 leaves one gap, and it is the owner's to close.** The Humble path has no
+equivalent of the fifth column in `fixtures/marketplace-ground-truth.tsv`, so a
+ruling made on the review page does not reach the generator. Four titles are
+already in that position — the owner typed `BLAME!`, `DIE`, `CURSE WORDS` and
+`ODY-C`, and the corpus proposes `Blame!`, `Die`, `Curse Words`, `Ody-C`. The
+stored decisions win today, because the page fills a decided row from the
+store and the new proposal reaches it only through `↺`. A later `DIE` volume
+in a new bundle would arrive proposing `Die` again.
+
+Two likely typos in the stored decisions, both surfaced by comparing them
+against the new proposals: `Exquiste Corpses` (2 rows, missing the `i`) and
+`Front Knife` where the title is `FIRST KNIFE` (1 row).
 
 The licence gate was checked before pushing and is **not** crossed: the
 shipped table carries only Fanatical, Global Comix and Sweet Shop bundles,
@@ -686,7 +716,8 @@ nine `#[ignore]`d tests**, so "534 passed" was never the whole suite, and one of
 nine asserted the pre-D58 truth that a reversed copy leaves the library empty.
 Four visible tests were updated when D58 landed; the invisible one was not,
 because that round's brief did not require the RAM-disk run. **Quote the gated
-total, or run the volume suite** — 595 of 604 as of 2026-10-26.
+total, or run the volume suite** — 606 of 615 as of 2026-10-27, and the nine
+ignored last ran on 2026-10-26.
 
 The first fix then needed a second one. An adversarial seat showed D54's own
 gate was check-then-act on the source and lost the file outright when raced —
@@ -820,8 +851,11 @@ repository is a different use, and nobody has answered whether it is allowed.
 **This gates release, not development.** Building and reviewing the table locally
 does not wait on it; publishing it does. (D51, rebuild §10)
 
-**2. The Humble table review. In progress, 15 of 2,204 decided.** See "What
-ships" above for the class table.
+**2. The Humble table review. In progress: 393 decided, 27 left in the
+pile.** The pile is 266 rows of 2,204 (see "What ships" above for the class
+table); the other 1,938 are the scan stack, which no decision is recorded
+against. 5 rows are marked not-a-comic. Counted from the artifact's store on
+2026-10-27, with 0 orphans.
 
 **`map` is not the tool for it, and the owner chose a page instead.** `map`'s
 `Entry` holds a filename and the resolver's candidates and never reads
@@ -853,6 +887,19 @@ Three things that page learned the hard way, all fixed:
   preset in JavaScript, which is not an invariant 1 violation — it constructs
   no path the tool acts on — but an unpinned mirror that drifts shows the
   wrong path to someone making 2,204 decisions.
+
+Two controls changed on 2026-10-27, both from using it:
+
+- **Hide skipped is its own checkbox.** "Hide confirmed" used to hide skipped
+  rows too, and only on the per-row paint: `sweepHidden` tested
+  `classList.contains("done")` and a skipped row carries `skipped`, so the row
+  vanished on a repaint and came back on the next sweep — which `renderMore`
+  runs for every batch. Both paths share one `hidden(node)` predicate now.
+- **The scan section's bulk confirm acts on the rendered slice**, not the whole
+  stack, so one press can no longer confirm two thousand rows nobody has
+  scrolled past. `Show more` disarms it, because growing the shown set
+  invalidates the count the press was agreed against, and the button stays
+  after a batch instead of hiding.
 
 **Invariant 7's bundle half matters here**: 158 of the table's 2,036 keys
 appear under more than one bundle, so this is the table where a literal bundle
