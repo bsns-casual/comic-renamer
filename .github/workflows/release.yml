@@ -1,0 +1,162 @@
+name: release
+
+# Builds the one artifact a Homebrew formula needs: a universal2 binary, so
+# one url and one sha256 cover both Apple silicon and Intel. No per-arch
+# formula blocks, no bottle machinery, and nothing compiles on the user's
+# machine -- `cargo install` already serves people who want to build it
+# themselves, and `brew install rust` to build a 6.9 MB binary is a large
+# download nobody asked for.
+#
+# Fires on a `v*` tag. `workflow_dispatch` builds and verifies without
+# publishing, so the whole path can be exercised before a tag exists.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos-universal:
+    name: universal2 binary for a Homebrew formula
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The runner's preinstalled stable, as every other job here uses. The
+      # workspace floor is 1.88, and six locked dependencies declare it; a
+      # runner below that fails at the build rather than silently producing
+      # something, so this line is for the log, not a gate.
+      - name: Toolchain
+        run: |
+          rustc --version
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      # A tag that disagrees with the crate is the mistake this repo has made
+      # three times in other forms: a packaging claim that was never checked
+      # against the thing it described. The formula's url carries the tag and
+      # `--version` prints the crate, so they have to match before anything is
+      # published.
+      - name: The tag and the crate agree
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          crate=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/cli/Cargo.toml | head -1)
+          tag="${GITHUB_REF_NAME#v}"
+          echo "crate $crate, tag $tag"
+          test "$crate" = "$tag" || {
+            echo "::error::crates/cli/Cargo.toml is $crate but the tag is $tag"
+            exit 1
+          }
+
+      - name: Build both slices
+        run: |
+          cargo build --release --locked -p comic-renamer --target aarch64-apple-darwin
+          cargo build --release --locked -p comic-renamer --target x86_64-apple-darwin
+
+      # The file has to be named `comic-renamer`: clap prints argv[0] in its
+      # usage line, so a binary called `comic-renamer-universal` tells every
+      # user the wrong command.
+      - name: Merge and verify
+        run: |
+          mkdir -p dist
+          lipo -create -output dist/comic-renamer \
+            target/aarch64-apple-darwin/release/comic-renamer \
+            target/x86_64-apple-darwin/release/comic-renamer
+          lipo -info dist/comic-renamer
+          lipo -info dist/comic-renamer | grep -q x86_64
+          lipo -info dist/comic-renamer | grep -q arm64
+          # Runs the arm64 slice; the x86_64 one is checked by `lipo` above,
+          # since this runner cannot execute it without Rosetta.
+          dist/comic-renamer --version
+
+      # gzip records an mtime, so two builds of identical bytes produce
+      # different tarballs and different hashes. That is fine here -- the sha256
+      # is computed from the artifact this run publishes -- but it does mean a
+      # rebuilt tarball will not match a formula already in the tap.
+      - name: Package
+        id: package
+        run: |
+          version=$(dist/comic-renamer --version | awk '{print $2}')
+          name="comic-renamer-${version}-macos-universal.tar.gz"
+          tar -czf "$name" -C dist comic-renamer
+          sha=$(shasum -a 256 "$name" | awk '{print $1}')
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          # The whole formula, with the url and sha256 already filled in, so
+          # nobody transcribes a hash by hand and no second copy of the text
+          # lives in this repo to drift from the release it describes. Paste it
+          # into `Formula/comic-renamer.rb` in `bsns-casual/homebrew-tap`.
+          #
+          # No `version` line: `brew audit --strict` calls it redundant,
+          # because brew reads 0.1.0 out of the asset filename. Checked by
+          # installing this formula from a local tap.
+          {
+            echo "## $name"
+            echo
+            echo '```'
+            echo "sha256  $sha"
+            echo '```'
+            echo
+            echo "### Formula/comic-renamer.rb"
+            echo
+            echo '```ruby'
+            cat <<FORMULA
+          class ComicRenamer < Formula
+            desc "Rename comic bundles into the layout a comic library app expects"
+            homepage "https://github.com/${GITHUB_REPOSITORY}"
+            url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${name}"
+            sha256 "${sha}"
+            license "MIT"
+
+            # macOS-only by construction: renamex_np, fclonefileat and
+            # std::os::macos::fs::MetadataExt are Apple-gated.
+            depends_on :macos
+
+            def install
+              bin.install "comic-renamer"
+            end
+
+            test do
+              assert_match "comic-renamer #{version}", shell_output("#{bin}/comic-renamer --version")
+            end
+          end
+          FORMULA
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-universal
+          path: ${{ steps.package.outputs.name }}
+
+      # The sha256 goes in the release body, because that is where the formula
+      # author reads it from. Written through a file rather than `--notes`: the
+      # body is multi-line, and indented lines are markdown code blocks, which
+      # keeps backticks out of an unquoted heredoc where they would run as
+      # command substitution.
+      - name: Publish
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSET: ${{ steps.package.outputs.name }}
+          SHA: ${{ steps.package.outputs.sha }}
+        run: |
+          cat > notes.md <<EOF
+          macOS universal2 binary: Apple silicon and Intel in one file.
+
+              sha256  $SHA
+
+          Install:
+
+              brew install bsns-casual/tap/comic-renamer
+
+          Or build it yourself:
+
+              cargo install --path crates/cli --locked
+          EOF
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md \
+            "$ASSET"
