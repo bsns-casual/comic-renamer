@@ -647,13 +647,15 @@ name above.
 
 ### Pick up here
 
-**-1. CI for the casing rule has not been looked at.** Three commits went to
+**-1. The casing rule is merged, pushed and green.** Three commits went to
 `main` on 2026-10-27 — `98bab1b` (hide skipped), `71f480b` (the all-caps class
-and confirm-what-is-shown) and `cee4822` (D62, the corpus casing) — plus the
-docs commit that closed the session. They were pushed and the run was never
-opened. **First thing to check: `gh run list --limit 3`.** Locally: 606
-passing, 9 ignored, `check-mappings` green, `check-review-page.cjs` green, no
-compiler warnings, `data/mappings/` byte-identical after a regeneration.
+and confirm-what-is-shown) and `cee4822` (D62, the corpus casing). **CI run
+40454635024 is green on all six jobs**, `rust-corpus` in 1m32s among them, so
+the one branch that cannot be unit-tested here has been executed against the
+real release. Locally: 606 passing, 9 ignored, `check-mappings` green,
+`check-review-page.cjs` green, no compiler warnings, `data/mappings/`
+byte-identical after a regeneration. The docs commit `23b709d` that followed
+was still queued when it was last looked at; it changes no code.
 
 The job most worth reading is `rust-corpus`, for the opposite reason to last
 session: D62's corpus branches cannot be unit-tested here, because the cache
