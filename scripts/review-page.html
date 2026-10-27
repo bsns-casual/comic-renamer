@@ -331,8 +331,8 @@
     <p class="sblurb">No heuristic fired on these, which is not the same as being right.
       Sorted by filename.</p>
     <div class="bulk">
-      <span id="bulkMsg">Confirm every remaining row here as proposed.</span>
-      <button class="ghost" id="bulkBtn" disabled>Confirm all remaining</button>
+      <span id="bulkMsg">Confirm the rows shown here as proposed.</span>
+      <button class="ghost" id="bulkBtn" disabled>Confirm the rows shown</button>
     </div>
     <div id="listScan"></div>
     <div class="more" id="more" hidden>
@@ -794,6 +794,9 @@
     for (; shown < end; shown++) frag.appendChild(card(scanRows[shown]).node);
     host.appendChild(frag);
     sweepHidden();
+    // The shown set just grew, so an armed press no longer means the count
+    // the user was quoted.
+    disarm();
     const left = scanRows.length - shown;
     el("more").hidden = left === 0;
     el("moreTxt").textContent = left ? left.toLocaleString() + " more below" : "";
@@ -871,32 +874,43 @@
     if (db) el("bulkBtn").disabled = false;
   }
 
-  // ---- bulk confirm, two-step ----
+  // ---- bulk confirm, two-step, over the rows on screen ----
+  //
+  // It used to take every pending row in the stack, rendered or not, which
+  // meant one press could confirm two thousand rows nobody had looked at. The
+  // rendered slice is the set the reader has actually scrolled past.
   let armed = false;
+  function disarm() {
+    armed = false;
+    el("bulkBtn").disabled = !db;
+    el("bulkBtn").textContent = "Confirm the rows shown";
+    el("bulkMsg").textContent = "Confirm the rows shown here as proposed.";
+  }
   el("bulkBtn").addEventListener("click", async () => {
     const btn = el("bulkBtn"), msg = el("bulkMsg");
+    const onScreen = scanRows.slice(0, shown);
     // `map`'s `^A` leaves a row the user has already edited alone, pinned by
     // `approve_all_remaining_leaves_already_edited_rows_alone`. This button
     // wrote the proposal over such an edit, so the two tools disagreed about
     // what "confirm all remaining" means.
-    const touched = scanRows.filter((r) => {
+    const touched = onScreen.filter((r) => {
       const ctl = cards.get(r.i);
       return !decisionFor(r) && ctl && ctl.dirty();
     });
-    const pending = scanRows.filter((r) => {
+    const pending = onScreen.filter((r) => {
       const ctl = cards.get(r.i);
       return !decisionFor(r) && !(ctl && ctl.dirty());
     });
     if (!pending.length) {
-      msg.textContent = "Every row here is already confirmed.";
+      msg.textContent = "Every row shown here is already confirmed. Show more to go on.";
       btn.disabled = true;
       return;
     }
     if (!armed) {
       armed = true;
       msg.textContent =
-        "This confirms " + pending.length.toLocaleString() +
-        " rows exactly as proposed, including the ones not yet on screen." +
+        "This confirms the " + pending.length.toLocaleString() +
+        " row(s) shown above, exactly as proposed." +
         (touched.length
           ? " " + touched.length.toLocaleString() + " row(s) you have edited are left alone."
           : "") +
@@ -917,11 +931,12 @@
         const ctl = cards.get(row.i);
         if (ctl) ctl.paint();
       }
+      // Disarm first, then say what happened: more rows can be shown and
+      // confirmed after this, so the button stays.
+      disarm();
       msg.textContent =
-        pending.length.toLocaleString() + " rows confirmed as proposed." +
+        pending.length.toLocaleString() + " row(s) confirmed as proposed." +
         (touched.length ? " " + touched.length.toLocaleString() + " edited row(s) left for you." : "");
-      btn.textContent = "Done";
-      btn.hidden = true;
     } catch (e) {
       msg.textContent = "Some rows did not save (" + (e && e.code ? e.code : "failed") +
         "). Reload to see which are stored.";

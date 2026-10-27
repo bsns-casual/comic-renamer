@@ -607,8 +607,27 @@ fn build_row(
 /// Not a known-bad class: these rows were decided by the corpus, not guessed.
 const CORPUS_CONFIRMED: &str = "corpus confirms the series (colon kept, volume recovered)";
 
+/// A series carrying no lowercase letter at all. Humble typesets some of its
+/// own titles in full caps (`BLACK SCIENCE, Vol. 6`) and the parser keeps the
+/// casing it is handed, so the row is well-formed and still wrong. A few names
+/// really are uppercase -- `DIE`, `BLAME!`, `W0RLDTR33`, `C.O.W.L.` -- which is
+/// why this asks for a decision instead of title-casing anything.
+const SERIES_ALL_CAPS: &str = "series is all caps (rarely right)";
+
+/// Alphabetic and nowhere lowercase. Digits and punctuation decide nothing, so
+/// `W0RLDTR33` shouts and `1948` does not.
+fn is_shouting(series: &str) -> bool {
+    series.chars().any(char::is_alphabetic) && !series.chars().any(char::is_lowercase)
+}
+
 /// The known-bad classes, from what the parser is known to get wrong. First
 /// match wins; `clean` means none of them fired, not that a person checked.
+///
+/// `SERIES_ALL_CAPS` comes last, so it claims only rows no known-bad class
+/// took. It is a property of the source's casing rather than of the split, and
+/// a row already in the review pile needs no second reason to be there. Two
+/// rows escape it for the same reason -- `C.O.W.L. #1` and `ODY-C #1` carry an
+/// issue, so `classify` never sees them -- and both are correct as they stand.
 fn classify(title: &str, row: &MappingRow) -> &'static str {
     let last = title.split_whitespace().last().unwrap_or("");
     if title.matches(':').count() > 1 {
@@ -622,6 +641,8 @@ fn classify(title: &str, row: &MappingRow) -> &'static str {
         "volume marker swallowed into the subtitle (colon came first)"
     } else if row.volume.is_none() && !last.is_empty() && last.chars().all(|c| c.is_ascii_digit()) {
         "bare trailing number (not a marker)"
+    } else if is_shouting(&row.series) {
+        SERIES_ALL_CAPS
     } else {
         "clean"
     }
@@ -839,6 +860,58 @@ mod dedup_tests {
     #[test]
     fn the_collision_gate_reports_a_pair_that_disagrees_on_the_issue() {
         assert!(!find_key_collisions(&[row(Some(1)), row(Some(2))]).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod shouting_tests {
+    use super::*;
+
+    fn row(series: &str, volume: Option<u32>, subtitle: Option<&str>) -> MappingRow {
+        MappingRow {
+            key: key("x").unwrap(),
+            series: series.into(),
+            volume,
+            issue: None,
+            subtitle: subtitle.map(str::to_string),
+            lang: LANG.to_string(),
+            volume_count: None,
+            bundle: "b".into(),
+        }
+    }
+
+    #[test]
+    fn a_series_with_no_lowercase_letter_asks_for_a_decision() {
+        assert!(is_shouting("BLACK SCIENCE"));
+        assert!(is_shouting("W0RLDTR33"), "digits decide nothing");
+        assert!(is_shouting("C.O.W.L."));
+        assert!(!is_shouting("Black Science"));
+        assert!(!is_shouting("RoboCop"), "one lowercase letter is enough");
+        assert!(!is_shouting("1948"), "no letter at all is not shouting");
+        assert!(!is_shouting(""));
+    }
+
+    #[test]
+    fn classify_routes_a_shouting_series_out_of_clean() {
+        let shouts = row("BLACK SCIENCE", Some(6), None);
+        let does_not = row("Black Science", Some(6), None);
+        assert_eq!(classify("BLACK SCIENCE, Vol. 6", &shouts), SERIES_ALL_CAPS);
+        assert_eq!(classify("Black Science, Vol. 6", &does_not), "clean");
+    }
+
+    /// Last arm, so a row already bound for the review pile keeps the class
+    /// that says what the parser got wrong. Without the ordering, a shouting
+    /// series would mask the reason.
+    #[test]
+    fn a_known_bad_class_outranks_the_casing() {
+        assert_eq!(
+            classify("SONS OF ANARCHY 10", &row("SONS OF ANARCHY 10", None, None)),
+            "bare trailing number (not a marker)"
+        );
+        assert_eq!(
+            classify("RESIST!: TALES VOL 2", &row("RESIST!", None, Some("TALES VOL 2"))),
+            "volume marker swallowed into the subtitle (colon came first)"
+        );
     }
 }
 

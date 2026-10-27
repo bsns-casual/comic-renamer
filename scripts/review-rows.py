@@ -45,6 +45,7 @@ NEEDS_A_DECISION = {
     "issue taken from the filename (D61)",
     "issue copied from a sibling of the same title",
     "siblings of one title decomposed differently",
+    "series is all caps (rarely right)",
 }
 # Which authority decided an issue, for the chip on the card.
 ISSUE_SOURCE = {
