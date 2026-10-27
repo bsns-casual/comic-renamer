@@ -202,6 +202,8 @@ pub fn seed() -> Result<(), String> {
         } else {
             classify(title, &row)
         };
+        let mut row = row;
+        let class = settle_casing(&mut row, class, corpus.as_ref());
         built.push(Built { title: title.to_string(), stem: stem.to_string(), row, class });
     }
 
@@ -609,10 +611,150 @@ const CORPUS_CONFIRMED: &str = "corpus confirms the series (colon kept, volume r
 
 /// A series carrying no lowercase letter at all. Humble typesets some of its
 /// own titles in full caps (`BLACK SCIENCE, Vol. 6`) and the parser keeps the
-/// casing it is handed, so the row is well-formed and still wrong. A few names
-/// really are uppercase -- `DIE`, `BLAME!`, `W0RLDTR33`, `C.O.W.L.` -- which is
-/// why this asks for a decision instead of title-casing anything.
-const SERIES_ALL_CAPS: &str = "series is all caps (rarely right)";
+/// casing it is handed, so the row is well-formed and still wrong.
+///
+/// The casing is then settled by `settle_casing`, which asks the corpus first.
+/// This class survives only on the rows it could not answer for, where the
+/// series carries a guess instead.
+const SERIES_ALL_CAPS: &str = "series casing guessed, corpus silent";
+
+/// The corpus recorded the name, so nobody has to rule on its casing: either
+/// it spells it in mixed case and the row took that spelling, or it shouts the
+/// same way and the row was right as it stood.
+const CORPUS_CASING: &str = "corpus settled the series casing";
+
+/// What the corpus records for a shouting series.
+enum Casing {
+    /// The corpus spells it in capitals too, so the row needs no change.
+    Shouts,
+    /// The corpus spells it in mixed case, and this is that spelling.
+    Mixed(String),
+}
+
+/// The corpus's own spelling of `series`, when it has exactly one.
+///
+/// Accepts a name only when it differs from `series` by letter case alone.
+/// Squashed keys alone are too loose: they match `Fear Agent: Final Edition`
+/// to `FEAR AGENT FINAL EDITION`, `D'Orc` to `D ORC` and `Id` to `I.D.`. The
+/// first two insert punctuation the verified title does not have, and the last
+/// is a different series. Case alone keeps every real win -- `Blame!`,
+/// `Ody-C`, `W0rldtr33`, `Seven to Eternity` -- and lets a reader handle the
+/// rest.
+///
+/// Two mixed-case spellings that disagree answer nothing, so they count as no
+/// answer. Measured over the 2,223 generated rows: none disagree.
+fn corpus_casing(series: &str, corpus: &Corpus) -> Option<Casing> {
+    let key = squash(series);
+    if key.is_empty() {
+        return None;
+    }
+    let upper = series.to_uppercase();
+    let names: BTreeSet<&str> = corpus
+        .lookup(&key)
+        .iter()
+        .filter(|r| r.language == LANG && r.name.to_uppercase() == upper)
+        .map(|r| r.name.as_str())
+        .collect();
+    if names.contains(series) {
+        return Some(Casing::Shouts);
+    }
+    let mut mixed = names.into_iter().filter(|n| !is_shouting(n));
+    match (mixed.next(), mixed.next()) {
+        (Some(one), None) => Some(Casing::Mixed(one.to_string())),
+        _ => None,
+    }
+}
+
+/// A token to leave exactly as it came: it holds a digit or a dot, or has no
+/// vowel. `DLX`, `SFSX`, `C.O.W.L.` and `W0RLDTR33` are initialisms or
+/// deliberate orthography rather than words, and a change of case invents a
+/// spelling nobody uses.
+fn is_styled(token: &str) -> bool {
+    let lower: String = token.chars().flat_map(char::to_lowercase).collect();
+    token.chars().any(|c| c.is_ascii_digit() || c == '.')
+        || !lower.chars().any(|c| "aeiouy".contains(c))
+}
+
+/// Words that stay lowercase inside a title.
+const SMALL_WORDS: &[&str] = &[
+    "a", "an", "and", "as", "at", "but", "by", "for", "from", "in", "nor", "of", "on", "or", "so",
+    "the", "to", "up", "via", "vs", "with",
+];
+
+/// Title-case for a shouting series the corpus does not record.
+///
+/// `is_styled` decides which tokens survive untouched. The first and
+/// last tokens that carry a letter always capitalise, so a title ending in
+/// `UP` does not end in `up`.
+fn titlecase(series: &str) -> String {
+    let tokens: Vec<&str> = series.split(' ').collect();
+    let lettered: Vec<usize> = (0..tokens.len())
+        .filter(|&i| tokens[i].chars().any(char::is_alphabetic))
+        .collect();
+    let (first, last) = match (lettered.first(), lettered.last()) {
+        (Some(&f), Some(&l)) => (f, l),
+        _ => return series.to_string(),
+    };
+    let mut out: Vec<String> = Vec::with_capacity(tokens.len());
+    for (i, token) in tokens.iter().enumerate() {
+        let lower: String = token.chars().flat_map(char::to_lowercase).collect();
+        out.push(if is_styled(token) {
+            (*token).to_string()
+        } else if SMALL_WORDS.contains(&lower.as_str()) && i != first && i != last {
+            lower
+        } else {
+            let mut chars = lower.chars();
+            match chars.next() {
+                Some(c) => c.to_uppercase().chain(chars).collect(),
+                None => lower,
+            }
+        });
+    }
+    out.join(" ")
+}
+
+/// Settles the casing of a shouting series and says who decided it.
+///
+/// Runs after `classify`, and only on the rows `classify` had nothing else to
+/// say about: a row flagged for what the parser got wrong keeps that flag and
+/// its own casing, because its reader is going to retype the series anyway.
+/// Seven of the 188 shouting rows are in that position.
+///
+/// Recasing cannot break §6.11's per-field rules, so the row is not
+/// re-validated: both branches change letter case only, and neither the
+/// 120-byte cap nor the forbidden characters can be crossed by a change of
+/// case.
+fn settle_casing(row: &mut MappingRow, class: &'static str, corpus: Option<&Corpus>) -> &'static str {
+    if class != SERIES_ALL_CAPS {
+        return class;
+    }
+    let (class, settled) = casing_outcome(&row.series, corpus.and_then(|c| corpus_casing(&row.series, c)));
+    if let Some(series) = settled {
+        row.series = series;
+    }
+    class
+}
+
+/// The decision itself, with the lookup already done, so every branch is
+/// reachable from a test: the corpus release is behind
+/// `COMIC_RENAMER_TEST_ZIP` and `cargo xtask seed` is the only other thing
+/// that reaches these arms.
+fn casing_outcome(series: &str, found: Option<Casing>) -> (&'static str, Option<String>) {
+    match found {
+        // Agreement needs no veto: the corpus spells it in capitals too, so
+        // there is nothing for a reader to rule on. `B.P.R.D.` is 20 of these
+        // rows and sending them back would be the opposite of help.
+        Some(Casing::Shouts) => (CORPUS_CASING, None),
+        // A styled token is orthography rather than casing. The corpus holds
+        // `Bttm Fdrs` for `BTTM FDRS` and `W0rldtr33` for `W0RLDTR33` -- its
+        // house style applied to names their covers spell in capitals on
+        // purpose, which is a question nobody asked. Four rows, and the
+        // reader keeps them as they are.
+        Some(Casing::Mixed(_)) if series.split(' ').any(is_styled) => (SERIES_ALL_CAPS, None),
+        Some(Casing::Mixed(name)) => (CORPUS_CASING, Some(name)),
+        None => (SERIES_ALL_CAPS, Some(titlecase(series))),
+    }
+}
 
 /// Alphabetic and nowhere lowercase. Digits and punctuation decide nothing, so
 /// `W0RLDTR33` shouts and `1948` does not.
@@ -897,6 +1039,72 @@ mod shouting_tests {
         let does_not = row("Black Science", Some(6), None);
         assert_eq!(classify("BLACK SCIENCE, Vol. 6", &shouts), SERIES_ALL_CAPS);
         assert_eq!(classify("Black Science, Vol. 6", &does_not), "clean");
+    }
+
+    #[test]
+    fn titlecase_lowercases_the_small_words_but_never_the_ends() {
+        assert_eq!(titlecase("SEVEN TO ETERNITY"), "Seven to Eternity");
+        assert_eq!(titlecase("DEPARTMENT OF TRUTH"), "Department of Truth");
+        assert_eq!(titlecase("RIGHTEOUS THIRST FOR VENGEANCE"), "Righteous Thirst for Vengeance");
+        assert_eq!(titlecase("THE LAST DAYS OF AMERICAN CRIME"), "The Last Days of American Crime");
+        // First and last win over the small-word list.
+        assert_eq!(titlecase("OF MICE AND"), "Of Mice And");
+    }
+
+    #[test]
+    fn titlecase_leaves_a_styled_token_alone() {
+        assert_eq!(titlecase("SFSX"), "SFSX", "no vowel, so an initialism");
+        assert_eq!(titlecase("W0RLDTR33"), "W0RLDTR33", "a digit, so a styling");
+        assert_eq!(titlecase("C.O.W.L."), "C.O.W.L.", "dots, so an initialism");
+        assert_eq!(titlecase("EIGHT BILLION GENIES DLX ED"), "Eight Billion Genies DLX Ed");
+        assert_eq!(titlecase("KILL 6 BILLION DEMONS"), "Kill 6 Billion Demons");
+    }
+
+    /// With no corpus the row keeps the flag and carries a guess, which is the
+    /// whole contract: a guess is a typing aid, never a stored fact (D50).
+    #[test]
+    fn with_no_corpus_the_casing_is_a_guess_and_stays_flagged() {
+        let mut r = row("DEADLY CLASS", Some(10), None);
+        assert_eq!(settle_casing(&mut r, SERIES_ALL_CAPS, None), SERIES_ALL_CAPS);
+        assert_eq!(r.series, "Deadly Class");
+    }
+
+    #[test]
+    fn the_corpus_spelling_wins_when_it_is_only_a_change_of_case() {
+        let got = casing_outcome("BLACK SCIENCE", Some(Casing::Mixed("Black Science".into())));
+        assert_eq!(got, (CORPUS_CASING, Some("Black Science".to_string())));
+    }
+
+    /// The corpus shouting back is an answer, not a silence: these rows leave
+    /// the review pile without a change.
+    #[test]
+    fn a_corpus_that_shouts_too_settles_the_row_unchanged() {
+        assert_eq!(casing_outcome("B.P.R.D.", Some(Casing::Shouts)), (CORPUS_CASING, None));
+    }
+
+    /// Orthography is not casing. Without this the generator quietly respells
+    /// two real titles and the reader never sees them.
+    #[test]
+    fn a_styled_token_keeps_the_corpus_spelling_out() {
+        for (series, corpus_name) in
+            [("BTTM FDRS", "Bttm Fdrs"), ("W0RLDTR33", "W0rldtr33"), ("I.D.", "Id")]
+        {
+            assert_eq!(
+                casing_outcome(series, Some(Casing::Mixed(corpus_name.into()))),
+                (SERIES_ALL_CAPS, None),
+                "{series}"
+            );
+        }
+    }
+
+    /// A row flagged for something else keeps both its class and its casing,
+    /// so the reason the parser failed is still on the card.
+    #[test]
+    fn settle_casing_leaves_another_class_untouched() {
+        let mut r = row("SONS OF ANARCHY 10", None, None);
+        let bare = "bare trailing number (not a marker)";
+        assert_eq!(settle_casing(&mut r, bare, None), bare);
+        assert_eq!(r.series, "SONS OF ANARCHY 10");
     }
 
     /// Last arm, so a row already bound for the review pile keeps the class
