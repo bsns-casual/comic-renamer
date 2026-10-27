@@ -305,6 +305,7 @@
     <div class="meter"><i id="bar"></i></div>
     <div class="hopts">
       <label><input type="checkbox" id="hideDone"> Hide confirmed</label>
+      <label><input type="checkbox" id="hideSkip"> Hide skipped</label>
       <span id="loadState">Loading records…</span>
     </div>
   </header>
@@ -683,7 +684,7 @@
       confirm.textContent = dec && !isSkipped ? (settled ? "Confirmed" : "Save change") : "Confirm";
       revert.hidden =
         isSkipped || (f.s === row.s && f.v === row.v && f.iss === row.iss && f.sub === row.sub);
-      node.hidden = hideDone && (settled || isSkipped);
+      node.hidden = hidden(node);
     }
 
     function fill(f) {
@@ -762,14 +763,24 @@
     return ctl;
   }
 
-  let hideDone = false;
+  let hideDone = false, hideSkip = false;
+  // One predicate for both the per-row paint and the sweep. They disagreed
+  // before: paint hid a skipped row under "Hide confirmed" and the next sweep
+  // brought it back, because `settled()` reads `done` and a skipped row is not
+  // done. Skipped now hides under its own box and nothing else.
+  function hidden(node) {
+    return (hideDone && node.classList.contains("done")) ||
+      (hideSkip && node.classList.contains("skipped"));
+  }
   function sweepHidden() {
-    for (const ctl of cards.values()) {
-      ctl.node.hidden = hideDone && ctl.settled();
-    }
+    for (const ctl of cards.values()) ctl.node.hidden = hidden(ctl.node);
   }
   el("hideDone").addEventListener("change", (e) => {
     hideDone = e.target.checked;
+    sweepHidden();
+  });
+  el("hideSkip").addEventListener("change", (e) => {
+    hideSkip = e.target.checked;
     sweepHidden();
   });
 
