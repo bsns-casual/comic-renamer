@@ -148,10 +148,12 @@ docs/research/   reviews and experiments   fixtures/        test data, filenames
 corpus/          manifest.json — the pinned corpus. Never the .sqlite itself.
 data/mappings/   the shipped filename→title table, one TSV per marketplace
 data/overrides.toml   first-party Layer B title overrides
+review/          the reviewed Humble table, decided but not shipped — see its README
 xtask/           cargo xtask measure | seed | check-mappings [base-ref]
 scripts/         checks and tools, runnable locally:
                  python3 scripts/check-manifest.py
                  python3 scripts/review-rows.py <out.json>   the review page's data
+                 python3 scripts/export-decisions.py <dump> <out.tsv>
                  node scripts/check-review-page.cjs          its path mirror vs komga.rs
                  scripts/review-page.html                    the Humble review page itself
 .github/         workflows: verify (every PR), corpus-refresh (monthly)
@@ -202,8 +204,8 @@ done   D62  a shouting series is settled by the corpus where case alone decides
 todo   T15  Homebrew — the release workflow and the formula are done and
                tested; three owner steps remain. Deferred behind the MVP
                on 2026-10-27. See "Task 15, Homebrew" below.
-todo   the review's 2,204 decisions exist only in the artifact store. Nothing
-       reads them back into a TSV yet — that exporter is the next MVP step.
+done   the review's 2,204 decisions are exported and committed to `review/`,
+       validated through the real gates. Shipping them waits on the licence.
 ```
 
 ### Single issues, and the issue column (D59-D61)
@@ -656,11 +658,16 @@ MVP item.** The release workflow and the formula are done and tested, so that
 work is parked rather than unfinished — "Task 15, Homebrew" below holds the
 three owner steps and every measurement, so none of it has to be re-derived.
 
-**0. The next MVP step is the review exporter.** The Humble table is fully
-decided — 2,204 of 2,204 — and every one of those judgements lives in the
-artifact's database and nowhere else. See "2. The Humble table review" below
-for what the exporter owes. It is worth writing whatever the licence question
-decides, because the risk is not the licence, it is one web page's store.
+**0. The review is decided, exported and committed.** 2,204 of 2,204, now at
+`review/humble-decisions.tsv` with its own README and the five not-a-comic rows
+beside it. Validated by embedding it as a shipped mapping and running the real
+suite: 606 passed, 0 failed. What remains is the licence question, which gates
+moving it into `data/mappings/` — a `git mv`, one `include_str!` and an array
+size, spelled out in `review/README.md`.
+
+**The artifact's store is no longer the only copy.** If the review is reopened,
+re-dump the collection and re-run `scripts/export-decisions.py`; the export is
+sorted by key and bundle, so a regeneration is a readable diff.
 
 **-1. The casing rule is merged, pushed and green.** Three commits went to
 `main` on 2026-10-27 — `98bab1b` (hide skipped), `71f480b` (the all-caps class
@@ -875,13 +882,25 @@ marked not-a-comic. 266 of them went through the review pile one at a time; the
 remaining 1,784 were approved as proposed in one batch, at the owner's
 instruction, after the corpus had settled the casing (D62).
 
-**It is not in the repo.** The decisions live in the artifact's database and
-nothing reads them back out — `review-rows.py` runs one way, `seed` to page.
-**Writing that exporter is the next MVP step**, and it is worth doing whatever
-the licence question decides, because the alternative is 2,204 human judgements
-held in one web page's store. What it owes: the eight-column TSV `seed` writes,
-the frozen key rule untouched (invariant 10), `skip` rows omitted, and a run of
-`check-mappings` over the result.
+**It is in the repo now**, at `review/humble-decisions.tsv` — 2,199 rows,
+2,031 distinct keys, 680 series, 205 KB — with the five not-a-comic rows beside
+it and `review/README.md` carrying the provenance. `scripts/export-decisions.py`
+made it from a dump of the artifact's `decisions` collection; it judges nothing
+and never recomputes a key, because the frozen key rule has one implementation
+and `review-rows.py` already had to delete a Python copy of it.
+
+**It is validated through the real gates, not a second implementation of
+them.** Copying it to `data/mappings/humble.tsv` and adding it to
+`SHIPPED_FILES` makes `cargo test --workspace` report **606 passed, 0 failed**:
+`MappingRow::validate` over every row, `find_key_collisions` over the joined
+table including the 12 marketplace rows, and the frozen key pin. Both changes
+were reverted. That is also the whole of what shipping it takes — a `git mv`,
+one `include_str!`, an array size — once the licence question is answered.
+
+**`review/` is deliberately not `data/mappings/`.** A file there is
+`include_str!`-embedded, which is an act of shipping, and
+`every_tsv_in_data_mappings_is_embedded` fails on arrival to say so. That test
+is how this placement was decided rather than argued.
 
 Three things the finished review established, each measured rather than assumed:
 
