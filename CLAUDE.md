@@ -199,7 +199,11 @@ done   D59-D61  single issues are first class: an `issue` column, rendered as
                sibling of the same verified title vouches for it
 done   D62  a shouting series is settled by the corpus where case alone decides
                it, guessed and still reviewed where the corpus is silent
-todo   T15  Homebrew — see below
+todo   T15  Homebrew — the release workflow and the formula are done and
+               tested; three owner steps remain. Deferred behind the MVP
+               on 2026-10-27. See "Task 15, Homebrew" below.
+todo   the review's 2,204 decisions exist only in the artifact store. Nothing
+       reads them back into a TSV yet — that exporter is the next MVP step.
 ```
 
 ### Single issues, and the issue column (D59-D61)
@@ -647,6 +651,17 @@ name above.
 
 ### Pick up here
 
+**MVP first. The owner's call, 2026-10-27: Homebrew is a launch item, not an
+MVP item.** The release workflow and the formula are done and tested, so that
+work is parked rather than unfinished — "Task 15, Homebrew" below holds the
+three owner steps and every measurement, so none of it has to be re-derived.
+
+**0. The next MVP step is the review exporter.** The Humble table is fully
+decided — 2,204 of 2,204 — and every one of those judgements lives in the
+artifact's database and nowhere else. See "2. The Humble table review" below
+for what the exporter owes. It is worth writing whatever the licence question
+decides, because the risk is not the licence, it is one web page's store.
+
 **-1. The casing rule is merged, pushed and green.** Three commits went to
 `main` on 2026-10-27 — `98bab1b` (hide skipped), `71f480b` (the all-caps class
 and confirm-what-is-shown) and `cee4822` (D62, the corpus casing). **CI run
@@ -800,12 +815,13 @@ exception; the entry's own summary sentence no longer describes it.
 
 ### Owner's calls on the backlog, 2026-10-25
 
-- **The Homebrew formula is a release blocker.** It is for people who do not want
-  to run `cargo`, so `cargo install --path crates/cli --locked` working is not a
-  substitute. Not to be fixed now; **no release ships without it.** The standing
-  warning holds: do not write it in a session that cannot run
-  `brew install --build-from-source`, because this repo has been wrong about a
-  packaging claim three times.
+- **The Homebrew formula is a release blocker, and the code side is now done.**
+  It is for people who do not want to run `cargo`, so
+  `cargo install --path crates/cli --locked` working is not a substitute, and
+  **no release ships without it.** As of 2026-10-27 the release workflow exists
+  and the formula has been installed and audited locally; what remains is three
+  owner steps (public repo, a tag, a tap repo named `homebrew-tap`). Deferred
+  behind the MVP by the owner on 2026-10-27. See "Task 15, Homebrew" below.
 - **Kavita is dropped until a user asks.** The research in
   `docs/research/2026-10-23-kavita-from-source.md` stands and the finding is real
   — 890 of 2,223 rows would become one-book series — but nobody is waiting on it.
@@ -853,11 +869,35 @@ repository is a different use, and nobody has answered whether it is allowed.
 **This gates release, not development.** Building and reviewing the table locally
 does not wait on it; publishing it does. (D51, rebuild §10)
 
-**2. The Humble table review. In progress: 393 decided, 27 left in the
-pile.** The pile is 266 rows of 2,204 (see "What ships" above for the class
-table); the other 1,938 are the scan stack, which no decision is recorded
-against. 5 rows are marked not-a-comic. Counted from the artifact's store on
-2026-10-27, with 0 orphans.
+**2. The Humble table review is complete: 2,204 of 2,204 decided**, counted
+from the artifact's store on 2026-10-27 with 0 orphans, 0 malformed rows and 5
+marked not-a-comic. 266 of them went through the review pile one at a time; the
+remaining 1,784 were approved as proposed in one batch, at the owner's
+instruction, after the corpus had settled the casing (D62).
+
+**It is not in the repo.** The decisions live in the artifact's database and
+nothing reads them back out — `review-rows.py` runs one way, `seed` to page.
+**Writing that exporter is the next MVP step**, and it is worth doing whatever
+the licence question decides, because the alternative is 2,204 human judgements
+held in one web page's store. What it owes: the eight-column TSV `seed` writes,
+the frozen key rule untouched (invariant 10), `skip` rows omitted, and a run of
+`check-mappings` over the result.
+
+Three things the finished review established, each measured rather than assumed:
+
+- **Every key agrees with itself.** 0 keys whose rows disagree on a field,
+  which is exactly what `find_key_collisions` refuses, so the table would
+  survive a contribution as it stands.
+- **No series is spelled two ways.** Eight were, across 58 rows, and all eight
+  were normalised to the corpus's spelling on 2026-10-27 — including a bare
+  `Attack on Titan:` with a trailing colon on 20 rows, and four spellings of
+  `B.P.R.D. Hell on Earth`. Each pair would have produced two Komga folders.
+  The genuine sub-series keep their colons, as the corpus records them.
+- **Seven rows were approved against the generator and with the owner.**
+  `East Of West` and `W0rldtr33` were proposed, but the owner had already typed
+  `East of West` and `w0rldtr33` for other rows of the same series, so his
+  spelling was applied to the rest. A keystroke outranks a lookup (D50, D51),
+  and that holds for the owner's own earlier keystroke too.
 
 **`map` is not the tool for it, and the owner chose a page instead.** `map`'s
 `Entry` holds a filename and the resolver's candidates and never reads
@@ -927,13 +967,65 @@ writing PDF metadata is the more direct fix for both problems. **All of this is
 read from source and was not confirmed against a running Kavita**, which the
 research flags itself.
 
-**Task 15, Homebrew.** `cargo install --path crates/cli --locked` works and is
-what the README documents, so the tool is installable today; the formula is the
-convenience, not the gate. Do not write it blind. This repo has been wrong about
-a packaging claim three times now, and a formula that cannot be
-`brew install --build-from-source`-tested in the session that writes it is the
-next instance waiting to happen. The formula must state Rust 1.88 and the C
-toolchain.
+### Task 15, Homebrew: before launch, after the MVP
+
+**The code side is done and tested. Three steps are the owner's, and none of
+them is work I can do.** Deferred on 2026-10-27 so the MVP lands first; the
+measurements below are recorded so nobody re-derives them.
+
+`.github/workflows/release.yml` fires on a `v*` tag, builds both macOS slices
+on one arm64 runner, `lipo`s them into a universal2 binary, attaches the
+tarball to the release, and prints the complete formula with its url and
+sha256 filled in. `workflow_dispatch` runs everything but the publish.
+
+What the owner has to do, in order:
+
+1. **Make the repo public**, or at least the release assets — a formula fetches
+   a plain HTTPS tarball. This also decides whether the Humble titles in the
+   tests and docs should be world-readable; D31 sanctions them *in the repo* as
+   test data, and a public repo is arguably a different use. Adjacent to the
+   licence item, not the same one.
+2. **Tag `v0.1.0`.** The workflow refuses a tag that disagrees with
+   `crates/cli/Cargo.toml`.
+3. **Create `bsns-casual/homebrew-tap`** — that exact repo name, because brew
+   expands `user/tap/name` to `github.com/user/homebrew-tap` and the whole
+   point is that `brew install bsns-casual/tap/comic-renamer` is the entire
+   command. Name it `homebrew-comic-renamer` and the user types the name twice.
+
+**A prebuilt binary, not a source build, and not a cask.** Each leg measured
+2026-10-27:
+
+```
+cold release build     20.8s     binary 6.9 MB, tarball 6.3 MB
+x86_64 cross-compile    17.0s    on an arm64 host, bundled SQLite and ring included
+brew install            1s       from a local tap over a file:// tarball
+```
+
+- The compile is nothing; `depends_on "rust" => :build` is the whole cost,
+  because brew would download a toolchain to produce 6.9 MB. `cargo install
+  --path crates/cli --locked` already serves people who want to build it.
+- The cross-compile working on one host is why there is one job and why the
+  formula needs no `on_arm`/`on_intel` blocks.
+- **A cask would be worse, not better.** `brew install --cask` quarantines, so
+  an unsigned binary needs notarization and a paid Apple account. A formula's
+  tarball is fetched with curl and is not quarantined.
+
+**The standing warning was honoured, by a different route than it names.** The
+formula could not be `--build-from-source`-tested, because it ships a prebuilt
+binary and has no source path. It was tested the way such a formula can be:
+`brew tap-new bsns-casual/tap`, a `file://` url, a real `brew install`. It
+installs in 1s, runs from an unrelated directory — the Layer B bug
+`include_str!` closed, re-checked against the installed binary — and
+`brew test` passes. **`brew audit --strict` found two real problems on the
+first cut**: an explicit `version` is redundant, since brew reads it from the
+asset filename, and the line sat in the wrong position. The emitted text now
+passes `brew style` and `brew audit --strict` clean. The test install and the
+tap were removed again.
+
+Two things to know when picking this up: `gzip` records an mtime, so a rebuilt
+tarball hashes differently and will not match a formula already in the tap; and
+this machine has a `cargo install`ed binary in `~/.cargo/bin` that brew's
+`/opt/homebrew/bin` copy would shadow.
 
 ### Known gaps
 
