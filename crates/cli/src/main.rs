@@ -20,7 +20,7 @@ use comic_renamer_core::preset::{preset_by_id, Preset};
 use comic_renamer_core::resolve::{context_for, suggest_with};
 use comic_renamer_core::types::{
     human_bytes as size, Aside, Collision, Mechanism, Mode, PlanRow, Progress, ScanOpts,
-    Status,
+    Status, Suggestion,
     UndoReport,
 };
 use comic_renamer_core::{apply, komga_api, plan, record, scan, undo};
@@ -320,9 +320,33 @@ fn suggest_for(unmapped: &[PathBuf], marketplace: &str, folder: &str, lang: &str
     println!("
 guesses for the unmapped files (nothing is saved):");
     for (stem, found) in guesses.iter().take(COLLISIONS_SHOWN) {
-        let shown: Vec<String> = found.iter().map(|s| s.series.clone()).collect();
-        let shown = if shown.is_empty() { "no guess".to_string() } else { shown.join(" | ") };
-        println!("    {stem}  ->  {shown}");
+        println!("    {stem}  ->  {}", series_line(found));
+    }
+}
+
+/// Every series name in `found`, in rank order, each one once.
+///
+/// Collapsed because the series is all this line shows. The corpus holds 21
+/// `Popeye` records that differ only in `volume_count`, so one entry each
+/// printed `Popeye` twenty times and `Pop-Eye` once — 230 characters saying
+/// one thing.
+///
+/// Deliberately *not* fixed upstream in the resolver: `map`'s picker renders
+/// each candidate's volume, issue and subtitle as well, and
+/// `table::run_length` reads a `volume_count` off the same list. Collapsing
+/// there would throw away fields those two read. This line reads only the
+/// series, so this line is where the duplicates are duplicates.
+fn series_line(found: &[Suggestion]) -> String {
+    let mut shown: Vec<&str> = Vec::new();
+    for s in found {
+        if !shown.contains(&s.series.as_str()) {
+            shown.push(&s.series);
+        }
+    }
+    if shown.is_empty() {
+        "no guess".to_string()
+    } else {
+        shown.join(" | ")
     }
 }
 
@@ -424,11 +448,19 @@ fn run_apply(
         // prompt over a run that will move nothing teaches the user that the
         // prompt does not mean anything.
         print!("{}", nothing_to_do(&facts));
-        if rows.is_empty() {
+        // No rows *and* nothing left unmapped is the one no-op that succeeded:
+        // the plan asked for nothing, so nothing is outstanding. `scan` writes
+        // exactly this plan for an empty folder.
+        //
+        // Every other way of placing zero files leaves work undone — a row
+        // refused, or a file `scan` never planned — and a caller cannot tell
+        // "the library now matches the plan" from "it does not" out of an exit
+        // code that is zero either way. `rows.is_empty()` alone used to decide
+        // this, which made a bundle where *every* file was unmapped exit zero:
+        // the loudest possible "I did nothing", reported as success.
+        if rows.is_empty() && facts.not_ready == 0 {
             return Ok(None);
         }
-        // A caller cannot tell "the library now matches the plan" from "it
-        // does not" out of an exit code that is zero either way.
         return Err("nothing was placed".into());
     }
 
@@ -1057,6 +1089,36 @@ mod tests {
         assert_ne!(other[0].1.first().map(|s| s.series.as_str()), Some("The Walking Dead"));
 
         assert!(guesses_for(&[], "fanatical", "x", "en", &overrides).is_empty());
+    }
+
+    /// Measured against the real corpus before this was written: the stem
+    /// `popeyevolume1_oliveoylandhersweety` returns 21 candidates whose
+    /// series, volume, issue and subtitle are identical bar one `Pop-Eye`,
+    /// differing only in `volume_count`. This line shows none of those other
+    /// fields, so it showed one word twenty times.
+    #[test]
+    fn the_guess_line_names_each_series_once_in_rank_order() {
+        let cand = |series: &str, volume_count: u32| Suggestion {
+            series: series.into(),
+            volume: Some(1),
+            issue: None,
+            subtitle: None,
+            volume_count: Some(volume_count),
+            source: comic_renamer_core::types::SuggestionSource::Corpus,
+        };
+
+        // The shape the corpus really returns: one distinct name, repeated,
+        // with a different `volume_count` each time.
+        let popeye = [cand("Popeye", 65), cand("Popeye", 12), cand("Pop-Eye", 21), cand("Popeye", 8)];
+        assert_eq!(series_line(&popeye), "Popeye | Pop-Eye");
+
+        // Rank order survives: the top suggestion stays first, so collapsing
+        // cannot promote a lower-ranked name. A sort would put `Pop-Eye`
+        // first.
+        let reversed = [cand("Pop-Eye", 21), cand("Popeye", 65)];
+        assert_eq!(series_line(&reversed), "Pop-Eye | Popeye");
+
+        assert_eq!(series_line(&[]), "no guess");
     }
 
     #[test]

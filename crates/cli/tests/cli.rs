@@ -568,6 +568,55 @@ fn a_run_that_places_nothing_does_not_offer_an_undo() {
     );
 }
 
+/// `scan` plans no row for a file it cannot map, so a bundle the mapping
+/// knows nothing about yields a plan with no rows and a non-zero `unmapped`.
+/// Observed on a real 8-file Humble folder: `apply` printed "Needs a human: 8
+/// rows" and exited **0**, because the branch keyed on `rows.is_empty()`
+/// alone. That is the loudest possible no-op reported as success, and it is
+/// the pre-prompt refusal whose exit code
+/// `a_run_that_places_nothing_does_not_offer_an_undo` says is non-zero.
+///
+/// The empty plan is checked in the same test, because it is the one that
+/// must stay zero and the two differ by one field.
+#[test]
+fn a_rowless_plan_exits_zero_only_when_nothing_was_unmapped() {
+    let f = fixture(Mode::Move);
+
+    let header = |unmapped: u64| PlanHeader {
+        version: comic_renamer_core::plan::PLAN_VERSION,
+        preset: "komga".into(),
+        mode: Mode::Move,
+        source_root: f.source.clone(),
+        dest_root: f.dest.clone(),
+        lang: "en".into(),
+        required_bytes: 0,
+        download_bytes: 0,
+        unmapped,
+        checksum: String::new(),
+    };
+
+    // Eight files `scan` refused to plan. Work was asked for; none was done.
+    let refused = f.source.parent().unwrap().join("refused.jsonl");
+    comic_renamer_core::plan::write(&header(8), &[], &refused).unwrap();
+    let out = run_in(&f, &["apply", refused.to_str().unwrap(), "--yes"], "");
+    let said = stdout(&out) + &stderr(&out);
+    assert!(
+        !out.status.success(),
+        "a plan that placed none of its 8 unmapped files exited zero:\n{said}"
+    );
+    assert!(said.contains("Needs a human: 8 rows"), "{said}");
+
+    // An empty folder: nothing asked, nothing outstanding.
+    let empty = f.source.parent().unwrap().join("empty.jsonl");
+    comic_renamer_core::plan::write(&header(0), &[], &empty).unwrap();
+    let out = run_in(&f, &["apply", empty.to_str().unwrap(), "--yes"], "");
+    assert!(
+        out.status.success(),
+        "an empty plan asked for nothing and must not fail:\n{}",
+        stderr(&out)
+    );
+}
+
 /// A record is a file the tool owns. The run says it can be reversed and
 /// names no path: a printed path invites being handed back in, and a path the
 /// user supplies is the authority the record store exists to take away.
