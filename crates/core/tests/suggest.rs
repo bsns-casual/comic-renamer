@@ -62,16 +62,59 @@ fn the_filename_strategy_is_wrong_for_die_loaded_and_that_is_expected() {
     assert_ne!(s[0].series, "DIE");
 }
 
+/// Ambiguity still yields several suggestions rather than a refusal — but the
+/// records have to be ambiguous in a way a `Suggestion` can *express*.
+///
+/// This fixture used to be three `Velvet` rows differing in publisher and year
+/// and it asserted `len() == 3`. A `Suggestion` carries neither field, so all
+/// three were identical and the assertion pinned the duplicate-candidate bug
+/// rather than ambiguity: `map`'s picker offered three lines nobody could tell
+/// apart. Two distinguishable names behind one key is the real-world shape —
+/// `Popeye` and `Pop-Eye` both squash to `popeye`.
 #[test]
 fn ambiguity_becomes_several_suggestions_not_a_refusal() {
     let (_d, c) = corpus(&[
         ("Velvet", "velvet", "Malibu", "en", 1993, 4),
-        ("Velvet", "velvet", "Image", "en", 2013, 15),
+        ("Vel-Vet", "velvet", "Image", "en", 2013, 15),
         ("Velvet", "velvet", "Image", "en", 2014, 3),
     ]);
     let s = suggest("velvet", "Humble", Some(&c));
-    assert_eq!(s.len(), 3);
+    assert_eq!(s.len(), 2, "two names, not three records: {s:?}");
+    assert_eq!(
+        (s[0].series.as_str(), s[1].series.as_str()),
+        ("Velvet", "Vel-Vet"),
+        "first-occurrence order, never sorted"
+    );
     assert!(s.iter().all(|x| x.source == SuggestionSource::Corpus));
+}
+
+/// The bug this collapse exists for, in the shape it was found in. Measured
+/// against the real release on 2026-10-29: the Popeye stem returned 21
+/// candidates, 20 of them the literal string `Popeye`, differing only in
+/// `volume_count` — a field the picker does not render. `table::run_length`
+/// then took whichever sorted first.
+///
+/// Highest wins (owner, 2026-10-30): `volume_count` only sets the zero-pad
+/// width, `max(2, digits)`, so below volume 100 the choice is invisible and
+/// above it the highest is the only value that cannot under-pad a real run.
+#[test]
+fn candidates_differing_only_in_volume_count_collapse_to_the_highest() {
+    let (_d, c) = corpus(&[
+        ("Popeye", "popeye", "Fantagraphics", "en", 2012, 4),
+        ("Popeye", "popeye", "Dell", "en", 1948, 65),
+        ("Popeye", "popeye", "Gold Key", "en", 1962, 7),
+        ("Pop-Eye", "popeye", "Elsewhere", "en", 1935, 21),
+    ]);
+    let s = suggest("popeye", "Humble", Some(&c));
+
+    assert_eq!(s.len(), 2, "{s:?}");
+    assert_eq!(s[0].series, "Popeye");
+    assert_eq!(s[0].volume_count, Some(65), "the highest of 4, 65 and 7");
+    // A different spelling is a genuine choice and is never merged away:
+    // invariant 7's case-folding decides whether two paths collide, not
+    // whether two names a user is picking between are one name.
+    assert_eq!(s[1].series, "Pop-Eye");
+    assert_eq!(s[1].volume_count, Some(21));
 }
 
 #[test]
@@ -100,3 +143,4 @@ fn only_humble_consults_the_corpus() {
     let s = suggest("witcheromnibus", "Humble", Some(&c));
     assert_eq!((s[0].series.as_str(), s[0].source), ("The Witcher Omnibus", SuggestionSource::Corpus));
 }
+

@@ -71,11 +71,59 @@ pub fn suggest_with(
         if let Some(found) = corpus.and_then(|c| corpus_ladder(stem, c, ctx)) {
             // `Some(empty)` is a refusal (wrong language, infeasible volume):
             // the corpus knew the series and said no. A filename guess would
-            // be the silent fallback D33 forbids.
-            return found;
+            // be the silent fallback D33 forbids. Collapsing an empty vec
+            // leaves it empty, so the refusal survives.
+            return collapse_by_volume_count(found);
         }
     }
     filename_suggestion(stem, marketplace, is_humble).into_iter().collect()
+}
+
+/// Collapse candidates that differ only in `volume_count`, keeping the highest.
+///
+/// The corpus holds one record per series *run*, so a stem matching a long-lived
+/// title comes back as the same name many times over. Measured against the real
+/// release: `popeyevolume1_oliveoylandhersweety` returns **21** candidates of
+/// which 20 are the literal string `Popeye`, and `willieandjoe_thewwiiyears`
+/// returns **2** identical in every field the picker renders. Those were never
+/// choices — `map`'s picker offered lines nobody can tell apart, and
+/// `table::run_length` took the `volume_count` of whichever happened to sort
+/// first (`Popeye` stored 4, out of a set spanning 1 to 65).
+///
+/// Highest wins by the owner's call of 2026-10-30, and the reason it is a safe
+/// default rather than an arbitrary one: `volume_count` only sets the zero-pad
+/// width, which is `max(2, digits)`. Below volume 100 every value in such a set
+/// gives the same width, so the choice is invisible; above it, the highest is
+/// the only one that cannot under-pad a genuine long run (D44).
+///
+/// Two things this deliberately does not do. It compares `series` **literally**,
+/// so `Popeye` and `Pop-Eye` stay two candidates — invariant 7's case-folding is
+/// for deciding whether two paths collide, not for merging two spellings a user
+/// may be choosing between. And it keeps **first-occurrence order**, never
+/// sorting, because the head of this list is the top suggestion and a sort would
+/// promote whatever happens to be alphabetically first.
+fn collapse_by_volume_count(found: Vec<Suggestion>) -> Vec<Suggestion> {
+    let mut out: Vec<Suggestion> = Vec::with_capacity(found.len());
+    for s in found {
+        let same = out.iter_mut().find(|k| {
+            k.series == s.series
+                && k.volume == s.volume
+                && k.issue == s.issue
+                && k.subtitle == s.subtitle
+                && k.source == s.source
+        });
+        match same {
+            // `None < Some(_)` in `Option`'s own ordering, so a record that
+            // carries a count beats one that carries none, and the largest
+            // count wins among those that do.
+            Some(kept) if s.volume_count > kept.volume_count => {
+                kept.volume_count = s.volume_count;
+            }
+            Some(_) => {}
+            None => out.push(s),
+        }
+    }
+    out
 }
 
 /// Title-case a kebab or snake stem and parse it. The marketplace only decides
