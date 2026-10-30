@@ -1,12 +1,11 @@
 # Comic Renamer
 
-Tidy up the comics you bought and downloaded, into the layout your library app
+Rename the comics you bought and downloaded into the layout your library app
 expects.
 
-If you buy digital comics from **Humble Bundle**, **Fanatical**,
-**DriveThruComics**, **GlobalComix**, **Sweet Shop** or anywhere similar, you
-end up with a folder of files named however that storefront happened to name
-them. Real examples, from the test data:
+Buy digital comics from **Humble Bundle**, **Fanatical**, **DriveThruComics**,
+**GlobalComix**, **Sweet Shop** or anywhere similar, and you get a folder of
+files named however that storefront named them. Four from the test data:
 
 ```
 popeyevolume1_oliveoylandhersweety.cbz
@@ -15,17 +14,15 @@ hammer-head-1_release-0001_978-1-5458-3063-5.pdf
 die-loaded-issue-1.pdf
 ```
 
-Your library app wants a folder per series and filenames that sort. This
-bridges the two.
+Your library app wants a folder per series and filenames that sort. Point it at
+a folder, pick your app, and it reads every filename and shows you the rename it
+proposes. Nothing moves until you approve the plan. It flags the
+files it cannot identify so you can name them yourself.
 
-It is for comics you legally purchased and downloaded, and it **never downloads
-a comic** — it only reads the names of files you already have. Its suggestions
-come from a public comics database (which it does fetch, once, and hash-checks)
-and from titles people have confirmed by hand.
-
-Point it at a folder, pick your app, and it identifies each file and shows you
-every proposed rename. Nothing moves until you approve the plan. Files it cannot
-identify are flagged for review rather than guessed at.
+Use it on comics you bought. It **never downloads a comic**; it reads the names
+of files you already have. The suggestions come from two places: a public
+comics database, which it fetches once and hash-checks, and titles people have
+confirmed by hand.
 
 **Status: `map`, `scan`, `apply`, `undo` and a startup menu work. Komga is the
 only preset.** See [`docs/specs/`](docs/specs/) for the design and
@@ -33,7 +30,7 @@ only preset.** See [`docs/specs/`](docs/specs/) for the design and
 
 ## Install
 
-**macOS only.** Not a packaging decision — the execution layer calls
+**macOS only.** This is not a packaging decision. The execution layer calls
 `clonefile(2)`, `renamex_np` and `std::os::macos::fs`, with no `cfg` gating
 and no fallback path, so there is nothing to build elsewhere. Developed and
 tested on Apple Silicon.
@@ -45,8 +42,8 @@ brew trust --formula bsns-casual/tap/comic-renamer
 brew install bsns-casual/tap/comic-renamer
 ```
 
-That installs a prebuilt universal2 binary — `lipo -archs` reports
-`x86_64 arm64` — rather than building from source. The compile is only about 20
+That installs a prebuilt universal2 binary rather than building from source;
+`lipo -archs` reports `x86_64 arm64`. The compile takes about 20
 seconds, but `depends_on "rust" => :build` would have brew download a whole
 toolchain to produce a 6.9 MB binary. It is a formula and not a cask because
 `brew install --cask` quarantines, which an unsigned binary cannot survive
@@ -75,7 +72,7 @@ call `gh` itself: it prints the commands for you to run, and `gh` is what they
 use. Nothing else needs it.
 
 `command not found: cargo` means the first prerequisite is missing, or your
-shell has not picked it up yet — open a new terminal, or `source ~/.cargo/env`.
+shell has not picked it up yet. Open a new terminal, or `source ~/.cargo/env`.
 An error out of `cc` or `libsqlite3-sys` means the second. Run `rustc --version`
 before anything else. The `rust-version` in `Cargo.toml` is 1.88 because six
 dependencies declare it, but an older toolchain does not report that. On 1.84.1
@@ -145,26 +142,27 @@ table exists as generated candidates and is held back for review (see
 [`CLAUDE.md`](CLAUDE.md)).
 
 A `map` or `scan` run with an unmapped Humble file downloads the corpus it
-guesses from on first need — a 34 MiB archive, hash-verified against
-[`corpus/manifest.json`](corpus/manifest.json) — and caches it in
+guesses from on first need, a 34 MiB archive hash-verified against
+[`corpus/manifest.json`](corpus/manifest.json), and caches it in
 `~/Library/Caches/comic-renamer`, where it unpacks to 97 MiB. A fully mapped
 bundle never needs it, and a failed download means "no guess", not an error.
 
-A file already at the destination is refused by name and left exactly as it is
-— never overwritten, never renamed around. Merging into a library that already
-holds some of these books is the ordinary case, not the awkward one, and the
+`apply` refuses a file already at the destination, names it, and leaves it
+exactly as it is: never overwritten, never renamed around. Merging into a
+library that already holds some of these books is the ordinary case, and the
 disclosure says which ones before you confirm. **That kind of refusal exits
 zero**: the file is where the plan wants it, so the library matches and
 re-running changes nothing.
 
 Two rows wanting one name is different. Nothing fixes it but renaming a file,
-so `apply` says which rows and **exits non-zero** — including when the rest of
+so `apply` says which rows and **exits non-zero**, including when the rest of
 the run placed fine. A run that can place nothing at all tells you why and
 exits non-zero too.
 
-Editing the plan means editing the **metadata** — the series, the volume, the
-subtitle. It does not mean editing paths: the destination is recomputed from
-metadata every time, so a path typed into a plan file is ignored rather than
+Editing the plan means editing the **metadata**: the series, the volume, the
+subtitle. It does not mean editing paths. `apply` recomputes the destination
+from metadata every time, so it ignores a path typed into a plan file rather
+than
 obeyed. That is deliberate, and it is what makes a plan safe to hand to an AI
 assistant or attach to a pull request.
 
@@ -199,7 +197,7 @@ earlier run was interrupted, or a finished one is still reversible, the menu
 offers to reverse it first. Press `q` to quit. Quitting declines the undo of a
 run you started in that session, and it is deleted.
 
-**Moving is the default, and it is destructive by design** — a same-volume move
+**Moving is the default, and it is destructive by design.** A same-volume move
 is a `rename`, which costs nothing and cannot truncate a multi-gigabyte PDF
 halfway. Every run records what it did as it goes, in a directory the tool
 keeps for itself, so an interrupted run is still reversible.
@@ -207,21 +205,21 @@ keeps for itself, so an interrupted run is still reversible.
 ### Before you point it at a Komga library
 
 A rename is a delete-plus-add to Komga, which rematches by size and then by
-hash. **Hashing has to already be on** — switching it on afterwards cannot help,
-because a deleted record can never acquire a hash. Pass `--komga-url` and the
-check is done for you, and refuses rather than warns.
+hash. **Hashing has to already be on.** Switching it on afterwards cannot help,
+because a deleted record can never acquire a hash. Pass `--komga-url` and it
+checks for you, and refuses rather than warns.
 
 Komga is the only preset, and its layout does not suit Kavita. Komga names a
 series from its folder; Kavita names it from the filename, so the Komga layout
 splits a Kavita library into one-book series for roughly 40% of a Humble bundle.
-This was read from Kavita's source, not tested against a running Kavita. See
+This comes from reading Kavita's source, not from testing a running Kavita. See
 [`docs/research/2026-10-23-kavita-from-source.md`](docs/research/2026-10-23-kavita-from-source.md).
 
 ## How it works
 
 Comic marketplaces publish the real title next to every download, so the title
-is a known quantity. The filename is often squashed and unhelpful —
-`hellboyomnibusvolume1_seedofdestruction.pdf` — and sometimes the characters
+is a known quantity. The filename is often squashed and unhelpful, like
+`hellboyomnibusvolume1_seedofdestruction.pdf`, and sometimes the characters
 that carry the title are already gone. Fanatical ships
 `HackSlash Back to School.cbz` for *Hack/Slash: Back to School*. No inference
 recovers a slash that is not in the input.
@@ -247,7 +245,7 @@ guess costs you some typing, not a misfiled file.
 
 ## Contributing mappings
 
-A mapping row holds metadata only — never a path. When you say yes at the end of
+A mapping row holds metadata only, never a path. When you say yes at the end of
 a `map` session, it writes the rows you approved to a file under
 `~/Library/Application Support/comic-renamer/contributions` and prints the
 `gh` and `git` commands that fork the repository and open a pull request. It
@@ -257,7 +255,7 @@ runs none of them. Rows you corrected and chose not to contribute stay local.
 
 [ComicTagger](https://github.com/comictagger/comictagger) already does filename
 splitting, template renaming and metadata tagging, and does them well. The gap
-this fills is narrower: **collected editions — omnibuses, trades, archives —
+this fills is narrower: **collected editions (omnibuses, trades, archives)
 renamed from the filename alone, without opening multi-gigabyte files.**
 
 ## Credits
