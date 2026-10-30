@@ -28,8 +28,8 @@ of files you already have. The suggestions come from two places: a public
 comics database, which it fetches once and hash-checks, and titles people have
 confirmed by hand.
 
-**Status: `map`, `scan`, `apply`, `undo` and a startup menu work.
-[Komga](https://komga.org) is the only preset.** See
+**Status: released as v0.1.0. `map`, `scan`, `apply`, `undo` and a startup
+menu work. [Komga](https://komga.org) is the only preset.** See
 [`docs/specs/`](docs/specs/) for the design and
 [`docs/research/`](docs/research/) for the measurements behind it.
 
@@ -168,13 +168,14 @@ no mapping stays where it is.
 
 Shipped coverage is small today: 12 titles, from Fanatical, Global Comix and
 Sweet Shop. For most bundles, `map` asks about every file. A much larger Humble
-table exists as generated candidates and is held back for review (see
-[`CLAUDE.md`](CLAUDE.md)).
+table was built and reviewed, then deliberately left out of this repository —
+[`review/README.md`](review/README.md) says why, and what would have to happen
+for it to ship.
 
 A `map` or `scan` run with an unmapped Humble file downloads the corpus it
 guesses from on first need, a 34 MiB archive hash-verified against
 [`corpus/manifest.json`](corpus/manifest.json), and caches it in
-`~/Library/Caches/comic-renamer`, where it unpacks to 97 MiB. A fully mapped
+`~/Library/Caches/comic-renamer`, where it unpacks to 98 MiB. A fully mapped
 bundle never needs it, and a failed download means "no guess", not an error.
 
 `apply` refuses a file already at the destination, names it, and leaves it
@@ -186,8 +187,17 @@ re-running changes nothing.
 
 Two rows wanting one name is different. Nothing fixes it but renaming a file,
 so `apply` says which rows and **exits non-zero**, including when the rest of
-the run placed fine. A run that can place nothing at all tells you why and
-exits non-zero too.
+the run placed fine. The same goes for a run that places nothing because every
+file still needs a name.
+
+The exit code answers one question: does the library now match the plan?
+
+| | Exit |
+|---|---|
+| Anything was placed, even with files left unnamed | `0` |
+| Nothing was placed, because it is all already in the library | `0` |
+| Nothing was placed, and something still needs you | non-zero |
+| Some rows placed, but a clash needs you | non-zero |
 
 Editing the plan means editing the **metadata**: the series, the volume, the
 subtitle. It does not mean editing paths. `apply` recomputes the destination
@@ -322,6 +332,11 @@ GCD does not endorse this project.
 
 ## Licence
 
-Code [GPL-3.0-or-later](LICENSE). Corpus data CC BY-SA 4.0, per its source. The licence for
-publishing titles taken from Humble's order API as a dataset is not settled;
-that question gates a release.
+Code [GPL-3.0-or-later](LICENSE). Everything in [`data/`](data/LICENSE) is
+CC BY-SA 4.0, attributed to the Grand Comics Database, because the corpus it
+draws on requires it.
+
+The larger Humble table is not published here, and that was never a licence
+question. Whether a 2,000-row compilation pulled from a storefront's order
+history may be redistributed is that storefront's terms, not copyright, so the
+table was removed rather than licensed.
