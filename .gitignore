@@ -19,3 +19,14 @@ corpus/cache/
 # `git status` on `main` during a worktree session listed the whole tree as
 # untracked -- one `git add -A` from committing a copy of the repo into itself.
 .claude/worktrees/
+
+# No mapping table lives anywhere but `data/decisions.tsv` (D63). This exists
+# because the validation maneuver `review/README.md` describes -- copy the
+# reviewed Humble table into `data/` and run the real gates -- leaves an
+# untracked, licence-gated 205 KB file behind if it is interrupted, and the
+# repository is going public for Homebrew. The guards that refuse such a file
+# are `the_decisions_file_is_the_one_that_ships` and `cargo xtask
+# check-mappings`; this is the belt to their braces.
+data/mappings/
+data/**/*.tsv
+!data/decisions.tsv

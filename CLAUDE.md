@@ -6,7 +6,7 @@ identifies each file, shows a reviewable plan, and changes nothing until the use
 approves it.
 
 **Read `docs/specs/2026-10-19-comic-renamer-design.md` before changing anything.**
-Its §13 decision log records every call and why; D1–D62. If you think a decision
+Its §13 decision log records every call and why; D1–D68. If you think a decision
 is wrong, read its entry first — most have survived an adversarial review and the
 reasoning is written down. Say what's wrong with the reasoning rather than
 re-deciding silently.
@@ -423,17 +423,18 @@ each of which cost something to find:
 A missing corpus is "no guess", not an error (D49): `seed` prints one line and
 falls back to the parser for every row. `measure` still requires one.
 
-**Tests:** `cargo test --workspace` runs 610 and ignores 9 (counted 2026-10-30
-by `awk`-summing the `test result:` lines, which is the number to quote: 610
-passed, 0 failed, 9 ignored; 606 before the two fix commits of 2026-10-29 and
-2026-10-30, 596 before the casing rule, 537 before
+**Tests:** `cargo test --workspace` runs 612 and ignores 9 (counted 2026-10-30
+by `awk`-summing the `test result:` lines, which is the number to quote: 612
+passed, 0 failed, 9 ignored; 610 before the one-decisions-table change, 606
+before the two fix commits of 2026-10-29 and 2026-10-30, 596 before the casing
+rule, 537 before
 the issue column, 534 before
 the corpus-confirms-a-colon change, 530 before
 D58, 510 before a four-seat adversarial review, 500 before the whole-branch
 review's fix wave, 409 and 7 before session-scoped undo), with no compiler
 warnings. **The 595 this file carried until 2026-10-27 was one short** — it was
 summed by hand; the baseline measured mechanically on the same tree is 596.
-**The whole suite is 615, and the nine ignored have not been run since
+**The whole suite is 621, and the nine ignored have not been run since
 2026-10-26**, when the five volume-gated ones passed — the casing rule touches
 none of their code. See "What the volume-gated suite does and does not
 protect" above before assuming a change needs them. The nine `#[ignore]`d
@@ -712,8 +713,14 @@ when it needs a terminal.
   real 11 rows to `fanatical.tsv`: 610 passed, 0 failed. A marketplace with no
   shipped file now prints no commands, because none could work; that is Humble,
   `map`'s **default**, and the channel opens by itself the day `humble.tsv`
-  lands. `SHIPPED_MARKETPLACES` and `file_slug` in `mapping.rs` are the new
-  machinery, pinned against the directory both ways.
+  lands. `SHIPPED_MARKETPLACES` and `file_slug` in `mapping.rs` were the
+  machinery. **Read this bullet as history, not state: D63/D66 deleted most
+  of it the next day.** `SHIPPED_MARKETPLACES` is gone, the per-marketplace
+  append became one unconditional target, the "not open for this
+  marketplace" branch and its test are gone, and
+  `every_tsv_in_data_mappings_is_embedded` is now
+  `the_decisions_file_is_the_one_that_ships`. `file_slug` survives with one
+  caller, `branch_for`.
 
 **CI run 40976839595 is green on all six jobs**, `rust-corpus` and the
 volume-gated job among them — so **the full 619 have all been executed** on this
@@ -770,9 +777,14 @@ shortcut is a decision, and it belongs with the item-4 conversation.
 `review/humble-decisions.tsv` with its own README and the five not-a-comic rows
 beside it. Validated by embedding it as a shipped mapping and running the real
 suite: 606 passed, 0 failed. What remains is the licence question, which gates
-moving it into `data/decisions.tsv` — now an append and a `git rm`, since D63
-left one embedded file rather than an array. `review/README.md` still describes
-the old shape.
+moving it into `data/decisions.tsv`. **It is no longer a `git mv`, and a `git mv`
+would break every user's load**: the file still has the pre-D64 eight columns,
+which `parse_tsv` refuses outright, and its 2,199 rows hold 2,031 distinct keys,
+so 158 are repeats that `find_key_collisions` now refuses. Measured 2026-10-30:
+zero of those 158 disagree on fields 1-7, so collapsing them discards nothing.
+`review/README.md` carries the four real steps. Do not trust an older summary of
+this that says "one `include_str!` and an array size" — there is one of each
+now, and two data transformations before them.
 
 **The artifact's store is no longer the only copy.** If the review is reopened,
 re-dump the collection and re-run `scripts/export-decisions.py`; the export is
@@ -1090,18 +1102,31 @@ made it from a dump of the artifact's `decisions` collection; it judges nothing
 and never recomputes a key, because the frozen key rule has one implementation
 and `review-rows.py` already had to delete a Python copy of it.
 
-**It is validated through the real gates, not a second implementation of
-them.** Copying it to `data/mappings/humble.tsv` and adding it to
-`SHIPPED_FILES` makes `cargo test --workspace` report **606 passed, 0 failed**:
-`MappingRow::validate` over every row, `find_key_collisions` over the joined
-table including the 12 marketplace rows, and the frozen key pin. Both changes
-were reverted. That is also the whole of what shipping it takes — a `git mv`,
-one `include_str!`, an array size — once the licence question is answered.
+**It was validated through the real gates**, on 2026-10-27, by copying it to
+`data/mappings/humble.tsv` and adding it to `SHIPPED_FILES`: 606 passed, 0
+failed, covering `MappingRow::validate` over every row, `find_key_collisions`
+over the joined table, and the frozen key pin. Both changes were reverted.
 
-**`review/` is deliberately not `data/mappings/`.** A file there is
+**That validation predates D63 and so does the recipe it implied. Do not
+follow it.** `data/mappings/` is gone, and **`SHIPPED_FILES` does not exist in
+any code** — one `const SHIPPED` inside `shipped_mappings()` replaced it, so
+there is no array and no size to bump. Shipping the table now takes four steps
+and two of them are data transformations: drop field 8, collapse 2,199 rows to
+2,031 keys, append to `data/decisions.tsv`, `git rm` the old file.
+**`review/README.md` is the accurate copy of this** — an earlier version of
+this file said it "still describes the old shape", which was false and taught
+agents to distrust the one correct document.
+
+**`review/` is deliberately not `data/`.** A file under `data/` is
 `include_str!`-embedded, which is an act of shipping, and
-`every_tsv_in_data_mappings_is_embedded` fails on arrival to say so. That test
-is how this placement was decided rather than argued.
+`the_decisions_file_is_the_one_that_ships` fails on arrival to say so — **at
+the top level only.** A `.tsv` in a *subdirectory* of `data/` is seen by
+neither that test nor `cargo xtask check-mappings`: an adversarial seat planted
+this very 205 KB file at `data/mappings/humble.tsv` on 2026-10-30 and both
+gates stayed green, with a positive control at `data/stray.tsv` failing
+correctly. `.gitignore` now refuses to track such a file, and the walkers are
+being made recursive. Until they are, that is the hole, and it sits exactly
+where the licence question lives.
 
 Three things the finished review established, each measured rather than assumed:
 
@@ -1254,6 +1279,18 @@ this machine has a `cargo install`ed binary in `~/.cargo/bin` that brew's
 
 ### Known gaps
 
+- **A mapped row is never questioned, and there is no path to correct one.** A
+  key is a hash of a filename, so two different books with one filename
+  (`batman.cbz`) get one decision — and `lookup` answers confidently for both.
+  Nothing cross-checks a mapped row against what the resolver would have
+  guessed, `map` shows *unmapped* files only, and nothing prints the path to the
+  local file a user would have to hand-edit. **Pre-existing, not introduced by
+  D64**: a single-row key has always answered regardless of the folder. What
+  D64 removed was an accidental safety net in the two-row state, where `lookup`
+  returned `None` and the file came back as unmapped with a guess. Found by an
+  adversarial seat on 2026-10-30; the corrected reasoning is in that spec's D64.
+  Unreachable today — 12 shipped rows, no duplicate keys — and the fix is a
+  feature, not a patch.
 - **`scan` does not name `map`.** The rebuild's §6.1 says that when `scan` finds
   unmapped files it "reports the count and names `map`". Run 2026-10-23 on a
   folder with one unmapped file, `scan` printed the count, listed the file with a

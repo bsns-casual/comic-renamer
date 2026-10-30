@@ -1662,3 +1662,53 @@ The 128 settled rows leave the review pile and the 54 guessed ones stay in it.
 `data/mappings/` is byte-identical after a regeneration, so `DIE: Loaded` —
 which is a keystroke — is untouched, and the shipped table remains the one
 place a human decided every row.
+
+---
+
+**D63 — One shipped table, `data/decisions.tsv`.** The per-marketplace files
+were a fiction the code never believed: `find_key_collisions` always ran over
+the joined table and `lookup` keyed on a row's bundle rather than its file. One
+file also makes a size cap mean something, where a per-file cap over a growing
+set of marketplaces meant nothing. Full reasoning in
+`docs/specs/2026-10-30-one-decisions-table.md`.
+
+**D64 — One row per key; `bundle` leaves the shipped and local tables.**
+Measured over every decision the project holds: 2,211 rows, 2,043 distinct
+keys, 158 keys carrying more than one row, **zero of them disagreeing on any
+field**. `lookup` refuses a multi-row key by design, so those 158 resolved only
+for a user whose folder name matched a recorded bundle. 168 redundant rows go
+and nothing is discarded.
+
+An adversarial seat corrected this entry's first justification on the day it
+was written: the old two-row state did *not* fail silently — `lookup` returned
+`None`, which made the file unmapped and asked the user, this project's own
+safe default. The swap is "nobody gets an answer and everybody is asked" for
+"everybody gets an answer, and for one of them it is wrong and silent". It
+stands because the silent-wrong-title hazard is **pre-existing** — a key
+carrying one row has always answered regardless of the folder — and because
+what the two-row state gave was an accidental net in a state nobody designed
+for. The unaddressed gap, now in CLAUDE.md, is that a mapped row is never
+cross-checked and `map` offers no way to correct one.
+
+**D65 — Provenance is git history, not a column**, in the shipped table. A
+column recorded one folder name on one disk; git records the author, the date,
+the commit and the reasoning. The generator and the review tooling keep their
+`bundle`, because they identify rows by it — dropping it there would orphan
+2,204 stored decisions.
+
+**D66 — `SHIPPED_MARKETPLACES` and `shipped_mapping_path` are deleted.** They
+existed for one day, so a contribution could pick a marketplace file and refuse
+when none shipped. One unconditional target removes the question, and the
+"contributions are not open for this marketplace" branch with it.
+
+**D67 — The file cap is 4 MiB, and the constraint is the binary.** The table is
+`include_str!`-embedded, so it ships byte for byte. At 93 bytes a row that is
+about 45,000 decisions against a 6.9 MB binary. 8 MiB was proposed and rejected
+for doubling what Homebrew downloads to install a rename tool. Past 4 MiB the
+table should stop being embedded, which is a different change.
+
+**D68 — A key already in the table may only be changed, never duplicated.** The
+contribution gate rejects a pull request adding a key the table holds;
+correcting a decision edits its line. This is what makes a correction a
+readable diff instead of a second row somewhere in a 2,000-line file, and it is
+the half of D64 that does the work.

@@ -136,12 +136,23 @@ is indistinguishable from the 2026-10-23 regression it replaced.
 ### 2.3 A second session on the same folder
 
 `commit_session` merges a session's approved rows into the local file. On one
-row per key the rule is **the newer decision replaces the older one, in place**:
-the user mapped that filename again and typed something different, and a
-keystroke outranks an earlier keystroke of the same user's. It must be a
-replacement rather than an append, or the local file gains a duplicate key and
-stops loading — which is precisely the failure CLAUDE.md's invariant-7 note
-warns about, arriving by a different road.
+row per key the rule is **the newer decision replaces the older one, in place**.
+It must be a replacement rather than an append, or the local file gains a
+duplicate key and stops loading — which is precisely the failure CLAUDE.md's
+invariant-7 note warns about, arriving by a different road.
+
+**The motive first written here was wrong, and the rule is still right.** The
+draft said "the user mapped that filename again and typed something different".
+That cannot happen through `map`: a session is built from *unmapped* files only,
+and `scan_once` loads the local layer first, so any key already in the local
+file makes its file mapped and keeps it out of the session. What actually
+reaches the replacement is a concurrent second session — already marked
+`shortcut:` where the read-modify-write has no lock — or a hand-edited file.
+Worth knowing before anyone tries to exercise this path from the UI and
+concludes the code is dead.
+
+A consequence worth stating plainly: **there is no path through `map` to change
+a decision you have already made.** The file is mapped, so it is never offered.
 
 ## 3. What does not change
 
@@ -179,11 +190,40 @@ can no longer both be recorded. **Do not read the measurement as evidence this
 will not happen.** All 2,043 keys come from essentially one source — one
 person's Humble library plus twelve hand-confirmed marketplace rows — so the
 sample says almost nothing about a table fed by many contributors, where
-`batman.cbz` from two publishers is an ordinary event. The argument for D64 is
-not that collisions are impossible; it is that today's handling of one is
-*worse*: `lookup` refuses, both rows become unreachable for everyone whose
-folder name does not match, and nothing reports it. Under D64 the contribution
-gate refuses the second row and names the key, which a human can act on.
+`batman.cbz` from two publishers is an ordinary event.
+
+**Corrected 2026-10-30 after an adversarial review, because the first draft of
+this entry oversold itself.** It said the old handling was worse because "both
+rows become unreachable for everyone whose folder name does not match, and
+nothing reports it". The second half is false. Unreachable meant `lookup`
+returned `None`, which made the file **unmapped** — so it appeared in `map`
+with a guess and the user typed the title. That is this project's own safe
+default, and it is reporting, not silence.
+
+So the honest trade is: D64 swaps "nobody gets an answer and everybody is
+asked" for "everybody gets an answer, and for one of them it is wrong and
+silent". Three things make it still the right swap, and the third is the one
+that matters:
+
+1. All 158 of today's multi-row keys **agree on every field**, so for them the
+   new behaviour is strictly better — they resolve for everyone instead of for
+   nobody.
+2. A collision needs two genuinely different books with one squashed filename,
+   both contributed. Never once observed.
+3. **The silent-wrong-title hazard is pre-existing and D64 does not create
+   it.** A key carrying *one* row has always answered regardless of the folder
+   — the old `lookup`'s `[only] => Some(only)` arm ignored the bundle
+   entirely. So a wrong row has always produced a confident wrong rename. What
+   the two-row state provided was an *accidental* safety net, in a state nobody
+   designed for and the contribution gate already refused whenever the fields
+   disagreed within a bundle.
+
+What is genuinely not addressed, by this change or anything before it: a mapped
+row is never cross-checked against what the resolver would have guessed, and
+`map` only ever shows *unmapped* files — so a user handed a wrong title has no
+in-tool way to correct it, and nothing prints the path to the local file they
+would have to hand-edit. That is a real gap, it predates this change, and it is
+recorded in CLAUDE.md's known gaps rather than fixed here.
 
 **D65. Provenance is git history, not a column — in the shipped table.** A
 column records one folder name on one disk; git records the author, the date,
