@@ -241,7 +241,7 @@ pub fn contribution_tsv(entries: &[table::Entry], bundle: &str, lang: &str) -> R
 
 /// Single-quotes `s` for a shell unless it is plainly safe, for the commands
 /// printed as manual steps.
-fn quote(s: &str) -> String {
+pub(crate) fn quote(s: &str) -> String {
     if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "_./:=@%+,-".contains(c)) {
         return s.to_string();
     }

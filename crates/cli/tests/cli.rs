@@ -422,6 +422,45 @@ fn the_plans_unmapped_count_is_disclosed_by_the_binary() {
     assert!(out.contains("left where they are: 7 of 8 rows"), "{out}");
 }
 
+/// The rebuild's §6.1 says `scan` "reports the count and names `map`", and it
+/// never did — measured 2026-10-30, where eight files the mapping knew nothing
+/// about produced a plan with no rows and the closing line
+/// `comic-renamer apply comic-renamer-plan.jsonl`, a command that places
+/// nothing and now exits 1.
+///
+/// Driven through `scan` rather than a hand-built plan, because the thing under
+/// test is which command the user is pointed at, and that depends on what
+/// `scan` found.
+#[test]
+fn scan_names_map_for_the_files_it_could_not_plan() {
+    let f = fixture(Mode::Move);
+    let bundle = f.source.parent().unwrap().join("bundle2");
+    std::fs::create_dir_all(&bundle).unwrap();
+    // Nothing in the shipped mapping knows this name.
+    std::fs::File::create(bundle.join("nothing_knows_this_stem_at_all.cbz")).unwrap();
+    let plan = f.source.parent().unwrap().join("p.jsonl");
+
+    let out = run_in(
+        &f,
+        &[
+            "scan",
+            bundle.to_str().unwrap(),
+            "--dest",
+            f.dest.to_str().unwrap(),
+            "-o",
+            plan.to_str().unwrap(),
+        ],
+        "",
+    );
+    let said = stdout(&out) + &stderr(&out);
+
+    assert!(said.contains("1 file still needs a name"), "{said}");
+    assert!(said.contains("comic-renamer map"), "§6.1: {said}");
+    // And `apply` is not offered over a plan it would refuse.
+    assert!(!said.contains("comic-renamer apply"), "{said}");
+    assert!(out.status.success(), "scan itself still succeeds: {said}");
+}
+
 // ---------------------------------------------------------------------------
 // The round trip
 // ---------------------------------------------------------------------------

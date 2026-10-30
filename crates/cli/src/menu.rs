@@ -245,7 +245,41 @@ fn ask(prompt: &str, default: Option<&str>) -> Result<String, String> {
 /// shape a shell would have given `scan`.
 fn ask_path(prompt: &str) -> Result<PathBuf, String> {
     let typed = ask(prompt, None)?;
-    Ok(PathBuf::from(typed.trim_matches(|c| c == '\'' || c == '"')))
+    Ok(expand_tilde(typed.trim_matches(|c| c == '\'' || c == '"')))
+}
+
+/// `~` and `~/…` against `$HOME`. The doc comment above has claimed this since
+/// the menu was written and the code only ever stripped quotes (D-c, settled by
+/// the owner 2026-10-30).
+///
+/// Why a prompt needs it when `scan` does not: a shell expands `~` before the
+/// binary sees an argument, and a prompt has no shell behind it. The menu is the
+/// entry point for people who do not use flags, which is exactly the population
+/// that types `~/Comics`.
+///
+/// Quotes are stripped first, so `"~/Comics"` expands too. A shell would leave
+/// that literal, but nobody types quotes at a prompt to defeat expansion — they
+/// type them because the path has a space in it.
+///
+/// Two things left alone. `~user` needs a passwd lookup and is not a path anyone
+/// types for their own library. And with no `$HOME`, `~` stays literal, because
+/// a missing `~` directory is a better failure than a library silently rooted
+/// at `/`.
+fn expand_tilde(typed: &str) -> PathBuf {
+    let Some(rest) = typed.strip_prefix('~') else {
+        return PathBuf::from(typed);
+    };
+    if !rest.is_empty() && !rest.starts_with('/') {
+        return PathBuf::from(typed);
+    }
+    match std::env::var_os("HOME") {
+        Some(home) if !home.is_empty() => {
+            let rest = rest.trim_start_matches('/');
+            let home = PathBuf::from(home);
+            if rest.is_empty() { home } else { home.join(rest) }
+        }
+        _ => PathBuf::from(typed),
+    }
 }
 
 fn ask_mode() -> Result<Mode, String> {
@@ -339,6 +373,32 @@ mod tests {
 
     fn p(name: &str) -> PathBuf {
         PathBuf::from(name)
+    }
+
+    /// D-c. The doc comment on `ask_path` claimed this before the code did.
+    #[test]
+    fn a_leading_tilde_expands_and_nothing_else_does() {
+        let home = std::env::var("HOME").expect("a test host has HOME");
+        assert_eq!(expand_tilde("~/Comics"), PathBuf::from(&home).join("Comics"));
+        assert_eq!(expand_tilde("~"), PathBuf::from(&home), "bare ~ is the home itself");
+        assert_eq!(expand_tilde("~/"), PathBuf::from(&home), "no empty trailing component");
+
+        // Not a home reference: another account needs a passwd lookup, and a
+        // tilde anywhere but the front is an ordinary character in a filename.
+        assert_eq!(expand_tilde("~mike/Comics"), p("~mike/Comics"));
+        assert_eq!(expand_tilde("/tmp/~/x"), p("/tmp/~/x"));
+        assert_eq!(expand_tilde("Comics~"), p("Comics~"));
+        assert_eq!(expand_tilde("/Volumes/Media"), p("/Volumes/Media"));
+    }
+
+    /// Quotes come off first, so the two compose. A shell would leave
+    /// `"~/Comics"` literal; nobody types quotes at a prompt to defeat
+    /// expansion, they type them because the path has a space.
+    #[test]
+    fn quotes_and_the_tilde_compose() {
+        let home = std::env::var("HOME").expect("a test host has HOME");
+        let stripped = "\"~/My Comics\"".trim_matches(|c| c == '\'' || c == '"');
+        assert_eq!(expand_tilde(stripped), PathBuf::from(&home).join("My Comics"));
     }
 
     fn summary(planned: u32, reversible: u32, interrupted: bool, secs: u64) -> Summary {

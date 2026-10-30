@@ -276,6 +276,28 @@ fn run_scan(
     summarise(&rows, &unmapped, header.required_bytes, header.download_bytes);
     suggest_for(&unmapped, &marketplace, &folder, &guess_lang, &overrides);
     println!("\nplan written to {}", destination.display());
+    // §6.1 says `scan` "reports the count and names `map`", and it never did.
+    // Named here rather than beside the count because this is where the user is
+    // told what to run next, and named *before* `apply` because when nothing is
+    // mapped `apply` has nothing to do and now exits non-zero — pointing only
+    // there sent the user to a command that refuses.
+    if !unmapped.is_empty() {
+        let said = if unmapped.len() == 1 {
+            "1 file still needs a name. To give it one:".to_string()
+        } else {
+            format!("{} files still need a name. To give them one:", unmapped.len())
+        };
+        println!("{said}");
+        println!(
+            "  comic-renamer map {} --dest {}",
+            crate::map::quote(&header.source_root.to_string_lossy()),
+            crate::map::quote(&header.dest_root.to_string_lossy())
+        );
+    }
+    if rows.is_empty() {
+        // No rows means `apply` would refuse, so it is not offered at all.
+        return Ok(());
+    }
     println!("Nothing has been moved. Review it, then:");
     println!("  comic-renamer apply {}", destination.display());
     Ok(())
