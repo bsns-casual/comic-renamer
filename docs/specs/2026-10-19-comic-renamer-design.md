@@ -736,7 +736,26 @@ path budget; rule-count and file-size caps per PR; duplicate keys within or
 across files, with a defined merge order.
 
 Enforced in CI on every PR **and** re-validated at `apply`, because the plan
-file is untrusted too. Containment via `realpath` per component or `O_NOFOLLOW`, never a string prefix.
+file is untrusted too.
+
+**Amended 2026-10-30, after a search found no such call.** `apply` does not
+re-run `MappingRow::validate` or `rendered_budget_ok`. It protects itself a
+different and stronger way: it recomputes every destination from the row's
+metadata through the preset and never trusts a path string from the plan
+(invariant 2, D14). Re-validating the *fields* would catch a forbidden
+character in a series name; recomputing the *path* makes a tampered plan unable
+to place a file anywhere the preset would not have put it anyway, which is the
+threat the sentence above was written for. The field and 120-byte checks run
+where a row enters the system — on load, in `map`, in `seed` — and the row and
+file-size caps run in CI. `rendered_budget_ok` is called only by tests and
+cannot fail for Komga, because `sanitize` truncates every component at 255
+bytes; it is kept for Phase 2 presets with other path shapes.
+
+So: enforced in CI and at every entry point, and the plan file is defended by
+recomputation rather than re-validation. Said here rather than left as a known
+gap, because an unexplained mismatch between a spec and its code invites
+someone to "fix" the code.
+ Containment via `realpath` per component or `O_NOFOLLOW`, never a string prefix.
 `clonefile(2)` additionally accepts `CLONE_RESOLVE_BENEATH` and
 `CLONE_NOFOLLOW_ANY`, which enforce containment in the kernel rather than in our
 own path arithmetic; prefer them on the clone path.

@@ -245,9 +245,21 @@ fn run_scan(
             .unwrap_or_default(),
     );
     let guess_lang = lang.clone();
-    // shortcut: shipped mappings only; the user's local file arrives with the
-    // `map` command, which also owns where it lives.
-    let mappings = Mappings::load(shipped_mappings(), None).map_err(|e| e.to_string())?;
+    // The shipped table **and** the user's own corrections, which is the same
+    // pair `map`'s `scan_once` loads.
+    //
+    // This passed `None` until 2026-10-30, marked `shortcut:` on the grounds
+    // that the local file "arrives with the `map` command". Measured rather
+    // than reasoned about: the same two files in the same folder were "2
+    // unmapped" to `scan` and "every file is already mapped" to `map`. So a
+    // title approved in a `map` session was invisible to the non-interactive
+    // path — the one a re-run or a script uses — and nothing said so.
+    //
+    // A missing file is `None`, not an error: nobody has run `map` yet.
+    let local = crate::map::config_dir()?.join("mappings.tsv");
+    let local = local.exists().then_some(local);
+    let mappings =
+        Mappings::load(shipped_mappings(), local.as_deref()).map_err(|e| e.to_string())?;
     // Rejected up front: a malformed embedded file is a bad commit, not a
     // condition to degrade around.
     let overrides = parse_overrides(OVERRIDES)?;

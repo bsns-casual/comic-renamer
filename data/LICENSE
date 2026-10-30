@@ -1,12 +1,33 @@
-The curated rule data in this directory — data/overrides.toml — is derived from
-and distributed under the same terms as the corpus it corrects.
+This directory holds two kinds of file, and they sit under one licence for one
+reason: the corpus they draw on requires it.
+
+  data/overrides.toml   corrections to the corpus, keyed on a source folder
+  data/decisions.tsv    the shipped filename-to-decision table
 
 Licence: Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0)
          https://creativecommons.org/licenses/by-sa/4.0/
 
 Attribution: Grand Comics Database™ (https://www.comics.org)
 
-The Grand Comics Database content is licensed CC BY-SA 4.0. Share-alike applies
-to this directory only; the program's source code is GPL-3.0-or-later (see
-../LICENSE), which
-D3/D9 of the design document records as a deliberate split.
+The Grand Comics Database content is licensed CC BY-SA 4.0, and share-alike
+propagates into anything derived from it. `data/overrides.toml` exists only to
+correct the corpus, so it is derived by construction.
+
+`data/decisions.tsv` is a mixture, and this file does not try to separate it.
+Every row was confirmed by a human — nothing is stored without a keystroke
+(D49, D51) — but the proposal a human confirmed is often the corpus's, and on
+the reviewed Humble table 239 of 2,223 rows had a field decided by a corpus
+lookup (the series casing of D62, the colon confirmations of the 2026-10-25
+research). Splitting the table by provenance per field would be a worse
+document than covering all of it, and share-alike is the safe direction: it
+grants more than a bare factual table would need, never less.
+
+What this licence does not do is grant a right nobody holds. A licence governs
+what others may do with work that is ours to give; it says nothing about
+whether a given body of data was ours to publish. For anything derived from a
+marketplace's own records — order histories, catalogue exports — that question
+is answered by that marketplace's terms, not here.
+
+Share-alike applies to this directory only. The program's source code is
+GPL-3.0-or-later (see ../LICENSE), which D3/D9 of the design document records
+as a deliberate split.

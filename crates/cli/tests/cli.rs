@@ -1664,3 +1664,58 @@ fn a_partial_run_that_abandons_a_row_to_a_human_exits_non_zero() {
     assert!(f.dest.join("Solo/Solo Vol. 01.pdf").exists(), "{said}");
     assert!(f.source.join("a.pdf").exists() && f.source.join("b.pdf").exists(), "{said}");
 }
+
+
+/// `scan` reads the user's own corrections, not just the shipped table.
+///
+/// It passed `None` for the local layer until 2026-10-30, behind a `shortcut:`
+/// saying the file "arrives with the `map` command". Measured on a real folder:
+/// the same two files were "2 unmapped" to `scan` and "every file is already
+/// mapped" to `map`. A title approved in a session was invisible to the
+/// non-interactive path — the one a re-run or a script uses — and nothing said
+/// so.
+///
+/// Driven through the binary with `XDG_CONFIG_HOME`, because the whole defect
+/// was a path the library never saw.
+#[test]
+fn scan_reads_the_users_own_mappings() {
+    let f = fixture(Mode::Move);
+    let bundle = f.source.parent().unwrap().join("bundle3");
+    std::fs::create_dir_all(&bundle).unwrap();
+    std::fs::File::create(bundle.join("only_the_local_file_knows_this.cbz")).unwrap();
+    let plan = f.source.parent().unwrap().join("local.jsonl");
+
+    let args = [
+        "scan",
+        bundle.to_str().unwrap(),
+        "--dest",
+        f.dest.to_str().unwrap(),
+        "-o",
+        plan.to_str().unwrap(),
+    ];
+
+    // Without the row: unmapped, and `scan` points at `map`.
+    let out = run_in(&f, &args, "");
+    let said = stdout(&out) + &stderr(&out);
+    assert!(said.contains("1 file still needs a name"), "{said}");
+
+    // The same file, with a local row for it.
+    let dir = f.config.join("comic-renamer");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("mappings.tsv"),
+        "key\tseries\tvolume\tissue\tsubtitle\tlang\tvolume_count\n\
+         onlythelocalfileknowsthis\tLocally Known\t3\t\t\ten\t\n",
+    )
+    .unwrap();
+
+    let out = run_in(&f, &args, "");
+    let said = stdout(&out) + &stderr(&out);
+    assert!(said.contains("mapped        1"), "the local row was read:\n{said}");
+    assert!(!said.contains("still needs a name"), "{said}");
+
+    let rows = comic_renamer_core::plan::read(&plan).unwrap().1;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].series, "Locally Known");
+    assert_eq!(rows[0].volume, Some(3));
+}

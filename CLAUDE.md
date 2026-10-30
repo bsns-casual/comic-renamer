@@ -423,9 +423,9 @@ each of which cost something to find:
 A missing corpus is "no guess", not an error (D49): `seed` prints one line and
 falls back to the parser for every row. `measure` still requires one.
 
-**Tests:** `cargo test --workspace` runs 615 and ignores 9 (counted 2026-10-30
-by `awk`-summing the `test result:` lines, which is the number to quote: 615
-passed, 0 failed, 9 ignored; 613 before D-a and D-d, 612 before the review of the one-decisions-table
+**Tests:** `cargo test --workspace` runs 616 and ignores 9 (counted 2026-10-30
+by `awk`-summing the `test result:` lines, which is the number to quote: 616
+passed, 0 failed, 9 ignored; 615 before `scan` read the local layer, 613 before D-a and D-d, 612 before the review of the one-decisions-table
 change, 610 before the change itself, 606
 before the two fix commits of 2026-10-29 and 2026-10-30, 596 before the casing
 rule, 537 before
@@ -435,7 +435,7 @@ D58, 510 before a four-seat adversarial review, 500 before the whole-branch
 review's fix wave, 409 and 7 before session-scoped undo), with no compiler
 warnings. **The 595 this file carried until 2026-10-27 was one short** — it was
 summed by hand; the baseline measured mechanically on the same tree is 596.
-**The whole suite is 624, and the nine ignored have not been run since
+**The whole suite is 625, and the nine ignored have not been run since
 2026-10-26**, when the five volume-gated ones passed — the casing rule touches
 none of their code. See "What the volume-gated suite does and does not
 protect" above before assuming a change needs them. The nine `#[ignore]`d
@@ -768,16 +768,15 @@ Both wrong rows were corrected in the owner's `<config>/mappings.tsv` on
 `21/21 - The Story of Roberto Clemente.cbz` and
 `Prince Valiant/Prince Valiant Vol. 01 - 1937-1938.cbz`.
 
-#### `scan` does not read the user's own mappings
+#### `scan` reads the user's own mappings — fixed 2026-10-30
 
-Marked `shortcut:` at `main.rs:248` — `Mappings::load(&shipped_mappings(), None)`
-— against `map/mod.rs:507`, which passes the local path. **Measured 2026-10-30,
-not inferred**: the same two files in the same folder are "2 unmapped" to `scan`
-and "every file is already mapped" to `map`. So a title approved in `map` is
-invisible to the non-interactive path, which is the path a re-run or a script
-uses. The shortcut's stated reason is that `map` owns where the file lives; the
-fix is passing `config_dir()?.join("mappings.tsv")`. Not done — undoing a marked
-shortcut is a decision, and it belongs with the item-4 conversation.
+It passed `None` for the local layer behind a `shortcut:` saying the file
+"arrives with the `map` command". **Measured rather than inferred**: the same
+two files in the same folder were "2 unmapped" to `scan` and "every file is
+already mapped" to `map`, so a title approved in a session was invisible to the
+non-interactive path — the one a re-run or a script uses. `scan` now loads the
+same pair `map`'s `scan_once` does, and a missing file is `None` rather than an
+error. Pinned by `scan_reads_the_users_own_mappings`, the sole guard.
 
 #### Two decisions taken, not yet implemented
 
@@ -1378,17 +1377,15 @@ this machine has a `cargo install`ed binary in `~/.cargo/bin` that brew's
   *rows* `suggest_for` prints, so a 2,200-file bundle reports five guesses and
   the rest silently. Deliberate, and it is why the `Popeye` line was the one
   that surfaced the dedup bug.
-- **§6.11's caps are enforced in CI, and only partly at `apply`.** Field
-  validation (forbid-list, 120-byte cap) runs when a mapping is loaded, in `map`,
-  and in `seed`. The row and file-size caps run in CI. `rendered_budget_ok`
-  exists but only tests call it, and for Komga it cannot fail because `sanitize`
-  truncates every component at 255 bytes; it is kept for Phase 2 presets. The
-  rebuild's §7.4 says all three are "re-validated at `apply`", and a search on
-  2026-10-23 found no call to `MappingRow::validate` or `rendered_budget_ok` in
-  `apply.rs`. `apply`
-  protects itself a different way: it recomputes every destination through the
-  preset, never trusting a path in the plan (invariant 2). Whether that satisfies
-  §7.4's intent is the owner's call.
+- **§6.11's caps: §7.4 was amended to match the code, 2026-10-30.** Field
+  validation (forbid-list, 120-byte cap) runs where a row enters — on load, in
+  `map`, in `seed` — and the row and file-size caps run in CI. `apply` does
+  *not* re-run `MappingRow::validate`, and both specs now say why: it recomputes
+  every destination from metadata through the preset and never trusts a path
+  from the plan (invariant 2), which defends against a tampered plan more
+  completely than re-checking fields would. `rendered_budget_ok` is called only
+  by tests and cannot fail for Komga, since `sanitize` truncates at 255 bytes;
+  kept for Phase 2 presets.
 - **`volume_count` is user-supplied** and sets the zero-padding width (D44, which
   replaced D37's corpus lookup). A wrong value produces a wrong *name*, never a
   wrong *location*.
