@@ -706,19 +706,61 @@ name above.
 
 ### Pick up here
 
-**The tool was driven end to end for the first time on 2026-10-29/30, including
-`map`.** Three commits came out of it and all three are pushed and green. What
-that session established, and the two decided-but-unwritten items it left, are
-in "The first real test run" immediately below. Read that before the older
-entries; it supersedes nothing but it is the newest state.
+**A testing guide for an outside tester was written on 2026-10-30, and
+writing it found three things.** See "Handing it to a tester" immediately
+below; that is the newest state. Before it, the tool was driven end to end for
+the first time on 2026-10-29/30, including `map`, which is "The first real
+test run" further down.
 
 **MVP first. The owner's call, 2026-10-27: Homebrew is a launch item, not an
 MVP item.** The release workflow and the formula are done and tested, so that
 work is parked rather than unfinished — "Task 15, Homebrew" below holds the
-owner steps and every measurement, so none of it has to be re-derived. **The
-tap repo now exists**: `bsns-casual/homebrew-tap`, public and empty, created
-2026-10-30. The repository itself is **still private**, held deliberately — see
-the licence entry.
+owner steps and every measurement, so none of it has to be re-derived. **Both
+are done now**: the repository is public and `bsns-casual/homebrew-tap` holds
+`Formula/comic-renamer.rb`, both checked against the API on 2026-10-30. The two
+sentences that stood here calling the tap empty and the repo private were
+contradicted by this file's own Task 15 section; `brew install` works.
+
+### Handing it to a tester, 2026-10-30
+
+A walkthrough was written for an outside tester on an Intel Mac, published as
+a private artifact at <https://claude.ai/artifact/3vKBzvec6f668ac5PhowF3>.
+**Republish that slug rather than making a second one**, for the reason the
+review page already records: a new artifact orphans the old link.
+
+**Intel is answered, and the answer is measured rather than reasoned.** The
+published v0.1.0 tarball is genuinely universal — `lipo -archs` gives
+`x86_64 arm64` and its sha256 matches GitHub's own asset digest. The two
+slices carry different load commands, which is worth knowing because `otool`
+looks like it is lying: arm64 has `LC_BUILD_VERSION minos 11.0`, x86_64 has
+the older `LC_VERSION_MIN_MACOSX version 10.12`, so grepping for `minos`
+across the fat binary finds only one of them. **The x86_64 slice was
+executed**, under Rosetta on this machine: `scan`, `apply` in move mode,
+`apply` in copy mode (the `clonefile` path) and `undo`, all correct. That is
+the binary proven, not the hardware, and the README's "Developed and tested
+on Apple Silicon" is deliberately left alone as the conservative claim.
+
+**The technique that made the guide's numbers right: `XDG_CONFIG_HOME` and
+`XDG_CACHE_HOME` both pointed at a scratch directory.** The same 18-file
+bundle is 15 mapped / 3 unmapped on the maintainer's machine and
+**14 / 4 on a clean one**, because `<config>/mappings.tsv` holds the Prince
+Valiant rows typed on 2026-10-29. Any claim about what a stranger sees has to
+be made under a scratch config, or it is a claim about this machine.
+
+The bundle itself is 18 generated files: 14 hit the 12 shipped keys (two
+titles ship in two formats), and 4 are unmappable on purpose. The guide pastes
+it as one `for` loop, checked in both `bash` and `zsh`.
+
+Three findings, all now recorded where they belong:
+
+- The corpus download prints nothing — Known gaps, with the numbers.
+- `scan` does name `map`, and D-c is implemented — both were stale here and
+  were fixed in `21b1f4d`.
+- CI was running six jobs, three of them `macos-latest`, on every docs commit
+  — fixed in `0db891b`, recorded above under "CI does not run on a
+  markdown-only change", and **proved both ways**: `0db891b` touched
+  `.github/` and ran all six green (run 41013142054), `add702e` was markdown
+  only and triggered nothing.
 
 ### The first real test run, 2026-10-29/30
 
