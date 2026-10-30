@@ -175,9 +175,27 @@ fn a_seven_column_file_is_refused_by_name() {
 /// hand, but a stale file must fail *naming what it expected* rather than be
 /// read loosely: the 8th column was a `bundle`, and a parser that ignored the
 /// count would land a folder name in `volume_count` and set a zero-pad width
-/// from it. This is the one test that protects anyone holding an old file.
+/// from it.
+///
+/// **Both shapes, because the first version of this test only had the second
+/// one** — and the second is a file no real install has. A genuine pre-D64
+/// file carries the eighth column in its *header*, so it is refused by the
+/// header check; the per-row message is reached only by a new header above old
+/// rows. Two adversarial seats pointed out on 2026-10-30 that the doc comment
+/// here claimed to protect "anyone holding an old file" while testing the one
+/// shape nobody holds.
 #[test]
-fn the_old_eight_column_format_fails_naming_both_counts() {
+fn the_old_eight_column_format_is_refused_by_header_and_by_row() {
+    // What a real stale file looks like: the old header.
+    let real = "key\tseries\tvolume\tissue\tsubtitle\tlang\tvolume_count\tbundle\n\
+                alpha\tAlpha\t1\t\t\ten\t\tSome Bundle\n";
+    let msg = parse_tsv(real).expect_err("the old header").to_string();
+    assert!(msg.contains("pre-2026-10-30 header"), "{msg}");
+    assert!(msg.contains("bundle"), "names the column to drop: {msg}");
+    assert!(msg.contains("share a key"), "and the second transformation: {msg}");
+    assert!(msg.contains("line 1"), "{msg}");
+
+    // A header this parser accepts above rows it does not: the per-row branch.
     let old = "key\tseries\tvolume\tissue\tsubtitle\tlang\tvolume_count\n\
                alpha\tAlpha\t1\t\t\ten\t\tSome Bundle\n";
     let msg = parse_tsv(old).expect_err("eight fields").to_string();

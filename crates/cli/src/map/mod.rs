@@ -2,7 +2,7 @@
 
 use crate::{guesses_for, parse_overrides, OVERRIDES};
 use comic_renamer_core::mapping::shipped_mappings;
-use comic_renamer_core::mapping::{file_slug, key, parse_tsv, to_tsv, MappingRow, Mappings};
+use comic_renamer_core::mapping::{key, parse_tsv, to_tsv, MappingRow, Mappings};
 use comic_renamer_core::normalize::collision_key;
 use comic_renamer_core::title::ParsedTitle;
 use comic_renamer_core::overrides::Overrides;
@@ -329,6 +329,20 @@ fn offer_contribution(entries: &[table::Entry], bundle: &str, lang: &str) -> Res
 /// Branch for one contribution. The seconds make a second contribution from
 /// one bundle a new branch, directory and file; a bundle with no ASCII letters
 /// falls back to `bundle` so it is not `map--`.
+/// A name as it appears in a branch: ASCII alphanumerics kept and lowercased,
+/// every run of anything else collapsed to one `-`.
+///
+/// Lived in `core::mapping` until 2026-10-30, where `shipped_mapping_path` was
+/// its other caller until D66 deleted that. A branch-name slugifier is not a
+/// mapping-format concern.
+fn file_slug(name: &str) -> String {
+    let rough: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .collect();
+    rough.split('-').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("-")
+}
+
 fn branch_for(bundle: &str, secs: u64) -> String {
     let slug = file_slug(bundle);
     let slug = if slug.is_empty() { "bundle" } else { &slug };
@@ -353,20 +367,6 @@ fn guidance(c: &Contribution) -> Vec<String> {
     ]
 }
 
-/// The source folder's name, NFC-normalised.
-///
-/// It used to be validated here, before the session opened, because every
-/// approved row would carry it as a field and a folder name that could not be
-/// one failed after the work was done. Since D64 no row carries it: what reads
-/// it now is Layer B's override lookup, which uses it as a map key, and
-/// `branch_for`, which slugifies it. Neither can be hurt by a long or
-/// oddly-punctuated folder name, so there is nothing left to refuse and this is
-/// infallible.
-///
-/// NFC stays. HFS+ hands these back decomposed, and Layer B's keys are composed.
-fn bundle_for(folder: &str) -> String {
-    comic_renamer_core::mapping::bundle_name(folder)
-}
 
 fn clash_warning(a: &str, b: &str) -> String {
     format!(
@@ -474,7 +474,7 @@ fn plan_path(out: Option<PathBuf>) -> PathBuf {
 fn scan_once(opts: &ScanOpts, config: &Path) -> Result<scan::ScanOutcome, String> {
     let local = config.join("mappings.tsv");
     let local = local.exists().then_some(local);
-    let mappings = Mappings::load(&shipped_mappings(), local.as_deref()).map_err(|e| e.to_string())?;
+    let mappings = Mappings::load(shipped_mappings(), local.as_deref()).map_err(|e| e.to_string())?;
     scan::scan(opts, &mappings, &mut |_| {}).map_err(|e| e.to_string())
 }
 
@@ -487,7 +487,11 @@ pub fn run(
     marketplace: String,
     mode: Mode,
 ) -> Result<(), String> {
-    let folder = bundle_for(&source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+    // NFC through the one function `map` records with. No longer validated:
+    // since D64 nothing stores a folder name, so there is nothing to refuse.
+    let folder = comic_renamer_core::mapping::bundle_name(
+        &source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+    );
     let overrides = parse_overrides(OVERRIDES)?;
     let preset_impl = comic_renamer_core::preset::preset_by_id(&preset).ok_or_else(|| format!("unknown preset {preset:?}"))?;
     let opts = ScanOpts { source_root: source, dest_root: dest, preset, mode: Some(mode), lang: lang.clone() };
@@ -647,7 +651,7 @@ mod tests {
         assert_eq!(rows[0].series, "Corrected");
         assert!(
             comic_renamer_core::mapping::Mappings::load(
-                &comic_renamer_core::mapping::shipped_mappings(),
+                comic_renamer_core::mapping::shipped_mappings(),
                 Some(&local)
             )
             .is_ok(),
@@ -655,18 +659,19 @@ mod tests {
         );
     }
 
-    /// `bundle_for` still normalises, because Layer B's override keys are
+    /// `mapping::bundle_name` still normalises, because Layer B's override keys are
     /// composed and HFS+ hands folder names back decomposed. It no longer
     /// validates: `a_folder_name_that_cannot_be_a_bundle_is_refused_up_front`
     /// retired with the stored field (D64), since nothing can now be hurt by a
     /// long or oddly-punctuated folder name — it is a map key and a branch slug.
     #[test]
     fn a_folder_name_is_normalised_and_never_refused() {
-        assert_eq!(bundle_for("Cafe\u{301} Comics"), "Caf\u{e9} Comics");
+        use comic_renamer_core::mapping::bundle_name;
+        assert_eq!(bundle_name("Cafe\u{301} Comics"), "Caf\u{e9} Comics");
         for once_refused in ["-Free Comics", "=Humble", "@bundle", "+extra", &"x".repeat(121)] {
-            assert_eq!(bundle_for(once_refused), once_refused, "passed through now");
+            assert_eq!(bundle_name(once_refused), once_refused, "passed through now");
         }
-        assert_eq!(bundle_for(""), "");
+        assert_eq!(bundle_name(""), "");
 
         // And a session under such a folder completes, where it used to be
         // refused before it opened.
@@ -1145,8 +1150,11 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&c.path).unwrap(), one_row_tsv());
         assert!(c.commands.iter().any(|l| l.starts_with("gh pr create")), "{:?}", c.commands);
         // Appended to the one shipped table, never a new file named after the
-        // branch: an unembedded TSV under `data/` fails
-        // `the_decisions_file_is_the_one_that_ships` on arrival.
+        // branch. An unembedded TSV under `data/` fails
+        // `the_decisions_file_is_the_one_that_ships` on arrival -- true only
+        // since that test was made recursive on 2026-10-30. Before then a
+        // `data/mappings/<branch>.tsv`, which is exactly the shape of the
+        // 2026-10-29 bug this test is about, passed every gate.
         assert!(
             c.commands.iter().any(|l| l.contains("data/decisions.tsv") && l.starts_with("tail -n +2")),
             "{:?}",

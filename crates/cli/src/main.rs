@@ -234,7 +234,7 @@ fn run_scan(
     marketplace: String,
     mode: Mode,
 ) -> Result<(), String> {
-    // NFC, as `map`'s `bundle_for` and `scan::scan` both do. Only the
+    // NFC, as `map` does, through `mapping::bundle_name`. Only the
     // publisher hint reads it un-squashed, so this buys a better suggestion
     // rather than correctness -- but one of three call sites left composed
     // differently is the drift the folder-name finding punished.
@@ -247,7 +247,7 @@ fn run_scan(
     let guess_lang = lang.clone();
     // shortcut: shipped mappings only; the user's local file arrives with the
     // `map` command, which also owns where it lives.
-    let mappings = Mappings::load(&shipped_mappings(), None).map_err(|e| e.to_string())?;
+    let mappings = Mappings::load(shipped_mappings(), None).map_err(|e| e.to_string())?;
     // Rejected up front: a malformed embedded file is a bad commit, not a
     // condition to degrade around.
     let overrides = parse_overrides(OVERRIDES)?;

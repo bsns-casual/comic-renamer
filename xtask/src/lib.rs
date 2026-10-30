@@ -154,7 +154,7 @@ mod tests {
     }
 
     #[test]
-    fn a_mapping_file_over_two_mebibytes_is_refused() {
+    fn a_file_at_the_cap_passes_and_one_byte_over_does_not() {
         assert!(file_size_ok(4 * 1024 * 1024));
         assert!(!file_size_ok(4 * 1024 * 1024 + 1));
         assert!(file_size_ok(comic_renamer_core::mapping::shipped_mappings().len()));

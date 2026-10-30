@@ -74,10 +74,21 @@ pub fn parse_tsv(text: &str) -> Result<Vec<MappingRow>, MappingError> {
         let raw = raw.strip_suffix('\r').unwrap_or(raw);
         if !seen_header {
             if raw != HEADER {
-                return Err(MappingError::Parse {
-                    line,
-                    reason: format!("expected the header {HEADER:?}"),
-                });
+                // The pre-D64 header, named. This is the branch a real stale
+                // file actually reaches: its *header* carries the eighth
+                // column, so it dies here and never sees the per-row message
+                // below. Two adversarial seats found that message unreachable
+                // on 2026-10-30 — it was written for the one shape no install
+                // has, a new header above old rows.
+                let reason = if raw == format!("{HEADER}\tbundle") {
+                    "this is the pre-2026-10-30 header, whose 8th column was `bundle`. \
+                     Drop that column, and collapse any rows that then share a key: \
+                     identity is the key alone (D64)"
+                        .to_string()
+                } else {
+                    format!("expected the header {HEADER:?}")
+                };
+                return Err(MappingError::Parse { line, reason });
             }
             seen_header = true;
             continue;
@@ -385,45 +396,26 @@ impl Mappings {
 /// duplicate is as wrong as a disagreement, because a correction is an edit to
 /// the existing line and never a second line.
 pub fn find_key_collisions(rows: &[MappingRow]) -> Vec<String> {
-    let mut seen: HashMap<&str, ()> = HashMap::new();
+    let mut seen = std::collections::HashSet::new();
     let mut bad = BTreeSet::new();
     for r in rows {
-        if seen.insert(&r.key, ()).is_some() {
+        if !seen.insert(&r.key) {
             bad.insert(r.key.clone());
         }
     }
     bad.into_iter().collect()
 }
 
-/// A name as it appears in a branch or a filename: ASCII alphanumerics kept
-/// and lowercased, every run of anything else collapsed to one `-`.
-///
-/// `shipped_mapping_path` used to be its other caller, until D66 deleted it
-/// along with the per-marketplace files. `branch_for` is what is left.
-pub fn file_slug(name: &str) -> String {
-    let rough: String = name
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
-        .collect();
-    rough.split('-').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("-")
-}
 
-/// The one shipped table (D63). Embedded, so an installed binary needs nothing
-/// from the working directory.
+/// The one shipped table (D63), `include_str!`-embedded so an installed binary
+/// needs nothing from the working directory.
 ///
 /// One file rather than one per marketplace, because the sharding was a fiction
 /// the code never believed: `find_key_collisions` always ran over the joined
-/// table, and `lookup` keyed on a row's bundle rather than its file. The
-/// contribution flow is unconditional as a result — a contribution appends
-/// here, and `include_str!` picks the new rows up at build time with no code
+/// table and `lookup` keyed on a row's bundle rather than its file. A
+/// contribution appends here and the build picks the rows up with no code
 /// change in the pull request (D66).
-const SHIPPED: &str = include_str!("../../../data/decisions.tsv");
-
-
-/// Every shipped mapping file as one table with a single header. Embedded, so
-/// an installed binary needs nothing from the working directory. Rows stay
-/// sharded by marketplace on disk, so `find_key_collisions` must be checked over
-/// this joined table, not per file.
-pub fn shipped_mappings() -> String {
-    SHIPPED.strip_prefix('\u{feff}').unwrap_or(SHIPPED).to_string()
+pub fn shipped_mappings() -> &'static str {
+    const SHIPPED: &str = include_str!("../../../data/decisions.tsv");
+    SHIPPED.strip_prefix('\u{feff}').unwrap_or(SHIPPED)
 }

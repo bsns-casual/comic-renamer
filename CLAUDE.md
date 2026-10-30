@@ -423,9 +423,10 @@ each of which cost something to find:
 A missing corpus is "no guess", not an error (D49): `seed` prints one line and
 falls back to the parser for every row. `measure` still requires one.
 
-**Tests:** `cargo test --workspace` runs 612 and ignores 9 (counted 2026-10-30
-by `awk`-summing the `test result:` lines, which is the number to quote: 612
-passed, 0 failed, 9 ignored; 610 before the one-decisions-table change, 606
+**Tests:** `cargo test --workspace` runs 613 and ignores 9 (counted 2026-10-30
+by `awk`-summing the `test result:` lines, which is the number to quote: 613
+passed, 0 failed, 9 ignored; 612 before the review of the one-decisions-table
+change, 610 before the change itself, 606
 before the two fix commits of 2026-10-29 and 2026-10-30, 596 before the casing
 rule, 537 before
 the issue column, 534 before
@@ -434,7 +435,7 @@ D58, 510 before a four-seat adversarial review, 500 before the whole-branch
 review's fix wave, 409 and 7 before session-scoped undo), with no compiler
 warnings. **The 595 this file carried until 2026-10-27 was one short** — it was
 summed by hand; the baseline measured mechanically on the same tree is 596.
-**The whole suite is 621, and the nine ignored have not been run since
+**The whole suite is 622, and the nine ignored have not been run since
 2026-10-26**, when the five volume-gated ones passed — the casing rule touches
 none of their code. See "What the volume-gated suite does and does not
 protect" above before assuming a change needs them. The nine `#[ignore]`d
@@ -468,6 +469,25 @@ count** — see the PR-only caveat above; it was a push to `main`.
   `hdiutil attach -nomount ram://2726297` then
   `diskutil eraseVolume "HFS+" CRTEST <dev>`. **Under ~1.1 GiB every run is
   refused by the free-space reserve**, which is how the reserve is specified.
+
+### Two things about running the suite, learned the hard way
+
+**`cargo test --workspace` stops after the first failing test binary.** So a
+mutation run that reads its fail list off a plain invocation reads a
+*truncated* one — every "and nothing else fails" claim made that way is
+unverified. Use `cargo test --workspace --no-fail-fast`. Found 2026-10-30 by a
+mutation seat whose first three runs under-reported; the claim in `fa06b00`
+that reverting either fix "fails its own test and nothing else" was made the
+wrong way and has not been re-checked. "Caught at all" is still sound, because
+that only needs the test to fail.
+
+**`nothing_is_lost_when_the_source_is_truncated_inside_the_gate` is not
+deterministic under load.** The D58 race test (`undo_authority.rs`) passed 5 of
+5 runs idle and failed **2 of 3** when run concurrently with other cargo work,
+on pristine code. This file describes it as firing "inside the window by
+construction rather than on a timed guess"; that is true of the trigger, not of
+the surrounding timing. Pre-existing, nothing to do with the decisions table,
+and worth knowing before it costs someone a session on a busy CI runner.
 
 ### CI checks neither formatting nor clippy
 

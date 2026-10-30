@@ -29,7 +29,7 @@ const EXPECTED: [(&str, &str, &str, Option<u32>, Option<u32>, Option<&str>); 12]
 ];
 
 fn all_rows() -> Vec<MappingRow> {
-    parse_tsv(&shipped_mappings()).unwrap()
+    parse_tsv(shipped_mappings()).unwrap()
 }
 
 #[test]
@@ -60,7 +60,7 @@ fn the_marketplace_fixture_is_fully_covered() {
         .collect();
     assert_eq!(stems.len(), EXPECTED.len());
 
-    let m = Mappings::load(&shipped_mappings(), None).unwrap();
+    let m = Mappings::load(shipped_mappings(), None).unwrap();
     for ((market, stem), (e_market, e_stem, series, volume, issue, subtitle)) in
         stems.iter().zip(EXPECTED)
     {
@@ -86,21 +86,26 @@ fn the_marketplace_fixture_is_fully_covered() {
 /// which is what both of those existed to catch.
 ///
 /// It still guards the thing that mattered — a TSV sitting under `data/` doing
-/// nothing silently — because a second one is a file the embed does not read.
+/// nothing silently — because a second one, at any depth, is a file the embed
+/// does not read.
+///
+/// **Recursive, and that is the whole point of this version.** The first cut
+/// walked only the top of `data/`, so a `.tsv` in a subdirectory was seen by
+/// nothing: three adversarial seats planted the real 205 KB
+/// `review/humble-decisions.tsv` at `data/mappings/humble.tsv` on 2026-10-30
+/// and the whole workspace stayed green. That is the exact path the superseded
+/// `every_tsv_in_data_mappings_is_embedded` watched, the path CLAUDE.md's own
+/// validation maneuver uses, and the path a licence-gated table would sit at in
+/// a repository about to go public.
 #[test]
 fn the_decisions_file_is_the_one_that_ships() {
     let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
     let shipped = all_rows();
 
-    let on_disk: Vec<std::path::PathBuf> = std::fs::read_dir(&data)
-        .unwrap()
-        .filter_map(|e| {
-            let p = e.unwrap().path();
-            (p.extension().is_some_and(|x| x == "tsv")).then_some(p)
-        })
-        .collect();
-    assert_eq!(on_disk.len(), 1, "exactly one shipped table: {on_disk:?}");
+    let on_disk = tsvs_under(&data);
+    assert_eq!(on_disk.len(), 1, "exactly one shipped table, at any depth: {on_disk:?}");
     assert_eq!(on_disk[0].file_name().unwrap(), "decisions.tsv");
+    assert_eq!(on_disk[0].parent().unwrap(), data, "and at the top, not in a subdirectory");
 
     let text = std::fs::read_to_string(&on_disk[0]).unwrap();
     let rows = parse_tsv(&text).unwrap();
@@ -124,4 +129,23 @@ fn shipped_files_are_embedded_not_read_from_the_cwd() {
     assert_eq!(before, after);
     assert!(!before.is_empty());
     assert_eq!(before.matches("key\tseries").count(), 1, "one header after joining");
+}
+
+/// Every `.tsv` under `dir`, at any depth. A plain `read_dir` filter skips a
+/// subdirectory silently, because a directory has no `.tsv` extension to match.
+fn tsvs_under(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d).unwrap() {
+            let p = entry.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "tsv") {
+                out.push(p);
+            }
+        }
+    }
+    out.sort();
+    out
 }

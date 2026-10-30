@@ -126,11 +126,19 @@ fn the_ground_truth_fixture_repeats_keys_across_bundles() {
     let repeated = find_key_collisions(&rows);
     assert_eq!(repeated.len(), 177, "measured 2026-10-30");
 
-    // Every one of them agrees on every field, which is why `bundle` never
-    // disambiguated anything and why dropping it discards nothing.
+    // Every one of them agrees on its **title**, which is all this fixture can
+    // express: `humble-ground-truth.tsv` has three columns (bundle, title,
+    // stem) and `row()` fills the rest with constants, so `series` is the only
+    // field that can differ. Said precisely because the first version of this
+    // loop claimed "agrees on every field" — which is the evidence D64 rests
+    // on, but it comes from `review/humble-decisions.tsv` plus
+    // `data/decisions.tsv` (158 keys, zero disagreeing across all seven
+    // fields), not from here. A mutation seat pointed out the loop could not
+    // fail as written.
     for k in &repeated {
-        let same: Vec<&MappingRow> = rows.iter().filter(|r| &r.key == k).collect();
-        assert!(same.windows(2).all(|w| w[0] == w[1]), "{k} disagrees: {same:?}");
+        let titles: std::collections::BTreeSet<&str> =
+            rows.iter().filter(|r| &r.key == k).map(|r| r.series.as_str()).collect();
+        assert_eq!(titles.len(), 1, "{k} has {} titles: {titles:?}", titles.len());
     }
 }
 
@@ -159,28 +167,31 @@ fn a_layer_holding_two_rows_for_one_key_fails_to_load() {
     assert!(msg.contains("local mappings"), "{msg}");
 }
 
-/// `a_local_row_shadows_its_shipped_siblings` and
-/// `a_bundles_case_does_not_make_a_second_bundle` both lived here and both
-/// retire with the `bundle` column (D64, spec §2.2).
-///
-/// The first described the cost of a local row replacing *every* shipped row
-/// for its key. A key cannot hold several rows now, so the cost does not exist.
-/// The second pinned that `Fanatical` and `fanatical` are one bundle, which was
-/// a real bug fixed on 2026-10-23 — and the field it protected is gone, so
-/// there is no bundle comparison left to get wrong. **Invariant 7's path half
-/// is untouched**: `preset_komga.rs` and `fsops.rs` still pin that collision
-/// comparison over emitted paths is NFC-then-fold, because `Hellboy/` and
-/// `hellboy/` are still one directory on APFS.
-///
-/// What replaces both is `a_second_row_for_one_key_is_refused_at_load_not_disambiguated`
-/// above: the single rule that makes either question unanswerable.
-#[test]
-fn the_frozen_key_still_decides_identity_over_the_real_fixture() {
-    let rows = humble_rows();
-    assert!(rows.len() > 2000, "the fixture loaded: {}", rows.len());
-    // Every row's key is what `key()` makes of its own stem, which is the one
-    // thing identity now rests on.
-    for r in &rows {
-        assert_eq!(key(&r.key).as_deref(), Some(r.key.as_str()), "{:?}", r.key);
-    }
-}
+// `a_local_row_shadows_its_shipped_siblings` and
+// `a_bundles_case_does_not_make_a_second_bundle` both lived here and both
+// retire with the `bundle` column (D64, spec §2.2).
+//
+// The first described the cost of a local row replacing *every* shipped row
+// for its key. A key cannot hold several rows now, so the cost does not exist.
+// The second pinned that `Fanatical` and `fanatical` are one bundle, which was
+// a real bug fixed on 2026-10-23 — and the field it protected is gone, so
+// there is no bundle comparison left to get wrong. **Invariant 7's path half
+// is untouched**: `preset_komga.rs` and `fsops.rs` still pin that collision
+// comparison over emitted paths is NFC-then-fold.
+//
+// Spec §2.2 required each of the four `same_bundle` sites to gain a key-only
+// test, and each did: `lookup` has `a_key_is_the_whole_identity` and
+// `a_mapped_file_resolves_whatever_the_folder_is_called`,
+// `find_key_collisions` has `collisions_report_every_repeated_key_once`,
+// `approved_rows` has `only_pairs_that_differ_are_reported_as_clashes`, and
+// `commit_session` has `a_second_session_corrects_the_row_instead_of_adding_one`.
+//
+// A fifth test sat here briefly —
+// `the_frozen_key_still_decides_identity_over_the_real_fixture` — and was
+// deleted on 2026-10-30 because **it could not fail.** Its body asserted
+// `key(&r.key) == r.key` over rows whose key field already *was* `key(stem)`,
+// so it tested idempotency, which every plausible character filter has. A
+// mutation seat survived five changes to `key()` against it, including the one
+// invariant 10 forbids by name — stripping a trailing download id. The real
+// pin is `key_is_frozen_at_2036_over_the_humble_fixture` in `mapping.rs`,
+// which caught all five. Do not re-add a key test here; add to that one.

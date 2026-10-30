@@ -180,26 +180,39 @@ fn measure() -> Result<(), String> {
 /// The per-PR caps. Always checks every shipped mapping file's size; with a
 /// base ref, also counts rows added since it. Exits non-zero on a breach.
 fn check_mappings(base: Option<&str>) -> Result<(), String> {
-    // One table since D63. Still a directory walk rather than one `metadata`
-    // call, because a second `.tsv` appearing under `data/` is exactly what
-    // `the_decisions_file_is_the_one_that_ships` refuses and this should not
-    // quietly ignore it.
-    for entry in std::fs::read_dir("data").map_err(|e| e.to_string())? {
-        let path = entry.map_err(|e| e.to_string())?.path();
-        if path.extension().is_none_or(|e| e != "tsv") {
-            continue;
-        }
-        let len = std::fs::metadata(&path).map_err(|e| e.to_string())?.len() as usize;
-        if !file_size_ok(len) {
-            return Err(format!(
-                "{} is {len} bytes; the cap is {MAX_MAPPING_FILE_BYTES}",
-                path.display()
-            ));
+    // One table since D63, but walked **recursively** rather than stat'd by
+    // name. The first cut read only the top of `data/`, and three adversarial
+    // seats then planted the real 205 KB reviewed Humble table at
+    // `data/mappings/humble.tsv` and watched every gate stay green.
+    //
+    // The division of labour, so neither gate is mistaken for the other: this
+    // caps *size*, at any depth. "Exactly one table, and it is
+    // `data/decisions.tsv`" is `the_decisions_file_is_the_one_that_ships`,
+    // which is also now recursive. A 205 KB stray is under the cap and this
+    // will pass it; the test is what refuses it.
+    let mut stack = vec![std::path::PathBuf::from("data")];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+            let path = entry.map_err(|e| e.to_string())?.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().is_none_or(|e| e != "tsv") {
+                continue;
+            }
+            let len = std::fs::metadata(&path).map_err(|e| e.to_string())?.len() as usize;
+            if !file_size_ok(len) {
+                return Err(format!(
+                    "{} is {len} bytes; the cap is {MAX_MAPPING_FILE_BYTES}",
+                    path.display()
+                ));
+            }
         }
     }
     if let Some(base) = base {
         let out = std::process::Command::new("git")
-            .args(["diff", "--numstat", &format!("{base}...HEAD"), "--", "data"])
+            .args(["diff", "--numstat", &format!("{base}...HEAD"), "--", "data/decisions.tsv"])
             .output()
             .map_err(|e| e.to_string())?;
         if !out.status.success() {

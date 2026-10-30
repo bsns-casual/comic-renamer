@@ -257,7 +257,7 @@ pub fn seed() -> Result<(), String> {
     println!(
         "{total} rows built; {} rejected; {} key collisions",
         rejected.values().map(Vec::len).sum::<usize>(),
-        collisions.len()
+        collisions
     );
     for (why, titles) in &rejected {
         println!("  rejected: {why} ({}) e.g. {:?}", titles.len(), titles[0]);
@@ -277,15 +277,6 @@ pub fn seed() -> Result<(), String> {
     Ok(())
 }
 
-/// Every semantic field of a row in this path. `lang` is the constant `LANG`
-/// and `volume_count` is always `None` here, which is why neither appears.
-///
-/// Named rather than inlined because the property matters: an exact repeat
-/// collapses, and a pair that *disagrees* must survive to
-/// `find_key_collisions`, the gate whose job is to refuse it. Adding `issue`
-/// to the row broke that silently — the tuple had been every field, and a
-/// pair differing only by issue folded before the gate ran. No fixture pair
-/// exercises it, which is exactly why it needed a test rather than a reader.
 /// `target/seed/humble.tsv` in the pre-D64 eight-column shape, bundle last.
 ///
 /// Deliberately not `mapping::to_tsv`, which now emits seven columns. This file
@@ -321,18 +312,28 @@ fn to_tsv_with_bundle(rows: &[(MappingRow, String)]) -> String {
 /// cannot use: the Humble intermediate is per bundle and 158 of its keys
 /// legitimately appear under more than one, agreeing every time. What would be
 /// a defect here is two rows for one key *in one bundle* that disagree.
-fn disagreeing_within_a_bundle(rows: &[(MappingRow, String)]) -> Vec<(String, String)> {
+/// Returns a count, because a count is all any caller reads.
+fn disagreeing_within_a_bundle(rows: &[(MappingRow, String)]) -> usize {
     let mut first: HashMap<(&str, String), &MappingRow> = HashMap::new();
     let mut bad = BTreeSet::new();
     for (r, bundle) in rows {
         let slot = first.entry((&r.key, collision_key(bundle))).or_insert(r);
         if *slot != r {
-            bad.insert((r.key.clone(), bundle.clone()));
+            bad.insert((r.key.as_str(), bundle.as_str()));
         }
     }
-    bad.into_iter().collect()
+    bad.len()
 }
 
+/// Every semantic field of a row in this path. `lang` is the constant `LANG`
+/// and `volume_count` is always `None` here, which is why neither appears.
+///
+/// Named rather than inlined because the property matters: an exact repeat
+/// collapses, and a pair that *disagrees* must survive to
+/// `find_key_collisions`, the gate whose job is to refuse it. Adding `issue`
+/// to the row broke that silently — the tuple had been every field, and a
+/// pair differing only by issue folded before the gate ran. No fixture pair
+/// exercises it, which is exactly why it needed a test rather than a reader.
 fn dedup_identity(
     r: &MappingRow,
     bundle: &str,
@@ -1059,7 +1060,7 @@ mod dedup_tests {
     #[test]
     fn a_pair_that_disagrees_on_the_issue_is_still_reported() {
         let pair = [(row(Some(1)), "B".to_string()), (row(Some(2)), "B".to_string())];
-        assert!(!disagreeing_within_a_bundle(&pair).is_empty());
+        assert_eq!(disagreeing_within_a_bundle(&pair), 1);
         assert!(!find_key_collisions(&[row(Some(1)), row(Some(2))]).is_empty());
     }
 }
@@ -1185,6 +1186,75 @@ mod shouting_tests {
 mod sibling_tests {
     use super::*;
 
+    /// `to_tsv_with_bundle` had no test at all, and a mutation seat changed its
+    /// header to seven columns on 2026-10-30 with the **whole suite green**.
+    ///
+    /// That is the one shape change its own doc comment says must never happen:
+    /// `scripts/review-rows.py` reads exactly these eight fields in order and
+    /// `sys.exit`s otherwise, and the review artifact keys 2,204 stored
+    /// decisions on a row's ordinal here plus its `(key, bundle)`. So this pins
+    /// the header, the column count, the position of `bundle` and the fact that
+    /// the first seven are `mapping::to_tsv`'s — the shipped shape — rather
+    /// than a second hand-written list that can drift from it.
+    #[test]
+    fn the_humble_intermediate_keeps_the_eight_column_shape() {
+        let rows = vec![
+            (
+                MappingRow {
+                    key: "k1".into(),
+                    series: "S One".into(),
+                    volume: Some(2),
+                    issue: None,
+                    subtitle: Some("Sub".into()),
+                    lang: LANG.to_string(),
+                    volume_count: Some(9),
+                },
+                "Bundle A".to_string(),
+            ),
+            (
+                MappingRow {
+                    key: "k2".into(),
+                    series: "S Two".into(),
+                    volume: None,
+                    issue: Some(4),
+                    subtitle: None,
+                    lang: LANG.to_string(),
+                    volume_count: None,
+                },
+                "Bundle B".to_string(),
+            ),
+        ];
+        let out = to_tsv_with_bundle(&rows);
+        // `trim_end_matches('\n')`, never `trim_end()`: a row whose
+        // `volume_count` is empty ends in a tab, and trimming whitespace from
+        // the whole string eats that field off the last line. Production is
+        // unaffected -- `parse_tsv` splits on '\n' and strips only '\r' per
+        // line -- but this test asserted the trimmed shape and caught itself.
+        let lines: Vec<&str> = out.trim_end_matches('\n').split('\n').collect();
+        assert_eq!(lines.len(), 3, "header and two rows: {out:?}");
+
+        assert_eq!(
+            lines[0],
+            "key\tseries\tvolume\tissue\tsubtitle\tlang\tvolume_count\tbundle"
+        );
+        for line in &lines {
+            assert_eq!(line.split('\t').count(), 8, "{line:?}");
+        }
+        assert_eq!(lines[1], "k1\tS One\t2\t\tSub\ten\t9\tBundle A");
+        assert_eq!(lines[2], "k2\tS Two\t\t4\t\ten\t\tBundle B");
+
+        // The first seven columns are the shipped table's, not a parallel list.
+        // This is what makes a drift between the two a compile-or-test failure
+        // rather than 2,204 orphaned decisions.
+        let shipped = comic_renamer_core::mapping::to_tsv(
+            &rows.iter().map(|(r, _)| r.clone()).collect::<Vec<_>>(),
+        );
+        for (mine, theirs) in lines.iter().zip(shipped.trim_end_matches('\n').split('\n')) {
+            let seven: Vec<&str> = mine.split('\t').take(7).collect();
+            assert_eq!(seven.join("\t"), theirs, "column drift");
+        }
+    }
+
     fn built(stem: &str, title: &str, series: &str, issue: Option<u32>, class: &'static str) -> Built {
         Built {
             title: title.into(),
@@ -1224,6 +1294,42 @@ mod sibling_tests {
         }
         assert_eq!(rows[0].class, ISSUE_FROM_SIBLING);
         assert_eq!(rows[2].class, ISSUE_FROM_FILENAME, "the source keeps its own class");
+    }
+
+    /// `Built.bundle`'s whole stated reason for existing is that sibling
+    /// detection groups on `(bundle, title)` — and a mutation seat dropped the
+    /// bundle half of that key in **both** `propagate_within_titles` and
+    /// `flag_disagreeing_siblings` on 2026-10-30 with the suite green. Every
+    /// helper in this module sets one bundle, so nothing crossed one.
+    ///
+    /// This is D61's cross-bundle bound: an issue derived from a filename in
+    /// one bundle must not rewrite a same-titled file in another, because two
+    /// marketplaces can sell different editions under one title and the
+    /// filename that vouched for the issue belongs to only one of them. 117
+    /// rows ride on this propagation.
+    #[test]
+    fn a_derived_issue_does_not_propagate_across_bundles() {
+        let mut rows = vec![
+            built("hacktivistissue11406925491", "Hacktivist 1", "Hacktivist", Some(1), ISSUE_FROM_FILENAME),
+            built("hacktivist0011407188013", "Hacktivist 1", "Hacktivist 1", None, "bare"),
+        ];
+        rows[1].bundle = "A Different Bundle".to_string();
+
+        assert_eq!(
+            propagate_within_titles(&mut rows).unwrap(),
+            0,
+            "a different bundle is a different group"
+        );
+        assert_eq!(rows[1].row.series, "Hacktivist 1", "left exactly as it was");
+        assert_eq!(rows[1].row.issue, None);
+        assert_eq!(rows[1].class, "bare");
+
+        // Same two rows in one bundle: the propagation fires. Both halves in
+        // one test, so neither can pass by the other's accident.
+        rows[1].bundle = rows[0].bundle.clone();
+        assert_eq!(propagate_within_titles(&mut rows).unwrap(), 1);
+        assert_eq!(rows[1].row.issue, Some(1));
+        assert_eq!(rows[1].class, ISSUE_FROM_SIBLING);
     }
 
     /// Only within one title. A different title is a different comic, however
