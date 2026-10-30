@@ -122,15 +122,19 @@ jobs:
       - run: python3 scripts/check-fixtures.py
 
   licence:
-    name: code licence is MIT
+    name: code licence is GPL-3.0
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: LICENSE is MIT
+      - name: LICENSE is GPL-3.0
         run: |
           set -euo pipefail
-          head -1 LICENSE | grep -q 'MIT License'
-          echo "MIT confirmed"
+          # Two lines, because the title alone does not pin the version and
+          # this repo has already shipped one licence it had not checked.
+          grep -q 'GNU GENERAL PUBLIC LICENSE' LICENSE
+          grep -q 'Version 3, 29 June 2007' LICENSE
+          grep -q '^license = "GPL-3.0-or-later"$' Cargo.toml
+          echo "GPL-3.0 confirmed, and Cargo.toml agrees"
 
 # What the `mappings` job guarantees: every mapping file is under 2 MiB, and a
 # pull request adds at most 2,500 rows. Key collisions and per-field

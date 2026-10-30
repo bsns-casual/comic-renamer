@@ -223,6 +223,6 @@ GCD does not endorse this project.
 
 ## Licence
 
-Code [MIT](LICENSE). Corpus data CC BY-SA 4.0, per its source. The licence for
+Code [GPL-3.0-or-later](LICENSE). Corpus data CC BY-SA 4.0, per its source. The licence for
 publishing titles taken from Humble's order API as a dataset is not settled;
 that question gates a release.
