@@ -409,6 +409,44 @@ const SHIPPED_FILES: [&str; 3] = [
     include_str!("../../../data/mappings/sweet-shop.tsv"),
 ];
 
+/// The marketplaces whose rows have a file to land in, named so that
+/// `file_slug` produces each `SHIPPED_FILES` path.
+///
+/// A contribution can only be appended to a file that already ships: giving a
+/// new marketplace one means an `include_str!` and an array size, which is a
+/// Rust change nobody can make inside a data pull request. Appending to a file
+/// that *is* embedded needs no code change at all, because `include_str!` picks
+/// the new rows up at build time. Humble is deliberately absent —
+/// `data/mappings/humble.tsv` does not exist, because shipping it waits on the
+/// licence question (D51).
+///
+/// Hand-kept beside the array above, and pinned against the directory by
+/// `every_shipped_marketplace_has_a_file_and_the_reverse`.
+pub const SHIPPED_MARKETPLACES: [&str; 3] = ["Fanatical", "Global Comix", "Sweet Shop"];
+
+/// A name as it appears in a filename or a branch: ASCII alphanumerics kept
+/// and lowercased, every run of anything else collapsed to one `-`.
+/// `Global Comix` becomes `global-comix`, which is its mapping file's stem.
+pub fn file_slug(name: &str) -> String {
+    let rough: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .collect();
+    rough.split('-').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("-")
+}
+
+/// `data/mappings/<stem>.tsv` for a marketplace whose rows ship, else `None`.
+/// Matched on the slug, so `Global Comix`, `global comix` and `global-comix`
+/// are one marketplace.
+pub fn shipped_mapping_path(marketplace: &str) -> Option<String> {
+    let wanted = file_slug(marketplace);
+    SHIPPED_MARKETPLACES
+        .iter()
+        .map(|m| file_slug(m))
+        .find(|slug| *slug == wanted)
+        .map(|slug| format!("data/mappings/{slug}.tsv"))
+}
+
 /// Every shipped mapping file as one table with a single header. Embedded, so
 /// an installed binary needs nothing from the working directory. Rows stay
 /// sharded by marketplace on disk, so `find_key_collisions` must be checked over

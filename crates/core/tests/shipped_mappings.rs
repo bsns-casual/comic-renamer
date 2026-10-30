@@ -96,6 +96,43 @@ fn every_tsv_in_data_mappings_is_embedded() {
     assert!(files >= 3);
 }
 
+/// `SHIPPED_MARKETPLACES` tells `map` which contributions have a file to be
+/// appended to. A marketplace listed with no file sends a contributor to a
+/// `>>` that creates an unembedded TSV, which is exactly what
+/// `every_tsv_in_data_mappings_is_embedded` above refuses — measured
+/// 2026-10-29 by following the printed commands literally. A file with no
+/// marketplace listed is a channel that is silently closed.
+#[test]
+fn every_shipped_marketplace_has_a_file_and_the_reverse() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/mappings");
+
+    let listed: std::collections::BTreeSet<String> =
+        comic_renamer_core::mapping::SHIPPED_MARKETPLACES
+            .iter()
+            .map(|m| comic_renamer_core::mapping::file_slug(m))
+            .collect();
+
+    let on_disk: std::collections::BTreeSet<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| {
+            let path = e.unwrap().path();
+            (path.extension()? == "tsv")
+                .then(|| path.file_stem().unwrap().to_string_lossy().into_owned())
+        })
+        .collect();
+
+    assert_eq!(listed, on_disk, "SHIPPED_MARKETPLACES and data/mappings/ disagree");
+
+    // The path each one resolves to really is the file, and an unshipped
+    // marketplace really does resolve to nothing. Humble is the one that
+    // matters: it is `map`'s default.
+    for m in comic_renamer_core::mapping::SHIPPED_MARKETPLACES {
+        let path = comic_renamer_core::mapping::shipped_mapping_path(m).expect(m);
+        assert!(dir.join(path.strip_prefix("data/mappings/").unwrap()).is_file(), "{m}");
+    }
+    assert_eq!(comic_renamer_core::mapping::shipped_mapping_path("Humble"), None);
+}
+
 #[test]
 fn shipped_files_are_embedded_not_read_from_the_cwd() {
     // include_str! bakes the text in, so a changed working directory changes

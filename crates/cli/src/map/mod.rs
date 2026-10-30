@@ -2,7 +2,9 @@
 
 use crate::{guesses_for, parse_overrides, OVERRIDES};
 use comic_renamer_core::mapping::shipped_mappings;
-use comic_renamer_core::mapping::{key, parse_tsv, to_tsv, MappingRow, Mappings};
+use comic_renamer_core::mapping::{
+    file_slug, key, parse_tsv, shipped_mapping_path, to_tsv, MappingRow, Mappings,
+};
 use comic_renamer_core::mapping::same_bundle;
 use comic_renamer_core::normalize::collision_key;
 use comic_renamer_core::title::ParsedTitle;
@@ -220,7 +222,10 @@ const UPSTREAM: &str = "bsns-casual/comic-renamer";
 /// the only thing the user agrees to is the file write and the printout.
 pub struct Contribution {
     pub path: PathBuf,
+    /// Empty when this marketplace has no shipped file to append to, which is
+    /// the whole of how `guidance` tells the two apart.
     pub commands: Vec<String>,
+    pub marketplace: String,
 }
 
 /// The approved rows as a mapping file, and nothing else: no declined row, no
@@ -246,11 +251,16 @@ fn quote(s: &str) -> String {
 /// Writes `tsv` beside the local mappings and returns the commands that open
 /// the pull request. Nothing is executed and no credential is touched: `gh`
 /// owns authentication when the user runs the commands.
-pub fn contribute(tsv: &str, branch: &str) -> Result<Contribution, String> {
-    contribute_in(tsv, branch, &config_dir()?.join("contributions"))
+pub fn contribute(tsv: &str, branch: &str, marketplace: &str) -> Result<Contribution, String> {
+    contribute_in(tsv, branch, &config_dir()?.join("contributions"), marketplace)
 }
 
-fn contribute_in(tsv: &str, branch: &str, dir: &Path) -> Result<Contribution, String> {
+fn contribute_in(
+    tsv: &str,
+    branch: &str,
+    dir: &Path,
+    marketplace: &str,
+) -> Result<Contribution, String> {
     let ok_branch = !branch.is_empty()
         && !branch.starts_with(['-', '.'])
         && branch.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
@@ -264,8 +274,16 @@ fn contribute_in(tsv: &str, branch: &str, dir: &Path) -> Result<Contribution, St
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let path = dir.join(format!("{branch}.tsv"));
     std::fs::write(&path, tsv).map_err(|e| format!("{}: {e}", path.display()))?;
+    // No file to append to means no commands. Printing them anyway sent the
+    // contributor to a PR that is red before anyone reads it: a `cp` into
+    // `data/mappings/<branch>.tsv` creates a TSV that nothing embeds, and
+    // `every_tsv_in_data_mappings_is_embedded` refuses it. The rows are still
+    // written, because they are the user's work either way.
+    let Some(target) = shipped_mapping_path(marketplace) else {
+        return Ok(Contribution { path, commands: Vec::new(), marketplace: marketplace.to_string() });
+    };
+
     let repo = UPSTREAM.rsplit('/').next().unwrap();
-    let target = format!("data/mappings/{branch}.tsv");
     let title = format!("data: {n} mapping{} from {branch}", if n == 1 { "" } else { "s" });
     let work = dir.join(branch);
     let commands = vec![
@@ -273,14 +291,15 @@ fn contribute_in(tsv: &str, branch: &str, dir: &Path) -> Result<Contribution, St
         format!("gh repo fork {UPSTREAM} --clone"),
         format!("cd {repo}"),
         format!("git checkout -b {branch}"),
-        "mkdir -p data/mappings".to_string(),
-        format!("cp {} {target}", quote(&path.to_string_lossy())),
+        // Appended, header skipped: the marketplace's file already ships with
+        // one, and a second header line is not a row.
+        format!("tail -n +2 {} >> {target}", quote(&path.to_string_lossy())),
         format!("git add {target}"),
         format!("git commit -m {}", quote(&title)),
         format!("git push -u origin {branch}"),
         format!("gh pr create --repo {UPSTREAM} --title {} --body 'Mappings contributed from comic-renamer map.'", quote(&title)),
     ];
-    Ok(Contribution { path, commands })
+    Ok(Contribution { path, commands, marketplace: marketplace.to_string() })
 }
 
 /// Anything but an explicit yes declines: a contribution is public.
@@ -290,7 +309,12 @@ fn is_yes(answer: &str) -> bool {
 
 /// Offers the contribution after the local save (§6.5). Reads one line from
 /// stdin; the file is written only when the user types yes.
-fn offer_contribution(entries: &[table::Entry], bundle: &str, lang: &str) -> Result<(), String> {
+fn offer_contribution(
+    entries: &[table::Entry],
+    bundle: &str,
+    lang: &str,
+    marketplace: &str,
+) -> Result<(), String> {
     let tsv = contribution_tsv(entries, bundle, lang)?;
     if tsv.lines().count() < 2 {
         return Ok(());
@@ -306,7 +330,7 @@ fn offer_contribution(entries: &[table::Entry], bundle: &str, lang: &str) -> Res
         return Ok(());
     }
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let c = contribute(&tsv, &branch_for(bundle, secs))?;
+    let c = contribute(&tsv, &branch_for(bundle, secs), marketplace)?;
     for line in guidance(&c) {
         println!("{line}");
     }
@@ -320,8 +344,7 @@ fn offer_contribution(entries: &[table::Entry], bundle: &str, lang: &str) -> Res
 /// one bundle a new branch, directory and file; a bundle with no ASCII letters
 /// falls back to `bundle` so it is not `map--`.
 fn branch_for(bundle: &str, secs: u64) -> String {
-    let slug: String = bundle.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
-    let slug = slug.split('-').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("-");
+    let slug = file_slug(bundle);
     let slug = if slug.is_empty() { "bundle" } else { &slug };
     format!("map-{slug}-{secs}")
 }
@@ -330,6 +353,16 @@ fn branch_for(bundle: &str, secs: u64) -> String {
 /// which commands an owner skips, because the commands are all the user has.
 fn guidance(c: &Contribution) -> Vec<String> {
     let work = c.path.with_extension("");
+    if c.commands.is_empty() {
+        return vec![
+            format!("Your rows are in {}.", c.path.display()),
+            format!(
+                "Contributions for {} are not open yet: the project ships no mapping file for it, so there is nowhere for these rows to land.",
+                c.marketplace
+            ),
+            "Keep the file — it can be sent once that changes.".to_string(),
+        ];
+    }
     vec![
         format!("Your rows are in {}.", c.path.display()),
         "To send them you need `gh` signed in (`gh auth login`).".to_string(),
@@ -564,7 +597,7 @@ fn session(
             if let Outcome::Done = outcome {
                 // The mappings are already saved; a failed offer must not make
                 // the run report failure.
-                if let Err(e) = offer_contribution(&t.entries, folder, lang) {
+                if let Err(e) = offer_contribution(&t.entries, folder, lang, marketplace) {
                     println!("warning: the contribution was not prepared: {e}");
                 }
             }
@@ -1142,17 +1175,59 @@ mod tests {
     #[test]
     fn the_contribution_is_a_file_and_commands_for_the_user_to_run() {
         let dir = tempfile::tempdir().unwrap();
-        let c = contribute_in(&one_row_tsv(), "map-b", dir.path()).unwrap();
+        let c = contribute_in(&one_row_tsv(), "map-b", dir.path(), "Fanatical").unwrap();
         assert_eq!(std::fs::read_to_string(&c.path).unwrap(), one_row_tsv());
         assert!(c.commands.iter().any(|l| l.starts_with("gh pr create")), "{:?}", c.commands);
-        assert!(c.commands.iter().any(|l| l.contains("map-b.tsv")), "{:?}", c.commands);
+        // Appended to the marketplace's own shipped file, never a new one
+        // named after the branch: an unembedded TSV in `data/mappings/` fails
+        // `every_tsv_in_data_mappings_is_embedded` on arrival.
+        assert!(
+            c.commands.iter().any(|l| l.contains("data/mappings/fanatical.tsv") && l.starts_with("tail -n +2")),
+            "{:?}",
+            c.commands
+        );
+        assert!(!c.commands.iter().any(|l| l.contains("data/mappings/map-b.tsv")), "{:?}", c.commands);
+    }
+
+    /// Observed 2026-10-29 on a real `map` run: the printed commands copied
+    /// the rows to `data/mappings/map-<bundle>-<secs>.tsv`, and following them
+    /// literally failed `every_tsv_in_data_mappings_is_embedded` — the
+    /// contribution channel produced a pull request that was red before anyone
+    /// read it. Humble has no shipped file to append to, so there is nothing
+    /// honest to print; the rows are still written.
+    #[test]
+    fn a_marketplace_with_no_shipped_file_prints_no_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = contribute_in(&one_row_tsv(), "map-b", dir.path(), "Humble").unwrap();
+
+        // The user's work survives either way.
+        assert_eq!(std::fs::read_to_string(&c.path).unwrap(), one_row_tsv());
+        assert!(c.commands.is_empty(), "{:?}", c.commands);
+
+        let prose = guidance(&c).join("\n");
+        assert!(prose.contains("are not open yet"), "{prose}");
+        assert!(prose.contains("Humble"), "{prose}");
+        // No half-instruction: nothing that looks like a command to run.
+        for leak in ["gh pr create", "git push", "data/mappings"] {
+            assert!(!prose.contains(leak), "{leak} leaked into the prose:\n{prose}");
+        }
+
+        // And the slug decides it, not the exact spelling.
+        for spelling in ["global comix", "Global-Comix", "GLOBAL COMIX"] {
+            let c = contribute_in(&one_row_tsv(), "map-b", dir.path(), spelling).unwrap();
+            assert!(
+                c.commands.iter().any(|l| l.contains("data/mappings/global-comix.tsv")),
+                "{spelling}: {:?}",
+                c.commands
+            );
+        }
     }
 
     #[test]
     fn every_action_that_reaches_a_remote_or_the_filesystem_is_a_printed_command() {
         // The offer promises the user will see these before anything happens.
         let dir = tempfile::tempdir().unwrap();
-        let c = contribute_in(&one_row_tsv(), "map-b", dir.path()).unwrap();
+        let c = contribute_in(&one_row_tsv(), "map-b", dir.path(), "Fanatical").unwrap();
         for needle in ["gh repo fork", "mkdir -p", "git push", "gh pr create"] {
             assert!(c.commands.iter().any(|l| l.contains(needle)), "{needle}: {:?}", c.commands);
         }
@@ -1161,7 +1236,7 @@ mod tests {
     #[test]
     fn no_command_carries_a_token_or_credential() {
         let dir = tempfile::tempdir().unwrap();
-        let c = contribute_in(&one_row_tsv(), "map-b", dir.path()).unwrap();
+        let c = contribute_in(&one_row_tsv(), "map-b", dir.path(), "Fanatical").unwrap();
         for l in &c.commands {
             let l = l.to_lowercase();
             assert!(!l.contains("token") && !l.contains("password") && !l.contains("ghp_"), "{l}");
@@ -1172,7 +1247,7 @@ mod tests {
     fn a_branch_that_could_be_a_flag_or_a_path_is_refused_and_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         for bad in ["", "-x", "../x", "a/b", "a b", ".hidden"] {
-            assert!(contribute_in(&one_row_tsv(), bad, dir.path()).is_err(), "{bad:?}");
+            assert!(contribute_in(&one_row_tsv(), bad, dir.path(), "Fanatical").is_err(), "{bad:?}");
         }
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
@@ -1181,7 +1256,7 @@ mod tests {
     fn an_empty_contribution_is_refused_and_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let header_only = contribution_tsv(&[unapproved("x", "X")], "B", "en").unwrap();
-        assert!(contribute_in(&header_only, "map-b", dir.path()).is_err());
+        assert!(contribute_in(&header_only, "map-b", dir.path(), "Fanatical").is_err());
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
@@ -1253,13 +1328,13 @@ mod tests {
         assert_eq!(branch_for("Humble  Manga!", 7), "map-humble-manga-7");
         assert_ne!(branch_for("Humble Manga", 7), branch_for("Humble Manga", 8));
         assert_eq!(branch_for("\u{6F2B}\u{753B}", 7), "map-bundle-7");
-        assert!(contribute_in(&one_row_tsv(), &branch_for("\u{6F2B}\u{753B}", 7), tempfile::tempdir().unwrap().path()).is_ok());
+        assert!(contribute_in(&one_row_tsv(), &branch_for("\u{6F2B}\u{753B}", 7), tempfile::tempdir().unwrap().path(), "Fanatical").is_ok());
     }
 
     #[test]
     fn the_prose_matches_the_commands_it_introduces() {
         let dir = tempfile::tempdir().unwrap();
-        let c = contribute_in(&one_row_tsv(), "map-b", dir.path()).unwrap();
+        let c = contribute_in(&one_row_tsv(), "map-b", dir.path(), "Fanatical").unwrap();
         // Owners skip exactly the commands that make the fresh clone.
         assert!(c.commands[0].starts_with("mkdir -p") && c.commands[1].starts_with("gh repo fork") && c.commands[2].starts_with("cd "));
         let prose = guidance(&c).join("\n");
@@ -1267,7 +1342,18 @@ mod tests {
         assert!(prose.contains(&dir.path().join("map-b").join("comic-renamer").to_string_lossy().into_owned()), "{prose}");
         assert!(prose.contains("gh auth login"));
         assert!(!prose.contains("first command forks"));
-        let mk = c.commands.iter().position(|l| l == "mkdir -p data/mappings").expect("shared by clones of main");
-        assert!(mk < c.commands.iter().position(|l| l.starts_with("cp ")).unwrap());
+        // Shared by clones of main, so ordered independently of the fork
+        // steps above: the branch exists, then the rows are appended, then the
+        // file that was appended to is the file staged. `mkdir -p
+        // data/mappings` used to sit here to precede a `cp`; a clone that
+        // ships three TSVs always has the directory, and there is no `cp`.
+        let at = |needle: &str| {
+            c.commands.iter().position(|l| l.starts_with(needle)).unwrap_or_else(|| panic!("{needle}: {:?}", c.commands))
+        };
+        assert!(at("git checkout -b") < at("tail -n +2"));
+        assert!(at("tail -n +2") < at("git add"));
+        let target = "data/mappings/fanatical.tsv";
+        assert!(c.commands[at("tail -n +2")].ends_with(target), "{:?}", c.commands);
+        assert_eq!(c.commands[at("git add")], format!("git add {target}"));
     }
 }
