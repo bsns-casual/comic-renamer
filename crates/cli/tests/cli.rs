@@ -594,11 +594,13 @@ fn a_run_that_places_nothing_does_not_offer_an_undo() {
         !said.contains("comic-renamer undo"),
         "an undo was offered for a run that recorded nothing:\n{said}"
     );
-    // The exit code is zero here, and this test does not assert otherwise.
-    // The non-zero path belongs to the run that is refused *before* the
-    // prompt (`nothing_to_do`); a run that gets consent and then places
-    // nothing has always exited zero, and changing that is not this task's.
-    let _ = ok;
+    // The exit code is zero here, and D-a's ruling of 2026-10-30 keeps it
+    // that way **for this collision kind**. The destination already holds the
+    // file, which §6.10 calls the common case: the library matches the plan,
+    // so the run is an idempotent no-op and zero is the truth. The kinds that
+    // now exit non-zero are the ones no re-run can fix, pinned by
+    // `a_row_that_needs_a_human_exits_non_zero` below.
+    assert!(ok, "already-in-the-library is not a failure");
     // And the file that got there first is untouched.
     assert_eq!(
         std::fs::read(&f.placed).unwrap(),
@@ -731,8 +733,16 @@ fn applying_a_copy_twice_refuses_and_leaves_the_destination_alone() {
     // catches the occupied destination first, so the CLI cannot reach
     // `clone_excl`'s native EEXIST from here. Core's Task 9 suite covers the
     // syscall. What this covers is the layer above it — the refusal is
-    // reported, the file already in the library is untouched, and the exit
-    // code says nothing was placed.
+    // reported and the file already in the library is untouched.
+    //
+    // **The exit code is zero, and that changed on 2026-10-30** (D-a). Every
+    // refusal here is "already in the library", so the library matches the
+    // plan and re-running is an idempotent no-op. This test asserted non-zero
+    // before, which made `apply` indistinguishable from a real failure on the
+    // single most ordinary second run there is — §6.10 calls merging into a
+    // library that already holds these books the common case. A refusal no
+    // re-run can fix still exits non-zero; see
+    // `a_partial_run_that_abandons_a_row_to_a_human_exits_non_zero`.
     let f = fixture(Mode::Copy);
     assert!(run_in(&f, &["apply", f.plan.to_str().unwrap(), "--yes"], "")
         .status
@@ -744,7 +754,11 @@ fn applying_a_copy_twice_refuses_and_leaves_the_destination_alone() {
     let before = listing(&[&f.source, &f.dest]);
 
     let out = run_in(&f, &["apply", f.plan.to_str().unwrap(), "--yes"], "");
-    assert!(!out.status.success(), "{}", stdout(&out));
+    assert!(
+        out.status.success(),
+        "an idempotent re-run is not a failure (D-a):\n{}",
+        stdout(&out)
+    );
     assert_eq!(before, listing(&[&f.source, &f.dest]), "the second run wrote");
     assert_eq!(
         std::fs::read(&f.placed).unwrap(),
@@ -1583,4 +1597,70 @@ fn undo_refuses_rather_than_reporting_a_clean_zero_when_a_record_is_unreadable()
         "a clean report is the false statement:\n{said}"
     );
     assert_eq!(before, listing(&[&f.source, &f.dest]), "nothing may move");
+}
+
+
+/// D-a, the owner's ruling of 2026-10-30: exit non-zero only when a skip is
+/// *not* "already in the library".
+///
+/// **The partial run is where this is observable**, and writing the test is
+/// what showed why. When *every* row collides, `facts.files == 0` catches it
+/// before the prompt and it already exited non-zero. So the case D-a's entry
+/// described — consented, then placed nothing — only arises for the
+/// already-in-the-library kind, which is caught inside `apply` and stays zero
+/// by this very ruling. What was genuinely reported as success is a run that
+/// places most of its rows and abandons one to a collision no re-run can fix.
+///
+/// Here: three rows, one placeable, two wanting one name. One lands, two are
+/// refused, and the exit code says so.
+#[test]
+fn a_partial_run_that_abandons_a_row_to_a_human_exits_non_zero() {
+    let f = fixture(Mode::Move);
+    let (header, rows) = comic_renamer_core::plan::read(&f.plan).unwrap();
+
+    let make = |name: &str, id: &str, series: &str| {
+        let path = f.source.join(name);
+        std::fs::File::create(&path).unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        let mut r = rows[0].clone();
+        r.id = id.into();
+        r.source = path;
+        r.series = series.into();
+        r.destination_preview =
+            preset_by_id("komga").unwrap().destination(&Resolved {
+                series: series.into(),
+                volume: r.volume,
+                issue: r.issue,
+                subtitle: None,
+                run: r.run,
+                status: Status::Mapped,
+                record: None,
+            }, "pdf");
+        r.source_stat = SourceStat {
+            size: meta.len(),
+            mtime_ns: meta.mtime() * 1_000_000_000 + meta.mtime_nsec(),
+            inode: meta.ino(),
+        };
+        r
+    };
+
+    // Two rows for `Twins`, one for `Solo`. Only the twins collide.
+    let plan = f.source.parent().unwrap().join("partial.jsonl");
+    let all = [make("a.pdf", "r1", "Twins"), make("b.pdf", "r2", "Twins"), make("c.pdf", "r3", "Solo")];
+    comic_renamer_core::plan::write(&header, &all, &plan).unwrap();
+
+    let out = run_in(&f, &["apply", plan.to_str().unwrap(), "--yes"], "");
+    let said = stdout(&out) + &stderr(&out);
+
+    assert!(said.contains("1 placed"), "the solo row landed: {said}");
+    assert!(said.contains("rows want one name"), "{said}");
+    assert!(
+        !out.status.success(),
+        "a run that abandoned two rows to a human exited zero:\n{said}"
+    );
+    assert!(said.contains("needs a human"), "and says why: {said}");
+
+    // The placed one really is placed, and the twins really are not.
+    assert!(f.dest.join("Solo/Solo Vol. 01.pdf").exists(), "{said}");
+    assert!(f.source.join("a.pdf").exists() && f.source.join("b.pdf").exists(), "{said}");
 }

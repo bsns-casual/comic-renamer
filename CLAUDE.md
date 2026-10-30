@@ -423,9 +423,9 @@ each of which cost something to find:
 A missing corpus is "no guess", not an error (D49): `seed` prints one line and
 falls back to the parser for every row. `measure` still requires one.
 
-**Tests:** `cargo test --workspace` runs 613 and ignores 9 (counted 2026-10-30
-by `awk`-summing the `test result:` lines, which is the number to quote: 613
-passed, 0 failed, 9 ignored; 612 before the review of the one-decisions-table
+**Tests:** `cargo test --workspace` runs 615 and ignores 9 (counted 2026-10-30
+by `awk`-summing the `test result:` lines, which is the number to quote: 615
+passed, 0 failed, 9 ignored; 613 before D-a and D-d, 612 before the review of the one-decisions-table
 change, 610 before the change itself, 606
 before the two fix commits of 2026-10-29 and 2026-10-30, 596 before the casing
 rule, 537 before
@@ -435,7 +435,7 @@ D58, 510 before a four-seat adversarial review, 500 before the whole-branch
 review's fix wave, 409 and 7 before session-scoped undo), with no compiler
 warnings. **The 595 this file carried until 2026-10-27 was one short** — it was
 summed by hand; the baseline measured mechanically on the same tree is 596.
-**The whole suite is 622, and the nine ignored have not been run since
+**The whole suite is 624, and the nine ignored have not been run since
 2026-10-26**, when the five volume-gated ones passed — the casing rule touches
 none of their code. See "What the volume-gated suite does and does not
 protect" above before assuming a change needs them. The nine `#[ignore]`d
@@ -934,7 +934,41 @@ session-scoped-undo work and deliberately left for the owner, with the reasoning
 recorded here so it does not have to be re-derived. **D-b and D-c were answered
 on 2026-10-30; D-d needs more context, written below; D-a is reframed.**
 
-**D-a. `apply`'s exit code for a consented run that places nothing.** A run that
+**D-a. Settled 2026-10-30 and implemented: exit non-zero only when a skip is
+not "already in the library".** `ApplyResult` carries `unresolvable`, counted
+from the collisions whose `existing` is `None`, and `run_apply` returns an
+error when it is non-zero.
+
+**The rule applies at two sites, and the second was found by running the
+binary rather than the tests.** D-a's entry described the post-apply path, and
+fixing only that left the *pre-prompt* path (`facts.files == 0`) erroring
+whenever any row existed, regardless of kind — so **re-running an
+already-migrated bundle exited 1**, which is the single most ordinary second
+run there is and the exact case D-a says is zero. `Facts` carries
+`unresolvable` now and both paths read the same rule. The three cases,
+measured through the installed binary:
+
+```
+places 1 of 1                 exit 0
+all rows already in library   exit 0     <- was 1
+every file unmapped           exit 1
+```
+
+**Two existing tests asserted the old contract and were updated, not deleted.**
+`applying_a_copy_twice_refuses_and_leaves_the_destination_alone` asserted
+non-zero for the idempotent re-run — every other assertion in it stands, only
+the exit changed. `a_run_that_places_nothing_does_not_offer_an_undo` used to
+say "the exit code is zero here, and this test does not assert otherwise"; it
+asserts now, and a mutation treating already-in-library as unresolvable fails
+it and nothing else.
+
+The partial run is the case that was genuinely reported as success — places 400
+of 401, abandons one to a collision no re-run can fix. Pinned by
+`a_partial_run_that_abandons_a_row_to_a_human_exits_non_zero`, the sole guard.
+
+The original entry follows, for the reasoning.
+
+**D-a (original). `apply`'s exit code for a consented run that places nothing.** A run that
 *can* place nothing is caught before the prompt by `facts.files == 0`, skips the
 mode block, and exits non-zero — and since `fa06b00` that is true of the rowless
 plan too. A run that passes the typed confirmation and *then* places nothing,
@@ -974,7 +1008,17 @@ the gap mattered: a shell expands `~` before `scan` ever sees it, but a menu
 prompt does not, and the menu is the entry point for people who do not use
 flags — which is exactly the population that types `~/Comics`.
 
-**D-d. D57's "one record per pair" wording.** The sweep now exempts a record that
+**D-d. Settled 2026-10-30, option 3, and implemented: the menu reports every
+interrupted run.** The retention policy is untouched — D57's exception still
+keeps each interrupted record that has rows to put back — and the screen stops
+under-reporting them. `r` and `l` still act on the newest only, so this is
+wording rather than behaviour, which is why it was the cheap option. The pin is
+`the_menu_says_how_many_interrupted_runs_are_waiting`, which also asserts `r`
+still picks the newest.
+
+The entry below is the reasoning, including the two options not taken.
+
+**D-d (original). D57's "one record per pair" wording.** The sweep now exempts a record that
 is `interrupted && reversible > 0`, so retention is one finished record **plus one
 per un-reversed partial run**, with no constant cap. Measured: three
 interrupted-with-rows records for one pair gives "swept 1; records left 4", and

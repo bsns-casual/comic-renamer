@@ -102,12 +102,27 @@ fn first_interrupted(waiting: &[(PathBuf, Summary)]) -> Option<&(PathBuf, Summar
     waiting.iter().find(|(_, s)| s.interrupted)
 }
 
+/// How many interrupted runs are waiting. D-d, option 3, the owner's ruling of
+/// 2026-10-30: the retention policy is unchanged — D57's exception keeps every
+/// interrupted record that still has rows to put back — and the menu stops
+/// *under-reporting* them.
+///
+/// It offered only the newest, so N interrupted runs on one bundle looked like
+/// one and the rest were reachable solely by someone who thought to run
+/// `undo --list`. Measured when D-d was written: three such records for one
+/// pair gives "swept 1; records left 4". Saying the number is what makes the
+/// current behaviour honest rather than changing it.
+fn interrupted_count(waiting: &[(PathBuf, Summary)]) -> usize {
+    waiting.iter().filter(|(_, s)| s.interrupted).count()
+}
+
 fn first_completed(waiting: &[(PathBuf, Summary)]) -> Option<&(PathBuf, Summary)> {
     waiting.iter().find(|(_, s)| !s.interrupted)
 }
 
-/// The screen. Offers the newest record of each kind; older ones stay
-/// reachable through `undo --list`.
+/// The screen. Offers the newest record of each kind, and says how many more
+/// interrupted ones are behind it (D-d); older completed ones stay reachable
+/// through `undo --list`.
 ///
 /// `running` says another run holds a record right now. Such a record is
 /// filtered out of `waiting` — offering to reverse what an `apply` is still
@@ -132,15 +147,27 @@ pub fn render(
                 Run `comic-renamer undo --list` to see it and why.\n\n";
     }
     if let Some((_, s)) = first_interrupted(waiting) {
+        let n = interrupted_count(waiting);
+        // The others are not offered — `r` and `l` act on the newest — but a
+        // screen that did not name them made the older ones invisible.
+        let others = match n {
+            1 => String::new(),
+            2 => "\n  1 more interrupted run is waiting; `undo --list` shows them all.".to_string(),
+            _ => format!(
+                "\n  {} more interrupted runs are waiting; `undo --list` shows them all.",
+                n - 1
+            ),
+        };
         out += &format!(
             "A run on {} was interrupted ({} of {} rows placed). \
-             Your library at {} is partly migrated.\n  \
+             Your library at {} is partly migrated.{}\n  \
              r  put the placed files back\n  \
              l  leave it for now; this stays here until you deal with it\n\n",
             date(s.started),
             s.reversible,
             s.planned,
             s.dest_root.display(),
+            others,
         );
     }
     if let Some((_, s)) = first_completed(waiting) {
@@ -461,6 +488,59 @@ mod tests {
     /// rightly, since offering to reverse it is the worse error — so the
     /// screen said nothing at all at the one moment a library is being
     /// changed underneath it. Only `undo --list` had the word `running`.
+    /// D-d, option 3, the owner's ruling of 2026-10-30. The retention policy
+    /// is untouched — D57's exception keeps every interrupted record that has
+    /// rows to put back — and the menu stops pretending there is one.
+    ///
+    /// It offered only the newest, so three interrupted runs on one bundle
+    /// looked exactly like one and the other two were reachable only by
+    /// someone who thought to run `undo --list`.
+    #[test]
+    fn the_menu_says_how_many_interrupted_runs_are_waiting() {
+        let one = render(&[(p("a"), interrupted(3, 4))], false, false, false);
+        assert!(one.contains("was interrupted"), "{one}");
+        assert!(!one.contains("more interrupted"), "one is not 'and more': {one}");
+
+        let two = render(
+            &[(p("a"), interrupted(3, 4)), (p("b"), interrupted(1, 9))],
+            false,
+            false,
+            false,
+        );
+        assert!(two.contains("1 more interrupted run is waiting"), "{two}");
+        assert!(two.contains("undo --list"), "and where to see them: {two}");
+
+        let four = render(
+            &[
+                (p("a"), interrupted(3, 4)),
+                (p("b"), interrupted(1, 9)),
+                (p("c"), interrupted(2, 7)),
+                (p("d"), interrupted(5, 6)),
+            ],
+            false,
+            false,
+            false,
+        );
+        assert!(four.contains("3 more interrupted runs are waiting"), "{four}");
+
+        // A completed record beside them is not counted as interrupted.
+        let mixed = render(
+            &[(p("a"), interrupted(3, 4)), (p("b"), completed(400))],
+            false,
+            false,
+            false,
+        );
+        assert!(!mixed.contains("more interrupted"), "{mixed}");
+
+        // The keys still act on the newest only; this changes the wording, not
+        // the behaviour, which is the whole of why option 3 was the cheap one.
+        assert_eq!(
+            dispatch('r', &[(p("a"), interrupted(3, 4)), (p("b"), interrupted(1, 9))]),
+            Some(Key::Reverse(p("a"))),
+            "r still acts on the newest only"
+        );
+    }
+
     #[test]
     fn the_screen_says_when_a_run_is_in_progress() {
         let screen = render(&[], false, true, false);

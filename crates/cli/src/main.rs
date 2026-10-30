@@ -470,17 +470,22 @@ fn run_apply(
         // prompt over a run that will move nothing teaches the user that the
         // prompt does not mean anything.
         print!("{}", nothing_to_do(&facts));
-        // No rows *and* nothing left unmapped is the one no-op that succeeded:
-        // the plan asked for nothing, so nothing is outstanding. `scan` writes
-        // exactly this plan for an empty folder.
+        // Two ways of placing zero files are successes, and D-a is the rule
+        // that separates them from the rest.
         //
-        // Every other way of placing zero files leaves work undone — a row
-        // refused, or a file `scan` never planned — and a caller cannot tell
-        // "the library now matches the plan" from "it does not" out of an exit
-        // code that is zero either way. `rows.is_empty()` alone used to decide
-        // this, which made a bundle where *every* file was unmapped exit zero:
-        // the loudest possible "I did nothing", reported as success.
-        if rows.is_empty() && facts.not_ready == 0 {
+        // The plan asked for nothing — no rows, nothing unmapped — which is
+        // what `scan` writes for an empty folder. Or everything it asked for is
+        // already done: every refusal is "already in the library", so the
+        // library *does* match the plan and a re-run is an idempotent no-op.
+        // That second case is the one the real binary caught on 2026-10-30,
+        // after the post-apply half of D-a was written and this half was not:
+        // re-running an already-migrated bundle exited 1.
+        //
+        // Everything else leaves work undone — a file `scan` never planned, or
+        // a row no re-run can place — and a caller cannot tell "the library now
+        // matches the plan" from "it does not" out of an exit code that is zero
+        // either way.
+        if facts.not_ready == 0 && facts.unresolvable == 0 {
             return Ok(None);
         }
         return Err("nothing was placed".into());
@@ -510,6 +515,24 @@ fn run_apply(
     // store exists to take away.
     if result.record.is_some() {
         println!("  comic-renamer undo    puts this run back");
+    }
+    // D-a, the owner's ruling of 2026-10-30. A skip whose cause is "already in
+    // the library" means the file is where the plan wants it: §6.10 calls that
+    // the common case, the library *does* match the plan, and exit 0 is the
+    // truth. The other two collision kinds — two rows wanting one name, a
+    // destination that cannot be built — are work that will never happen
+    // without a human, and reporting them as success is what this fixes.
+    //
+    // Deliberately not restricted to runs that placed nothing, which is all
+    // D-a's entry described. A run that placed 400 of 401 and refused the last
+    // for an unresolvable reason has not done what the plan asked either, and
+    // the rule reads the same for both. Said here because the exit code is the
+    // one contract automation depends on.
+    if result.unresolvable > 0 {
+        return Err(format!(
+            "{} needs a human and will not be placed by re-running; see the reasons above",
+            plural(result.unresolvable, "row")
+        ));
     }
     Ok(result.record)
 }
@@ -560,6 +583,11 @@ struct Facts {
     /// disclosure that reported the count without the reason would leave the
     /// user with "0 placed · 1 skipped" and nothing to act on.
     collisions: Vec<String>,
+    /// Of `collisions`, how many cost an eligible row for a reason no re-run
+    /// fixes — two rows wanting one name, or a destination that cannot be
+    /// built. D-a: "already in the library" is not one of these, because the
+    /// file is where the plan wants it.
+    unresolvable: usize,
     edited: bool,
 }
 
@@ -644,6 +672,12 @@ impl Facts {
                 })
                 .map(describe)
                 .collect(),
+            unresolvable: found
+                .iter()
+                .filter(|c| c.existing.is_none())
+                .flat_map(|c| c.row_ids.iter())
+                .filter(|id| eligible.iter().any(|row| &&row.id == id))
+                .count(),
             edited,
         })
     }
@@ -1060,6 +1094,7 @@ mod tests {
             placeholder_bytes: 0,
             not_ready: 0,
             collisions: Vec::new(),
+            unresolvable: 0,
             edited: false,
         }
     }

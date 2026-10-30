@@ -218,6 +218,16 @@ pub struct Aside {
 pub struct ApplyResult {
     pub executed: usize,
     pub skipped: usize,
+    /// Rows refused for a reason other than the destination already holding
+    /// the file: two rows wanting one name, or a destination that cannot be
+    /// built. Counted apart from `skipped` because the two mean opposite
+    /// things to a caller (D-a, the owner's ruling of 2026-10-30).
+    ///
+    /// "Already in the library" is §6.10's *common* case and means the file is
+    /// where the plan wants it — the library matches, and a run that places
+    /// nothing for only that reason is an idempotent no-op. Anything here is
+    /// work that will never be done without a human.
+    pub unresolvable: usize,
     pub failed: usize,
     /// The record this run wrote, or `None` when it placed nothing. The record
     /// is created lazily on the first row that executes, so a run that refused

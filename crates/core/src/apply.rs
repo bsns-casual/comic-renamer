@@ -143,6 +143,17 @@ fn apply_inner(
         .copied()
         .collect();
     let skipped = rows.len() - runnable.len();
+    // Of those, the ones no re-run can fix. A collision carrying `existing`
+    // means the file is already where the plan wants it; the other two arms of
+    // `Facts::gather`'s `describe` — two rows wanting one name, and a
+    // destination that cannot be built — need a human. Counted over eligible
+    // rows only, so a refusal of work nobody asked for is not reported.
+    let unresolvable = collisions
+        .iter()
+        .filter(|c| c.existing.is_none())
+        .flat_map(|c| c.row_ids.iter())
+        .filter(|id| eligible.iter().any(|row| &&row.id == id))
+        .count();
 
     // `None` is `check`: everything above has run, and nothing below it
     // writes. The lock and the record store are only bound when they are
@@ -151,6 +162,7 @@ fn apply_inner(
         return Ok(ApplyResult {
             executed: runnable.len(),
             skipped,
+            unresolvable,
             failed: 0,
             record: None,
         });
@@ -263,6 +275,7 @@ fn apply_inner(
     Ok(ApplyResult {
         executed,
         skipped,
+        unresolvable,
         failed: 0,
         record: written,
     })

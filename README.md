@@ -112,9 +112,15 @@ bundle never needs it, and a failed download means "no guess", not an error.
 
 A file already at the destination is refused by name and left exactly as it is
 — never overwritten, never renamed around. Merging into a library that already
-holds some of these books is the ordinary case, not the awkward one. The
-disclosure says which ones before you confirm, and a run that can place
-nothing tells you why and exits non-zero rather than reporting success.
+holds some of these books is the ordinary case, not the awkward one, and the
+disclosure says which ones before you confirm. **That kind of refusal exits
+zero**: the file is where the plan wants it, so the library matches and
+re-running changes nothing.
+
+Two rows wanting one name is different. Nothing fixes it but renaming a file,
+so `apply` says which rows and **exits non-zero** — including when the rest of
+the run placed fine. A run that can place nothing at all tells you why and
+exits non-zero too.
 
 Editing the plan means editing the **metadata** — the series, the volume, the
 subtitle. It does not mean editing paths: the destination is recomputed from
