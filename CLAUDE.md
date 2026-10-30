@@ -422,9 +422,10 @@ each of which cost something to find:
 A missing corpus is "no guess", not an error (D49): `seed` prints one line and
 falls back to the parser for every row. `measure` still requires one.
 
-**Tests:** `cargo test --workspace` runs 606 and ignores 9 (counted 2026-10-27
-by `awk`-summing the `test result:` lines, which is the number to quote: 606
-passed, 0 failed, 9 ignored; 596 before the casing rule, 537 before
+**Tests:** `cargo test --workspace` runs 610 and ignores 9 (counted 2026-10-30
+by `awk`-summing the `test result:` lines, which is the number to quote: 610
+passed, 0 failed, 9 ignored; 606 before the two fix commits of 2026-10-29 and
+2026-10-30, 596 before the casing rule, 537 before
 the issue column, 534 before
 the corpus-confirms-a-colon change, 530 before
 D58, 510 before a four-seat adversarial review, 500 before the whole-branch
@@ -653,10 +654,116 @@ name above.
 
 ### Pick up here
 
+**The tool was driven end to end for the first time on 2026-10-29/30, including
+`map`.** Three commits came out of it and all three are pushed and green. What
+that session established, and the two decided-but-unwritten items it left, are
+in "The first real test run" immediately below. Read that before the older
+entries; it supersedes nothing but it is the newest state.
+
 **MVP first. The owner's call, 2026-10-27: Homebrew is a launch item, not an
 MVP item.** The release workflow and the formula are done and tested, so that
 work is parked rather than unfinished — "Task 15, Homebrew" below holds the
-three owner steps and every measurement, so none of it has to be re-derived.
+owner steps and every measurement, so none of it has to be re-derived. **The
+tap repo now exists**: `bsns-casual/homebrew-tap`, public and empty, created
+2026-10-30. The repository itself is **still private**, held deliberately — see
+the licence entry.
+
+### The first real test run, 2026-10-29/30
+
+Nothing here was read from the code; all of it was run.
+
+**The installed binary was six days and three feature waves stale** — Oct 22,
+from `sites/temp-parser-test/comic-renamer/comic-renamer/crates/cli`, with no
+`map` and no menu. Check `comic-renamer --help` against the command list before
+trusting any manual test. `cargo install --path crates/cli --locked` takes ~24s.
+
+**The whole pipeline works.** A 10-file bundle built from the 12 shipped
+marketplace rows: `scan` 10/10 mapped, `apply --yes` 10 placed, `undo` 10
+restored, library empty of files *and* series directories afterwards, record
+swept, lock retained. All ten Komga paths correct — `Vol. 06` padded to two,
+`0001` to four with no `#`, `/` rendered ` - `.
+
+**`map` works too**, on 12 files from one real Humble bundle. The approval
+table, the save to `<config>/mappings.tsv`, the contribution prep, the plan, the
+disclosure's "Not ready, so left where they are: 1 of 12 rows", typed `MOVE`,
+11 placed. It also ran *non-interactively* on a later folder where every file
+was already mapped, confirming the narrower claim this file already makes about
+when it needs a terminal.
+
+**Two commits of fixes came out of it**, both pushed to `main`, both green:
+
+- `fa06b00` — `scan`'s guess line joined every candidate's series with no
+  dedup, so `popeyevolume1_oliveoylandhersweety` printed `Popeye` twenty times
+  and `Pop-Eye` once: 230 characters saying one thing. Collapsed at the display
+  in `series_line`, **not** in the resolver, because `map`'s picker renders
+  volume/issue/subtitle too and `table::run_length` reads a `volume_count` off
+  the same list. Same commit: `apply` exited **0** over a plan whose every file
+  was unmapped, because the branch keyed on `rows.is_empty()` alone. It now also
+  requires `facts.not_ready == 0`, leaving exit 0 to the genuinely empty plan
+  `scan` writes for an empty folder. That is *not* D-a.
+- `e21b426` — **the contribution channel produced pull requests that were red
+  before anyone read them.** The printed commands copied the rows to
+  `data/mappings/map-<bundle>-<secs>.tsv`; following them literally fails
+  `every_tsv_in_data_mappings_is_embedded`, and `check-mappings` stays green so
+  the `mappings` job would not have caught it either. The commands now *append*
+  to the marketplace's own file, which needs no code change in the PR because
+  `include_str!` picks the rows up at build time — verified by appending the
+  real 11 rows to `fanatical.tsv`: 610 passed, 0 failed. A marketplace with no
+  shipped file now prints no commands, because none could work; that is Humble,
+  `map`'s **default**, and the channel opens by itself the day `humble.tsv`
+  lands. `SHIPPED_MARKETPLACES` and `file_slug` in `mapping.rs` are the new
+  machinery, pinned against the directory both ways.
+
+**CI run 40976839595 is green on all six jobs**, `rust-corpus` and the
+volume-gated job among them — so **the full 619 have all been executed** on this
+work, not just the 610 that run locally. The nine ignored last ran 2026-10-26
+before this.
+
+#### Three things that looked like tool bugs and were keystrokes
+
+Worth the pattern, not the particulars: **probe the resolver before reporting a
+stored value as wrong.** All three were found by feeding the stem through
+`guesses_for` in a throwaway `#[ignore]`d test against the real corpus cache.
+
+- `21`'s subtitle stored as `The Story of Roberto Clement`. The resolver returns
+  `sub="thestoryofrobertoclementepb"` — the raw unsplit stem, D15's
+  `is_unsplit`, which the picker correctly flags. Deleting `pb` took the `e`.
+  The corpus spells `Clemente` right.
+- `Prince Valiant Vol. 1` stored with subtitle `1937-1939`. The resolver returns
+  **no candidates at all** and no corpus record carries those years. Typed.
+- `BTTM FDRS`. One candidate, `Btmmfdrs`, from the filename. **`scan` and `map`
+  do not disagree about it** — an earlier claim in this session that they did was
+  wrong. The correct title was typed.
+
+Both wrong rows were corrected in the owner's `<config>/mappings.tsv` on
+2026-10-30 and verified through `map`, which now plans
+`21/21 - The Story of Roberto Clemente.cbz` and
+`Prince Valiant/Prince Valiant Vol. 01 - 1937-1938.cbz`.
+
+#### `scan` does not read the user's own mappings
+
+Marked `shortcut:` at `main.rs:248` — `Mappings::load(&shipped_mappings(), None)`
+— against `map/mod.rs:507`, which passes the local path. **Measured 2026-10-30,
+not inferred**: the same two files in the same folder are "2 unmapped" to `scan`
+and "every file is already mapped" to `map`. So a title approved in `map` is
+invisible to the non-interactive path, which is the path a re-run or a script
+uses. The shortcut's stated reason is that `map` owns where the file lives; the
+fix is passing `config_dir()?.join("mappings.tsv")`. Not done — undoing a marked
+shortcut is a decision, and it belongs with the item-4 conversation.
+
+#### Two decisions taken, not yet implemented
+
+- **Duplicate candidates: dedup upstream, highest `volume_count` wins** (owner,
+  2026-10-30). Confirmed on two stems: Popeye returns 21 candidates that
+  collapse to 2 distinct series, Willie & Joe returns 2 identical in *every*
+  field the picker renders. So the `series_line` fix does nothing for `map` and
+  the dedup has to move into the resolver, on every field except `volume_count`.
+  Measured first, because it bounds the stakes: the width is `max(2, digits)`,
+  so `4` and `65` both give two — **the arbitrary pick is invisible below volume
+  100.** Highest was chosen as the only option that cannot under-pad a real long
+  run.
+- **`ask_path` always expands `~`** (owner, 2026-10-30, settling D-c).
+  `menu.rs:246` strips quotes and does nothing else.
 
 **0. The review is decided, exported and committed.** 2,204 of 2,204, now at
 `review/humble-decisions.tsv` with its own README and the five not-a-comic rows
@@ -706,9 +813,13 @@ stored decisions win today, because the page fills a decided row from the
 store and the new proposal reaches it only through `↺`. A later `DIE` volume
 in a new bundle would arrive proposing `Die` again.
 
-Two likely typos in the stored decisions, both surfaced by comparing them
-against the new proposals: `Exquiste Corpses` (2 rows, missing the `i`) and
-`Front Knife` where the title is `FIRST KNIFE` (1 row).
+**The "two likely typos" this file used to record here are not typos.** Checked
+2026-10-30: neither `Exquiste Corpses` nor `Front Knife` exists anywhere in
+`review/`, `data/` or `fixtures/`. The committed export has `Exquisite Corpses`
+(rows 714–715) and `First Knife` (row 766), both spelled correctly, against
+Humble's own `EXQUISITE CORPSES, VOL. 1` and `FIRST KNIFE` — so they are D62
+casing decisions behaving correctly. The note described the artifact store
+before the export, or it was never right. Do not go looking for them.
 
 The licence gate was checked before pushing and is **not** crossed: the
 shipped table carries only Fanatical, Global Comix and Sweet Shop bundles,
@@ -781,36 +892,52 @@ in a TUI, to save six lines.
 doc comment carries D60's "why four digits, why no `#`", which is this repo's
 house style for a decided thing.
 
-### Four decisions waiting on the owner
+### Four decisions waiting on the owner — two of them now settled
 
 None blocks development and none blocks a release. Each was ruled on during the
 session-scoped-undo work and deliberately left for the owner, with the reasoning
-recorded here so it does not have to be re-derived.
+recorded here so it does not have to be re-derived. **D-b and D-c were answered
+on 2026-10-30; D-d needs more context, written below; D-a is reframed.**
 
 **D-a. `apply`'s exit code for a consented run that places nothing.** A run that
 *can* place nothing is caught before the prompt by `facts.files == 0`, skips the
-mode block, and exits non-zero — that part is accurate. A run that passes the
-typed confirmation and *then* places nothing, because every row collided at
-execution, exits **zero**. By this file's own reasoning that is wrong: "an exit
-code that is zero either way cannot tell a caller 'the library matches the plan'
-from 'it does not'." It was left alone because it is pre-existing and a
-user-visible change to the one contract automation depends on, which is not a
-thing to alter inside a plan about undo records.
+mode block, and exits non-zero — and since `fa06b00` that is true of the rowless
+plan too. A run that passes the typed confirmation and *then* places nothing,
+because every row collided at execution, exits **zero**.
 
-**D-b. What `reversible` should count.** It counts rows the record *recorded* as
-reversible, not rows still in the library, so a partial reverse over-reports.
-Changing it changes the menu's wording and `undo --list`'s output, so it is a
-semantics decision rather than a fix. Note the related trap, already closed: the
-count must stay derived from `expected()`, because the two disagreed once and a
-crash in the default mode's one-syscall window then produced a record every
-automatic path read as empty and the next run deleted.
+**Reframed 2026-10-30, after the owner asked why zero is wrong here: for one of
+the three collision kinds it is not wrong, and that is the useful answer.**
+`Facts::gather`'s `describe` has three arms:
 
-**D-c. Whether the menu expands `~`.** `ask_path` strips quotes and does not
-expand `~`; the doc comment claiming otherwise has been corrected. A shell
-expands `~` before `scan` ever sees it, but a menu prompt does not — and the menu
-is the entry point for people who do not use flags, which is exactly the
-population that types `~/Comics`. The gap is real; how much path syntax a prompt
-should parse is the open question.
+- `existing: Some(_)` — "is already in the library". §6.10 calls this the common
+  case, not the rare one. Every row skipped for this reason means the file is
+  *already where the plan wants it*, so the library **does** match the plan and
+  the run is an idempotent no-op. **Exit 0 is correct**, and this file's stock
+  justification ("a caller cannot tell 'the library matches the plan' from 'it
+  does not'") simply does not apply: it can, and it does match.
+- `row_ids.len() > 1` — "N rows want one name". Unresolvable without a human;
+  one of those rows will never be placed.
+- the remaining arm — "cannot be placed".
+
+The latter two are genuine failures. So the decision is not "0 or 1" but
+**whether `apply` distinguishes the kinds**, which today it cannot: it exits 0
+over all three. The narrow change is to exit non-zero only when some skip was
+*not* `existing: Some(_)`. Still the owner's call, because it is a user-visible
+change to the one contract automation depends on.
+
+**D-b. Settled 2026-10-30: `reversible` keeps counting what the record
+recorded.** No code change. The known consequence stands and is accepted: a
+partial reverse over-reports, because the number describes the record rather
+than the library. The adjacent trap is unchanged and still load-bearing — the
+count must stay derived from `expected()`, never parallel to it, or a crash in
+move mode's one-syscall window produces a record every automatic path reads as
+empty and the next run deletes.
+
+**D-c. Settled 2026-10-30: `ask_path` always expands `~`.** Not yet
+implemented; `menu.rs:246` currently strips quotes and nothing else. The reason
+the gap mattered: a shell expands `~` before `scan` ever sees it, but a menu
+prompt does not, and the menu is the entry point for people who do not use
+flags — which is exactly the population that types `~/Comics`.
 
 **D-d. D57's "one record per pair" wording.** The sweep now exempts a record that
 is `interrupted && reversible > 0`, so retention is one finished record **plus one
@@ -819,6 +946,50 @@ interrupted-with-rows records for one pair gives "swept 1; records left 4", and
 `first_interrupted` surfaces only the newest, so the rest are reachable only
 through `undo --list`. The behaviour is defensible and documented as a D57
 exception; the entry's own summary sentence no longer describes it.
+
+**More context, written 2026-10-30 at the owner's request.** The whole policy is
+`record::supersede`, and it is nine lines. For every record in the store other
+than this run's own, in order:
+
+```
+skip if it is this run's record            (keep.file_name())
+skip if it will not summarise              (a stray file cannot abort a sweep)
+skip if either root differs                (another bundle, or another library)
+skip if interrupted && reversible > 0      (the D57 exception — the menu's `l` promises it stays)
+skip if another process holds it           (is_live)
+otherwise delete it
+```
+
+Called from `apply` only when this run actually created a record, and only under
+the library lock the caller already holds. Both halves are load-bearing and the
+comment there says why: `supersede` deletes every record for the pair *other
+than the one named*, so calling it after a run that recorded nothing names
+nothing and takes the lot — run `apply` twice, collide on every row the second
+time, and 400 placed files stop being reversible. The lock is what makes
+`is_live` followed by `remove_file` something other than check-then-act on that
+exact file.
+
+**What is actually being decided.** Only the fourth line. Keep it and retention
+is unbounded in one specific way: N interrupted runs over one bundle leave N
+records, and `first_interrupted` offers only the newest, so the older ones are
+reachable only by someone who thinks to run `undo --list`. Drop it and the menu's
+`l` key breaks its promise — `l` says "leave this record alone" and the next
+`apply` on that bundle would delete it. Three options, none of them obviously
+right, which is why it is here:
+
+- **Keep as is.** Unbounded, but every retained record has rows that can still
+  be put back. Nothing is ever lost; the cost is clutter and a menu that
+  under-reports what is there.
+- **Cap it** at, say, the newest three interrupted records per pair, sweeping
+  older ones. Bounds the store, and silently discards a way back for the oldest.
+- **Surface them instead of capping** — have the menu say "3 interrupted runs
+  for this bundle" rather than offering only the newest. Keeps every record,
+  fixes the under-reporting, costs a line of menu wording and nothing else.
+
+The third is the one that makes the current behaviour honest rather than
+changing it, and it is the cheapest. The remaining wording fix either way: D57's
+own summary sentence should say "one finished record per pair, plus any
+interrupted run that still has rows to put back".
 
 ### Owner's calls on the backlog, 2026-10-25
 
@@ -868,6 +1039,34 @@ Then, two things that gate a release but block no development.
 **1. The licence for publishing Humble-derived titles. Deferred by the owner on
 2026-10-25** — saved for later, not dropped. It still gates publishing the table
 and blocks no development.
+
+**Direction given 2026-10-30: "whatever suits our needs most while staying open
+source."** That is a direction, not yet a resolution, and two things found while
+acting on it are worth recording because they narrow the question:
+
+- **GCD-derived fields are already mixed into the Humble rows**, so the share-
+  alike question is not separable. 128 rows had their series casing settled by
+  the corpus (D62) and 111 had a colon confirmed by it — 239 of 2,223 rows carry
+  a field the corpus decided. `data/LICENSE` ties rule data to GCD under
+  CC BY-SA 4.0, and BY-SA propagates. So **keeping all of `data/` under
+  CC BY-SA 4.0 with attribution to GCD is the answer that needs no new
+  decision**; a looser licence for the Humble rows is not available without
+  stripping the corpus's contribution back out. Code stays MIT, which the
+  `licence` CI job already checks.
+- **A licence cannot grant rights nobody has**, and the open part was never
+  really "which licence" — it is whether redistributing a 2,199-row compilation
+  pulled from Humble's order API is permitted. That is Humble's terms of
+  service, not copyright: individual titles are short factual strings and US law
+  gives thin protection to factual compilations, while the EU has a separate
+  database right. Nobody here is qualified to settle that and it should not be
+  guessed at in this file.
+
+**The repository is still private as of 2026-10-30, held deliberately.** The
+owner asked to go public for Homebrew; making it public publishes
+`review/humble-decisions.tsv` and every Humble title in the tests and docs,
+which is the use D31 does *not* sanction and the thing this very entry gates.
+Clones, forks and code-search indexes outlive a visibility flip, so it waits on
+an explicit go. The tap repo was created separately and holds nothing.
 **1. The licence for publishing Humble-derived titles.** `data/LICENSE` ties
 rule data to the Grand Comics Database under CC BY-SA 4.0. The Humble titles came
 from Humble's order API, and D31 committed them as *test* data, with no URLs,
@@ -1006,10 +1205,15 @@ What the owner has to do, in order:
    licence item, not the same one.
 2. **Tag `v0.1.0`.** The workflow refuses a tag that disagrees with
    `crates/cli/Cargo.toml`.
-3. **Create `bsns-casual/homebrew-tap`** — that exact repo name, because brew
-   expands `user/tap/name` to `github.com/user/homebrew-tap` and the whole
-   point is that `brew install bsns-casual/tap/comic-renamer` is the entire
-   command. Name it `homebrew-comic-renamer` and the user types the name twice.
+3. ~~**Create `bsns-casual/homebrew-tap`**~~ — **done 2026-10-30**, public and
+   empty: `https://github.com/bsns-casual/homebrew-tap`. That exact repo name,
+   because brew expands `user/tap/name` to `github.com/user/homebrew-tap` and
+   the whole point is that `brew install bsns-casual/tap/comic-renamer` is the
+   entire command. Named `homebrew-comic-renamer` the user would type the name
+   twice.
+
+So **steps 1 and 2 remain**, and step 1 is held on the licence entry above
+rather than on anything technical.
 
 **A prebuilt binary, not a source build, and not a cask.** Each leg measured
 2026-10-27:
@@ -1053,6 +1257,16 @@ this machine has a `cargo install`ed binary in `~/.cargo/bin` that brew's
   folder with one unmapped file, `scan` printed the count, listed the file with a
   guess, and wrote a plan, and the word `map` appears nowhere in the output. The
   README documents what the code does, not what §6.1 says.
+  **Worse than that at 100% unmapped**, measured 2026-10-30: over eight files
+  the mapping knows nothing about, `scan` prints the count and five guesses and
+  then says `comic-renamer apply comic-renamer-plan.jsonl` — routing the user to
+  a command that, since `fa06b00`, correctly places nothing and exits 1. The
+  owner has flagged this and the other spec-versus-code items for a conversation
+  rather than a one-line copy fix; do not patch the sentence unilaterally.
+- **Only five guesses are ever shown.** `COLLISIONS_SHOWN` is 5 and caps the
+  *rows* `suggest_for` prints, so a 2,200-file bundle reports five guesses and
+  the rest silently. Deliberate, and it is why the `Popeye` line was the one
+  that surfaced the dedup bug.
 - **§6.11's caps are enforced in CI, and only partly at `apply`.** Field
   validation (forbid-list, 120-byte cap) runs when a mapping is loaded, in `map`,
   and in `seed`. The row and file-size caps run in CI. `rendered_budget_ok`
