@@ -795,8 +795,9 @@ shortcut is a decision, and it belongs with the item-4 conversation.
 
 **0. The review is decided, exported and committed.** 2,204 of 2,204, now at
 `review/humble-decisions.tsv` with its own README and the five not-a-comic rows
-beside it. Validated by embedding it as a shipped mapping and running the real
-suite: 606 passed, 0 failed. What remains is the licence question, which gates
+beside it — 2,031 rows in the shipped shape since 2026-10-30, down from 2,199
+eight-column ones. Validated by embedding it and running the real suite: 613
+passed, 0 failed. What remains is the licence question, which gates
 moving it into `data/decisions.tsv`. **It is no longer a `git mv`, and a `git mv`
 would break every user's load**: the file still has the pre-D64 eight columns,
 which `parse_tsv` refuses outright, and its 2,199 rows hold 2,031 distinct keys,
@@ -1128,11 +1129,18 @@ failed, covering `MappingRow::validate` over every row, `find_key_collisions`
 over the joined table, and the frozen key pin. Both changes were reverted.
 
 **That validation predates D63 and so does the recipe it implied. Do not
-follow it.** `data/mappings/` is gone, and **`SHIPPED_FILES` does not exist in
-any code** — one `const SHIPPED` inside `shipped_mappings()` replaced it, so
-there is no array and no size to bump. Shipping the table now takes four steps
-and two of them are data transformations: drop field 8, collapse 2,199 rows to
-2,031 keys, append to `data/decisions.tsv`, `git rm` the old file.
+follow it.** `data/mappings/` is gone and gitignored, and **`SHIPPED_FILES`
+does not exist in any code** — one `const SHIPPED` inside `shipped_mappings()`
+replaced it, so there is no array and no size to bump.
+
+**The two data transformations are done, 2026-10-30.** The file is 2,031 rows
+in the shipped seven-column shape: `bundle` dropped, 168 repeated keys
+collapsed, **zero disagreements across all seven fields** — D64's load-bearing
+measurement, confirmed on the real decided table. Shipping it is now
+`tail -n +2 review/humble-decisions.tsv >> data/decisions.tsv` and a `git rm`.
+Checked by doing exactly that and reverting: the joined 2,043-row table gives
+613 passed, 0 failed, at 132 KB against a 4 MiB cap, with zero key overlap
+against the 12 rows already shipped.
 **`review/README.md` is the accurate copy of this** — an earlier version of
 this file said it "still describes the old shape", which was false and taught
 agents to distrust the one correct document.

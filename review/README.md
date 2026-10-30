@@ -1,7 +1,15 @@
 # The reviewed Humble table
 
 `humble-decisions.tsv` is the Humble bundle table after a human decided every
-row: 2,199 rows, 2,031 distinct keys, 680 series. `humble-decisions-not-comics.tsv`
+row: **2,031 rows in the shipped shape** — seven columns, one row per key.
+
+It held 2,199 eight-column rows until 2026-10-30, when D63/D64 changed what the
+shipped table is. The transformation dropped the `bundle` column and collapsed
+168 repeated keys; **zero of them disagreed on any of the seven fields**, which
+is the measurement D64 rests on, now confirmed on the real decided table rather
+than argued. Which bundles a key appeared under — 158 keys appeared under more
+than one — is in this file's git history and in the review artifact's own
+store, which `scripts/export-decisions.py` can re-dump. `humble-decisions-not-comics.tsv`
 holds the five files the reviewer marked as not comics — two light novels and
 three audiobooks — so a later `seed` run has a record of them instead of
 proposing them again.
@@ -50,18 +58,26 @@ is not what is holding this file here — the licence question is.
 
 ## To ship it, once that question is answered
 
-Simpler than it was, because D63 left one embedded file rather than an array,
-and harder in one way, because D64 made the key the whole identity:
+Two steps. The data work is done:
 
-1. **Drop the `bundle` column** (field 8). The shipped table has seven
-   columns; `parse_tsv` refuses eight and says so.
-2. **Collapse to one row per key.** 2,199 rows hold 2,031 distinct keys, so
-   168 are repeats — every one of them agreeing on every field, which is the
-   measurement D64 rests on. `find_key_collisions` refuses a repeated key, so
-   this is not optional.
-3. Append the result to `data/decisions.tsv` and `git rm` the file here.
-4. `cargo test --workspace`, which is what proves steps 1 and 2 were done:
-   `the_decisions_file_is_the_one_that_ships` checks every row on disk is a row
-   the binary holds, and the loader refuses a duplicate key.
+1. `tail -n +2 review/humble-decisions.tsv >> data/decisions.tsv`
+2. `git rm review/humble-decisions.tsv` (and decide what becomes of
+   `humble-decisions-not-comics.tsv`, which is a record of five rejected files
+   and still carries its `bundle` column, because it is not a mapping table)
 
-No `include_str!` edit and no array size — there is one of each now.
+No `include_str!` edit and no array size — D63 left one embedded file. No
+column drop and no key collapse — done 2026-10-30.
+
+**Checked by doing exactly step 1 and reverting**, on 2026-10-30: the joined
+2,043-row table gives `cargo test --workspace --no-fail-fast` **613 passed, 0
+failed** — `MappingRow::validate` over every row, `find_key_collisions` over
+the whole table, the frozen key pin, and
+`the_decisions_file_is_the_one_that_ships`. 132 KB against the 4 MiB cap, and
+zero key overlap with the 12 rows already shipped. The 2,500-rows-per-PR cap is
+PR-only and this repo pushes to `main`, so it is not what holds the file here.
+The licence question is.
+
+**Do not validate by copying this into `data/mappings/`.** That path is what an
+older version of CLAUDE.md suggested; it is now gitignored, and
+`the_decisions_file_is_the_one_that_ships` was made recursive on 2026-10-30
+precisely because three adversarial seats did that and every gate stayed green.
