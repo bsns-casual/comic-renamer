@@ -134,7 +134,15 @@ jobs:
           grep -q 'GNU GENERAL PUBLIC LICENSE' LICENSE
           grep -q 'Version 3, 29 June 2007' LICENSE
           grep -q '^license = "GPL-3.0-or-later"$' Cargo.toml
-          echo "GPL-3.0 confirmed, and Cargo.toml agrees"
+          # And the Homebrew formula this repo emits, which is the copy the
+          # public sees. It said MIT for a day after the switch, because the
+          # original check only read the first line of LICENSE.
+          grep -q 'license "GPL-3.0-or-later"' .github/workflows/release.yml
+          # Named files, not the whole directory: this step's own text contains
+          # the string it looks for, so a recursive grep matched itself and the
+          # check could never pass.
+          ! grep -n 'MIT' Cargo.toml .github/workflows/release.yml
+          echo "GPL-3.0 confirmed in LICENSE, Cargo.toml and the emitted formula"
 
 # What the `mappings` job guarantees: the decisions table is under 4 MiB, and a
 # pull request adds at most 2,500 rows. Key collisions and per-field

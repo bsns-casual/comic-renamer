@@ -108,7 +108,7 @@ jobs:
             homepage "https://github.com/${GITHUB_REPOSITORY}"
             url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${name}"
             sha256 "${sha}"
-            license "MIT"
+            license "GPL-3.0-or-later"
 
             # macOS-only by construction: renamex_np, fclonefileat and
             # std::os::macos::fs::MetadataExt are Apple-gated.
