@@ -6,9 +6,8 @@ Point it at a folder, pick your app, and it identifies each file and shows you
 every proposed rename. Nothing moves until you approve the plan. Files it cannot
 identify are flagged for review rather than guessed at.
 
-**Status: `map`, `scan`, `apply`, `undo` and a startup menu work. Komga is the only preset, and
-there is no Homebrew formula yet** — install from source, which is three
-commands. See [`docs/specs/`](docs/specs/) for the design and
+**Status: `map`, `scan`, `apply`, `undo` and a startup menu work. Komga is the
+only preset.** See [`docs/specs/`](docs/specs/) for the design and
 [`docs/research/`](docs/research/) for the measurements behind it.
 
 ## Install
@@ -17,6 +16,31 @@ commands. See [`docs/specs/`](docs/specs/) for the design and
 `clonefile(2)`, `renamex_np` and `std::os::macos::fs`, with no `cfg` gating
 and no fallback path, so there is nothing to build elsewhere. Developed and
 tested on Apple Silicon.
+
+### Homebrew
+
+```sh
+brew trust bsns-casual/tap
+brew install bsns-casual/tap/comic-renamer
+```
+
+**The `brew trust` line is not optional.** Current Homebrew refuses to load a
+formula from a third-party tap until you trust it, and without that line the
+install fails with `Refusing to load formula … from untrusted tap`. Trust is
+per-tap and persists, so it is a one-time step.
+
+That installs a prebuilt universal2 binary — `lipo -archs` reports
+`x86_64 arm64` — rather than building from source. The compile is only about 20
+seconds, but `depends_on "rust" => :build` would have brew download a whole
+toolchain to produce a 6.9 MB binary. It is a formula and not a cask because
+`brew install --cask` quarantines, which an unsigned binary cannot survive
+without notarization.
+
+If you have also installed from source, the two coexist and `~/.cargo/bin`
+comes first in `PATH`, so `comic-renamer` keeps running the cargo copy. brew
+says so on install. `cargo uninstall comic-renamer` resolves it.
+
+### From source
 
 Prerequisites:
 

@@ -1311,6 +1311,19 @@ research flags itself.
 them is work I can do.** Deferred on 2026-10-27 so the MVP lands first; the
 measurements below are recorded so nobody re-derives them.
 
+**Done 2026-10-30: v0.1.0 is released and the tap is populated.** The formula
+is at `bsns-casual/homebrew-tap`, `brew audit --strict` and `brew style` are
+clean, and `brew install bsns-casual/tap/comic-renamer` was run end to end —
+`lipo -archs` reports `x86_64 arm64`, `brew test` passes, and the binary runs
+from `/`, which is the `include_str!` claim holding in a packaged build.
+
+**One thing the plan did not anticipate, and users will hit it:** current
+Homebrew refuses a third-party tap until it is trusted. Without
+`brew trust bsns-casual/tap` the install fails with "Refusing to load formula …
+from untrusted tap". The README leads with that line. The `sha256` in the
+formula is GitHub's own published asset digest rather than a locally recomputed
+hash, so it cannot drift from what brew fetches.
+
 `.github/workflows/release.yml` fires on a `v*` tag, builds both macOS slices
 on one arm64 runner, `lipo`s them into a universal2 binary, attaches the
 tarball to the release, and prints the complete formula with its url and
