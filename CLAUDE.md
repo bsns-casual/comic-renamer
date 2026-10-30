@@ -533,8 +533,8 @@ Four things to know before touching it:
   `fixtures/`, `xtask/`, `scripts/` and `.github/` all still trigger, so
   `check-mappings`, the row caps and the file-size cap keep their teeth. Do not
   extend the list to `review/` on the grounds that nothing reads it: the gates
-  are what would catch a mistake there, and `review/` sits exactly where the
-  licence question lives.
+  are what would catch a mistake there, and `review/` is where a Humble table
+  would re-enter the repository.
 - **`paths-ignore` on `pull_request` means these checks never report at all on
   a docs-only PR.** Marking any of them a required status check would leave
   such a PR waiting forever. There is no branch protection and no ruleset on
@@ -874,19 +874,19 @@ error. Pinned by `scan_reads_the_users_own_mappings`, the sole guard.
   100.** Highest was chosen as the only option that cannot under-pad a real long
   run.
 
-**0. The review is decided, exported and committed.** 2,204 of 2,204, now at
-`review/humble-decisions.tsv` with its own README and the five not-a-comic rows
-beside it — 2,031 rows in the shipped shape since 2026-10-30, down from 2,199
-eight-column ones. Validated by embedding it and running the real suite: 613
-passed, 0 failed. What remains is the licence question, which gates
-moving it into `data/decisions.tsv`. **It is no longer a `git mv`, and a `git mv`
-would break every user's load**: the file still has the pre-D64 eight columns,
-which `parse_tsv` refuses outright, and its 2,199 rows hold 2,031 distinct keys,
-so 158 are repeats that `find_key_collisions` now refuses. Measured 2026-10-30:
-zero of those 158 disagree on fields 1-7, so collapsing them discards nothing.
-`review/README.md` carries the four real steps. Do not trust an older summary of
-this that says "one `include_str!` and an array size" — there is one of each
-now, and two data transformations before them.
+**0. The review is decided, and the table is deliberately not in this
+repository.** 2,204 of 2,204 decided, exported, validated through the real
+gates — and then excised from HEAD and from all 220 commits on 2026-10-30,
+because the owner decided this repository should not carry Humble-derived
+titles. That is a decision, not a blocker. **`review/README.md` is the live
+document**: what the table was, the two places it still exists, and the
+recipe if it is ever to ship.
+
+**Nothing here is waiting on a licence.** Both licences are settled and
+enforced — see item 1 below. What stopped the table shipping was the owner's
+call about redistributing a marketplace's order history, which is that
+marketplace's terms rather than a licence question, and `data/LICENSE` says so
+in its own closing paragraph.
 
 **The artifact's store is no longer the only copy.** If the review is reopened,
 re-dump the collection and re-run `scripts/export-decisions.py`; the export is
@@ -1194,15 +1194,25 @@ elsewhere. **Do these three individually, when next touching `perform`, with the
 techniques above.** None guards a current bug; all three guard against a future
 regression, so none is urgent.
 
-Then, two things that gate a release but block no development.
+Then, one thing that gates a release, and one that is settled and recorded
+here only so it is not reopened.
 
-**1. The licence for publishing Humble-derived titles. Deferred by the owner on
-2026-10-25** — saved for later, not dropped. It still gates publishing the table
-and blocks no development.
+**1. Licensing is settled. Do not reopen it.** Both halves are written down and
+one is enforced by CI:
 
-**Direction given 2026-10-30: "whatever suits our needs most while staying open
-source."** That is a direction, not yet a resolution, and two things found while
-acting on it are worth recording because they narrow the question:
+- **Code: GPL-3.0-or-later** (`842a5d6`), in `LICENSE` and `Cargo.toml`. The
+  `licence` job checks the licence title *and its version line*, `Cargo.toml`,
+  and the Homebrew formula `release.yml` emits — and asserts MIT appears in
+  none of them. The formula said MIT for a day after the switch because an
+  earlier check read only the first line of `LICENSE`.
+- **Data: CC BY-SA 4.0, attributed to the Grand Comics Database**, in
+  `data/LICENSE`, covering `data/decisions.tsv` and `data/overrides.toml`.
+
+That satisfies the owner's direction of 2026-10-30, "whatever suits our needs
+most while staying open source." **This entry claimed the code was MIT until
+2026-10-30**, nine commits after it became GPL and with a CI job asserting the
+opposite three directories away. Two findings are kept below because they are
+the reasoning, not an open question:
 
 - **GCD-derived fields are already mixed into the Humble rows**, so the share-
   alike question is not separable. 128 rows had their series casing settled by
@@ -1211,15 +1221,16 @@ acting on it are worth recording because they narrow the question:
   CC BY-SA 4.0, and BY-SA propagates. So **keeping all of `data/` under
   CC BY-SA 4.0 with attribution to GCD is the answer that needs no new
   decision**; a looser licence for the Humble rows is not available without
-  stripping the corpus's contribution back out. Code stays MIT, which the
-  `licence` CI job already checks.
-- **A licence cannot grant rights nobody has**, and the open part was never
-  really "which licence" — it is whether redistributing a 2,199-row compilation
-  pulled from Humble's order API is permitted. That is Humble's terms of
-  service, not copyright: individual titles are short factual strings and US law
-  gives thin protection to factual compilations, while the EU has a separate
-  database right. Nobody here is qualified to settle that and it should not be
-  guessed at in this file.
+  stripping the corpus's contribution back out. This is what `data/LICENSE`
+  now says, and why it declines to split the table by provenance per field.
+- **A licence cannot grant rights nobody has**, which is why the Humble
+  question was never a licence question: it is whether redistributing a
+  2,199-row compilation pulled from Humble's order API is permitted at all.
+  That is Humble's terms of service, not copyright — individual titles are
+  short factual strings and US law gives thin protection to factual
+  compilations, while the EU has a separate database right. Nobody here is
+  qualified to settle it, and **the owner did not: he removed the table
+  instead**, which answers the practical question without anyone having to.
 
 **The repository went public on 2026-10-30, and the Humble table was then
 excised from history at the owner's instruction.** Sequence, because the order
@@ -1299,9 +1310,11 @@ the top level only.** A `.tsv` in a *subdirectory* of `data/` is seen by
 neither that test nor `cargo xtask check-mappings`: an adversarial seat planted
 this very 205 KB file at `data/mappings/humble.tsv` on 2026-10-30 and both
 gates stayed green, with a positive control at `data/stray.tsv` failing
-correctly. `.gitignore` now refuses to track such a file, and the walkers are
-being made recursive. Until they are, that is the hole, and it sits exactly
-where the licence question lives.
+correctly. **Both holes are closed now**: `.gitignore` refuses to track such
+a file, and `the_decisions_file_is_the_one_that_ships` walks `data/` at any
+depth through `tsvs_under`, asserting exactly one table and that it sits at
+the top rather than in a subdirectory. Read the test before assuming this
+paragraph is still describing a gap.
 
 Three things the finished review established, each measured rather than assumed:
 
