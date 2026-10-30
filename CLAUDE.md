@@ -411,6 +411,12 @@ show that 1.88 builds the workspace, which was not tried on a 1.88 toolchain.
 Two environment notes: `cargo` lives in `~/.cargo/bin` and is not on a
 non-interactive shell's PATH, and clippy is installed (see above for what it says).
 
+A cold full-workspace debug build, measured 2026-10-30 after a `cargo clean`:
+**23.9s wall, 134 crates, 844 MB of `target/`** — `ring` and `libsqlite3-sys`
+among them, so that number includes the two C build scripts. Worth knowing
+before hesitating over a `cargo clean`: `target/` had reached 6.0 GB, and
+getting it back costs under half a minute.
+
 Install is `cargo install --path crates/cli --locked` — note `crates/cli`,
 not `.`, since the workspace root is not a package. Verified from three
 directories after installing, and `cargo uninstall comic-renamer` round-trips.
@@ -578,6 +584,12 @@ silently at volume 100 and manga runs pass it.
   it changes resolution behaviour for every user. (§6.5)
 - Don't claim something works without running it. This project has twice been
   wrong about a packaging claim that failed on contact with a real build.
+- **Update this file in place; do not append a section per session.** That is
+  how it reached 1,652 lines and ~24.5k tokens by 2026-10-30, with Homebrew
+  spread over five sections and the Humble table over four, the copies
+  contradicting each other. When a thing is settled, rewrite the section that
+  describes it and move the reasoning to `docs/history/` — the pointer block
+  under "Pick up here" is where a new file gets announced.
 
 ## Ponytail
 
