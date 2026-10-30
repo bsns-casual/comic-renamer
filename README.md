@@ -1,6 +1,27 @@
 # Comic Renamer
 
-Rename comic files bought in bundles into the layout your library app expects.
+Tidy up the comics you bought and downloaded, into the layout your library app
+expects.
+
+If you buy digital comics from **Humble Bundle**, **Fanatical**,
+**DriveThruComics**, **GlobalComix**, **Sweet Shop** or anywhere similar, you
+end up with a folder of files named however that storefront happened to name
+them. Real examples, from the test data:
+
+```
+popeyevolume1_oliveoylandhersweety.cbz
+maggiethemechanic_loveandrockets.cbz
+hammer-head-1_release-0001_978-1-5458-3063-5.pdf
+die-loaded-issue-1.pdf
+```
+
+Your library app wants a folder per series and filenames that sort. This
+bridges the two.
+
+It is for comics you legally purchased and downloaded, and it **never downloads
+a comic** — it only reads the names of files you already have. Its suggestions
+come from a public comics database (which it does fetch, once, and hash-checks)
+and from titles people have confirmed by hand.
 
 Point it at a folder, pick your app, and it identifies each file and shows you
 every proposed rename. Nothing moves until you approve the plan. Files it cannot
@@ -20,14 +41,9 @@ tested on Apple Silicon.
 ### Homebrew
 
 ```sh
-brew trust bsns-casual/tap
+brew trust --formula bsns-casual/tap/comic-renamer
 brew install bsns-casual/tap/comic-renamer
 ```
-
-**The `brew trust` line is not optional.** Current Homebrew refuses to load a
-formula from a third-party tap until you trust it, and without that line the
-install fails with `Refusing to load formula … from untrusted tap`. Trust is
-per-tap and persists, so it is a one-time step.
 
 That installs a prebuilt universal2 binary — `lipo -archs` reports
 `x86_64 arm64` — rather than building from source. The compile is only about 20

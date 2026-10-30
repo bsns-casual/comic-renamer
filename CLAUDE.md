@@ -1324,6 +1324,54 @@ from untrusted tap". The README leads with that line. The `sha256` in the
 formula is GitHub's own published asset digest rather than a locally recomputed
 hash, so it cannot drift from what brew fetches.
 
+### Removing the `brew trust` line — a future improvement, researched 2026-10-30
+
+The README's install begins with `brew trust --formula …`, and users will ask
+why. **It is not a tap misconfiguration and there is nothing to fix in the
+formula.** Homebrew 6.0.0 introduced tap trust and applies it to every
+non-official tap; this machine is on 7.0.11, so it is settled behaviour.
+
+**The only way to remove the line is `homebrew/core`**, where there is no tap
+and no trust: `brew install comic-renamer`. Four requirements, checked against
+Homebrew's own docs rather than recalled:
+
+- **Already satisfied.** Open source under a DFSG-compatible licence —
+  GPL-3.0-or-later qualifies — and a stable, immutable tag, which `v0.1.0` is.
+- **Notability is the blocker, and it is not an engineering problem.** ≥30
+  forks, ≥30 watchers or ≥75 stars; **for a self-submission by the repo owner,
+  ≥90 / ≥90 / ≥225.** The repo was at 0/0/0 on release day. An automated audit
+  check reports this verbatim. (One issue report also mentions a 30-day repo-age
+  rule, which does not appear in the policy pages — unverified.)
+- **The prebuilt binary has to go, and that objection then evaporates.** Core
+  generally refuses binaries: a formula "must either build from source or
+  install portable, platform-independent output". The reason this repo ships a
+  prebuilt universal2 binary is that `depends_on "rust" => :build` makes a user
+  download a toolchain for a 6.9 MB binary — **but core's CI builds from source
+  and publishes bottles**, so users still get a prebuilt download. In core the
+  formula gets simpler, not worse.
+- **macOS-only is arguable, not disqualifying.** Core requires passing CI on
+  supported macOS *and* Linux, but the policy allows a platform restriction "if
+  upstream doesn't support a platform and the remaining support is useful and
+  maintainable". `renamex_np`, `clonefile` and `std::os::macos::fs` are
+  Apple-only with no fallback, so that argument is available — it just has to
+  be made.
+
+**Do not reach for `HOMEBREW_NO_REQUIRE_TAP_TRUST=1`.** It exists as a
+transitional opt-out, Homebrew says it is being removed, and asking users to
+export a variable that disables a supply-chain check is worse than one trust
+line.
+
+**Narrow trust is already what the README uses.** `brew trust --formula
+<tap>/<formula>` rather than `brew trust <tap>`, because whole-tap trust grants
+every present *and future* formula in it and Homebrew's docs prefer the narrow
+form. If aliases are ever added, note the open bug where a fully-qualified
+install by alias is refused and `brew trust` takes the alias literally — trust
+has to be granted against the canonical name.
+
+Sources: docs.brew.sh/Tap-Trust, docs.brew.sh/Package-Acceptance-Policy,
+docs.brew.sh/Acceptable-Formulae, brew.sh/2026/06/11/homebrew-6.0.0,
+github.com/Homebrew/brew/issues/24184.
+
 `.github/workflows/release.yml` fires on a `v*` tag, builds both macOS slices
 on one arm64 runner, `lipo`s them into a universal2 binary, attaches the
 tarball to the release, and prints the complete formula with its url and
