@@ -136,7 +136,7 @@ jobs:
           grep -q '^license = "GPL-3.0-or-later"$' Cargo.toml
           echo "GPL-3.0 confirmed, and Cargo.toml agrees"
 
-# What the `mappings` job guarantees: every mapping file is under 2 MiB, and a
+# What the `mappings` job guarantees: the decisions table is under 4 MiB, and a
 # pull request adds at most 2,500 rows. Key collisions and per-field
 # validation are ordinary `cargo test` assertions in the `rust` job. There is
 # no coverage or false-positive threshold: nothing is stored without approval

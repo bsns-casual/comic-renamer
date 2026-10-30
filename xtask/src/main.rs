@@ -180,8 +180,15 @@ fn measure() -> Result<(), String> {
 /// The per-PR caps. Always checks every shipped mapping file's size; with a
 /// base ref, also counts rows added since it. Exits non-zero on a breach.
 fn check_mappings(base: Option<&str>) -> Result<(), String> {
-    for entry in std::fs::read_dir("data/mappings").map_err(|e| e.to_string())? {
+    // One table since D63. Still a directory walk rather than one `metadata`
+    // call, because a second `.tsv` appearing under `data/` is exactly what
+    // `the_decisions_file_is_the_one_that_ships` refuses and this should not
+    // quietly ignore it.
+    for entry in std::fs::read_dir("data").map_err(|e| e.to_string())? {
         let path = entry.map_err(|e| e.to_string())?.path();
+        if path.extension().is_none_or(|e| e != "tsv") {
+            continue;
+        }
         let len = std::fs::metadata(&path).map_err(|e| e.to_string())?.len() as usize;
         if !file_size_ok(len) {
             return Err(format!(
@@ -192,7 +199,7 @@ fn check_mappings(base: Option<&str>) -> Result<(), String> {
     }
     if let Some(base) = base {
         let out = std::process::Command::new("git")
-            .args(["diff", "--numstat", &format!("{base}...HEAD"), "--", "data/mappings"])
+            .args(["diff", "--numstat", &format!("{base}...HEAD"), "--", "data"])
             .output()
             .map_err(|e| e.to_string())?;
         if !out.status.success() {

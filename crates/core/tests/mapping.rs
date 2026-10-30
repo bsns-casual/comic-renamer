@@ -42,7 +42,6 @@ fn row() -> MappingRow {
         subtitle: Some("A: B".into()),
         lang: "en".into(),
         volume_count: Some(12),
-        bundle: "Some Bundle".into(),
     }
 }
 
@@ -90,26 +89,30 @@ fn key_is_nfc_lowercase_alphanumeric_only() {
 
 #[test]
 fn parse_tsv_strips_crlf_and_a_bom() {
-    let rows = parse_tsv("\u{feff}key\tseries\tvolume\tissue\tsubtitle\tlang\tvolume_count\tbundle\r\nx\tX\t\t\t\ten\t\tb\r\n").unwrap();
+    // The last field is `volume_count` since D64, so the trailing-CR assertion
+    // moved onto it — and it is the stronger version of the same check,
+    // because a surviving `\r` makes it fail to parse as a number rather than
+    // hiding inside a string.
+    let rows = parse_tsv("\u{feff}key\tseries\tvolume\tissue\tsubtitle\tlang\tvolume_count\r\nx\tX\t\t\t\ten\t7\r\n").unwrap();
     assert_eq!(rows[0].key, "x");
     assert_eq!(rows[0].series, "X");
     assert_eq!(rows[0].volume, None);
     assert_eq!(rows[0].issue, None);
     assert_eq!(rows[0].subtitle, None);
-    assert_eq!(rows[0].bundle, "b", "a trailing CR must not survive in the last field");
+    assert_eq!(rows[0].volume_count, Some(7), "a trailing CR must not survive in the last field");
 }
 
 #[test]
 fn parse_tsv_errors_carry_the_line_number() {
-    let hdr = "key\tseries\tvolume\tissue\tsubtitle\tlang\tvolume_count\tbundle\n";
+    let hdr = "key\tseries\tvolume\tissue\tsubtitle\tlang\tvolume_count\n";
     let bad_header = parse_tsv("key\tseries\n").unwrap_err().to_string();
     assert!(bad_header.contains("line 1"), "{bad_header}");
     let short = parse_tsv(&format!("{hdr}x\tX\n")).unwrap_err().to_string();
     assert!(short.contains("line 2"), "{short}");
-    let nan = parse_tsv(&format!("{hdr}x\tX\tabc\t\t\ten\t\tb\n")).unwrap_err().to_string();
+    let nan = parse_tsv(&format!("{hdr}x\tX\tabc\t\t\ten\t\n")).unwrap_err().to_string();
     assert!(nan.contains("line 2"), "{nan}");
     // A non-numeric issue is named by its own column, not the volume's.
-    let bad_issue = parse_tsv(&format!("{hdr}x\tX\t\tabc\t\ten\t\tb\n")).unwrap_err().to_string();
+    let bad_issue = parse_tsv(&format!("{hdr}x\tX\t\tabc\t\ten\t\n")).unwrap_err().to_string();
     assert!(bad_issue.contains("line 2") && bad_issue.contains("issue"), "{bad_issue}");
 }
 
@@ -150,7 +153,6 @@ fn a_row_with_an_issue_round_trips_through_the_tsv() {
         subtitle: None,
         lang: "en".into(),
         volume_count: None,
-        bundle: "Humble BOOM! Bundle".into(),
     };
     assert_eq!(parse_tsv(&to_tsv(&[row.clone()])).unwrap(), vec![row]);
 }
@@ -165,4 +167,27 @@ fn a_seven_column_file_is_refused_by_name() {
         format!("{err:?}").contains("issue"),
         "the error must name the expected header so a stale file is legible: {err:?}"
     );
+}
+
+/// The pre-D64 eight-column shape, read by the seven-column parser.
+///
+/// There is no migration (D63) and the owner's own local file was converted by
+/// hand, but a stale file must fail *naming what it expected* rather than be
+/// read loosely: the 8th column was a `bundle`, and a parser that ignored the
+/// count would land a folder name in `volume_count` and set a zero-pad width
+/// from it. This is the one test that protects anyone holding an old file.
+#[test]
+fn the_old_eight_column_format_fails_naming_both_counts() {
+    let old = "key\tseries\tvolume\tissue\tsubtitle\tlang\tvolume_count\n\
+               alpha\tAlpha\t1\t\t\ten\t\tSome Bundle\n";
+    let msg = parse_tsv(old).expect_err("eight fields").to_string();
+    assert!(msg.contains("expected 7 columns"), "{msg}");
+    assert!(msg.contains("found 8"), "{msg}");
+    assert!(msg.contains("bundle"), "and says which column went: {msg}");
+    assert!(msg.contains("line 2"), "{msg}");
+
+    // Any other count still gets the plain message.
+    let short = "key\tseries\tvolume\tissue\tsubtitle\tlang\tvolume_count\nalpha\tAlpha\n";
+    let msg = parse_tsv(short).expect_err("two fields").to_string();
+    assert!(msg.contains("expected 7 columns, found 2"), "{msg}");
 }

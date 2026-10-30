@@ -4,15 +4,14 @@
 //! (`Hack/Slash: Back to School` is a real name) and the preset sanitises them
 //! into path components; this module never treats a field as a path.
 
-use crate::normalize::{collision_key, is_invisible};
+use crate::normalize::is_invisible;
 use crate::preset::Preset;
 use crate::types::{MappingError, Resolved, Status};
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use unicode_normalization::UnicodeNormalization;
 
-const HEADER: &str =
-    "key\tseries\tvolume\tissue\tsubtitle\tlang\tvolume_count\tbundle";
+const HEADER: &str = "key\tseries\tvolume\tissue\tsubtitle\tlang\tvolume_count";
 
 /// The frozen key rule: NFC, lowercase, keep alphanumerics. Every contributed
 /// row was keyed by this, so changing it invalidates all of them. `None` when
@@ -38,7 +37,6 @@ pub struct MappingRow {
     pub subtitle: Option<String>,
     pub lang: String,
     pub volume_count: Option<u32>,
-    pub bundle: String,
 }
 
 impl MappingRow {
@@ -89,10 +87,23 @@ pub fn parse_tsv(text: &str) -> Result<Vec<MappingRow>, MappingError> {
             continue;
         }
         let f: Vec<&str> = raw.split('\t').collect();
-        if f.len() != 8 {
+        if f.len() != 7 {
+            // Named, both counts, because the 8-column shape was this file's
+            // format until 2026-10-30 and its 8th field was a `bundle`. Read
+            // loosely, that bundle would land in `volume_count` and set a
+            // zero-pad width from a folder name. No migration (D63), but no
+            // silent misreading either.
+            let was_sharded = f.len() == 8;
             return Err(MappingError::Parse {
                 line,
-                reason: format!("expected 8 columns, found {}", f.len()),
+                reason: if was_sharded {
+                    "expected 7 columns, found 8 — this looks like the pre-2026-10-30 \
+                     format, whose 8th column was `bundle`. Drop that column; identity \
+                     is the key alone (D64)"
+                        .to_string()
+                } else {
+                    format!("expected 7 columns, found {}", f.len())
+                },
             });
         }
         rows.push(MappingRow {
@@ -103,7 +114,6 @@ pub fn parse_tsv(text: &str) -> Result<Vec<MappingRow>, MappingError> {
             subtitle: (!f[4].is_empty()).then(|| f[4].to_string()),
             lang: f[5].to_string(),
             volume_count: num(f[6], line, "volume_count")?,
-            bundle: f[7].to_string(),
         });
     }
     if !seen_header {
@@ -119,7 +129,7 @@ pub fn to_tsv(rows: &[MappingRow]) -> String {
     let mut out = format!("{HEADER}\n");
     for r in rows {
         out.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             r.key,
             r.series,
             n(r.volume),
@@ -127,7 +137,6 @@ pub fn to_tsv(rows: &[MappingRow]) -> String {
             r.subtitle.as_deref().unwrap_or(""),
             r.lang,
             n(r.volume_count),
-            r.bundle
         ));
     }
     out
@@ -216,7 +225,6 @@ impl MappingRow {
             validate_field("subtitle", sub)?;
         }
         validate_field("lang", &self.lang)?;
-        validate_field("bundle", &self.bundle)?;
         // No cross-field rule against `volume`: a row may be both (D60).
         if let Some(issue) = self.issue {
             if issue > MAX_ISSUE {
@@ -249,24 +257,15 @@ impl MappingRow {
     }
 }
 
-/// A source folder's name as the `bundle` field. NFC because HFS+ stored NFD
-/// and those names survive copies, so `Café Comics` arrives decomposed and
-/// `validate_field` would refuse it — and `bundle` is a value derived from the
-/// filesystem, not contributed data, so normalising it is right where
-/// rejecting it is not.
+/// A source folder's name, NFC-normalised. HFS+ stored NFD and those names
+/// survive copies, so `Café Comics` arrives decomposed.
 ///
-/// Shared by `scan`'s lookup and `map`'s recorded rows, so the two cannot
-/// disagree about which bundle a row belongs to.
+/// No longer a stored field (D64) — the shipped table has no `bundle` column.
+/// It remains the key Layer B's overrides are looked up by, and the stem
+/// `branch_for` slugifies, both of which are genuinely about *this folder on
+/// this disk* rather than about a row's identity.
 pub fn bundle_name(folder: &str) -> String {
     folder.nfc().collect()
-}
-
-/// Whether `bundle_name`'s output can be stored, for a caller that must ask
-/// *before* opening a session: `validate` ends with the bundle and
-/// `approved_rows` validates every row before writing any, so a folder name
-/// that fails here after the work is done throws all of it away.
-pub fn validate_bundle(bundle: &str) -> Result<(), MappingError> {
-    validate_field("bundle", bundle)
 }
 
 /// Whether the destination the preset renders from this row fits 255 bytes
@@ -309,21 +308,21 @@ fn load_layer(text: &str, origin: &str) -> Result<Vec<MappingRow>, MappingError>
         row.validate().map_err(|e| at(*line, e.to_string()))?;
     }
     // CI runs this over shipped data; running it at load is what makes it true
-    // of a file nobody checked. `lookup` returns the first row for a
-    // `(key, bundle)` pair, so a second, disagreeing one is ignored in silence
-    // — and in the user's own file that second row is their later correction.
-    if let Some((key, bundle)) = find_key_collisions(&rows).into_iter().next() {
+    // of a file nobody checked. `lookup` takes the first row for a key, so a
+    // second one is ignored in silence — and in the user's own file that second
+    // row is their later correction.
+    if let Some(key) = find_key_collisions(&rows).into_iter().next() {
         // The row that would be ignored, so the user is sent to the one they
         // most likely meant to keep.
         let ignored = rows
             .iter()
             .zip(&lines)
-            .filter(|(r, _)| r.key == key && same_bundle(&r.bundle, &bundle))
+            .filter(|(r, _)| r.key == key)
             .nth(1)
             .map_or(0, |(_, line)| *line);
         return Err(at(
             ignored,
-            format!("a second row for key {key:?} in bundle {bundle:?} disagrees with the first, so it would be ignored"),
+            format!("a second row for key {key:?}; identity is the key alone, so correct the first row rather than adding another"),
         ));
     }
     Ok(rows)
@@ -337,7 +336,7 @@ fn group(rows: Vec<MappingRow>) -> HashMap<String, Vec<MappingRow>> {
     by_key
 }
 
-/// Shipped rows plus the user's own. Keyed by `key`; `bundle` only breaks ties.
+/// Shipped rows plus the user's own, keyed by `key` and nothing else (D64).
 pub struct Mappings {
     by_key: HashMap<String, Vec<MappingRow>>,
 }
@@ -360,13 +359,15 @@ impl Mappings {
         Ok(Mappings { by_key })
     }
 
-    /// One row for the key: it is the answer for any bundle. Several: the bundle
-    /// selects, and a bundle matching none returns `None` rather than a guess.
-    pub fn lookup(&self, key: &str, bundle: &str) -> Option<&MappingRow> {
-        match self.by_key.get(key)?.as_slice() {
-            [only] => Some(only),
-            many => many.iter().find(|r| same_bundle(&r.bundle, bundle)),
-        }
+    /// The decision for a key, if the table holds one.
+    ///
+    /// One argument since D64. There used to be a second, a bundle, because a
+    /// key could carry several rows and the caller's folder name chose between
+    /// them — which meant 158 of 2,043 keys resolved only for whoever's folder
+    /// matched, and for nobody else. `load_layer` refuses a duplicate key, so
+    /// the slice is always one row.
+    pub fn lookup(&self, key: &str) -> Option<&MappingRow> {
+        self.by_key.get(key)?.first()
     }
 
     pub fn len(&self) -> usize {
@@ -378,55 +379,27 @@ impl Mappings {
     }
 }
 
-/// Whether two bundles name one bundle. Invariant 7: `Fanatical/` and
-/// `fanatical/` are one directory on APFS, so the stored capitalisation is
-/// display -- the shipped files hold `Fanatical`, `Global Comix` and
-/// `Sweet Shop` -- and never identity. Compared literally, a folder typed in
-/// the other case loses its tie-break, and two rows for one key differing only
-/// in bundle case read as two bundles and pass `find_key_collisions`, which
-/// exists to catch exactly that disagreement.
-pub fn same_bundle(a: &str, b: &str) -> bool {
-    collision_key(a) == collision_key(b)
-}
 
-/// `(key, bundle)` pairs held by rows that disagree. The same title under the
-/// same key in two bundles is not a collision, and neither is an exact repeat.
-pub fn find_key_collisions(rows: &[MappingRow]) -> Vec<(String, String)> {
-    let mut first: HashMap<(&str, String), &MappingRow> = HashMap::new();
+/// Keys held by more than one row. Under one row per key (D64) a repeat is a
+/// mistake whatever its fields say, so this no longer compares them: an exact
+/// duplicate is as wrong as a disagreement, because a correction is an edit to
+/// the existing line and never a second line.
+pub fn find_key_collisions(rows: &[MappingRow]) -> Vec<String> {
+    let mut seen: HashMap<&str, ()> = HashMap::new();
     let mut bad = BTreeSet::new();
     for r in rows {
-        let slot = first.entry((&r.key, collision_key(&r.bundle))).or_insert(r);
-        if *slot != r {
-            bad.insert((r.key.clone(), r.bundle.clone()));
+        if seen.insert(&r.key, ()).is_some() {
+            bad.insert(r.key.clone());
         }
     }
     bad.into_iter().collect()
 }
 
-const SHIPPED_FILES: [&str; 3] = [
-    include_str!("../../../data/mappings/fanatical.tsv"),
-    include_str!("../../../data/mappings/global-comix.tsv"),
-    include_str!("../../../data/mappings/sweet-shop.tsv"),
-];
-
-/// The marketplaces whose rows have a file to land in, named so that
-/// `file_slug` produces each `SHIPPED_FILES` path.
-///
-/// A contribution can only be appended to a file that already ships: giving a
-/// new marketplace one means an `include_str!` and an array size, which is a
-/// Rust change nobody can make inside a data pull request. Appending to a file
-/// that *is* embedded needs no code change at all, because `include_str!` picks
-/// the new rows up at build time. Humble is deliberately absent —
-/// `data/mappings/humble.tsv` does not exist, because shipping it waits on the
-/// licence question (D51).
-///
-/// Hand-kept beside the array above, and pinned against the directory by
-/// `every_shipped_marketplace_has_a_file_and_the_reverse`.
-pub const SHIPPED_MARKETPLACES: [&str; 3] = ["Fanatical", "Global Comix", "Sweet Shop"];
-
-/// A name as it appears in a filename or a branch: ASCII alphanumerics kept
+/// A name as it appears in a branch or a filename: ASCII alphanumerics kept
 /// and lowercased, every run of anything else collapsed to one `-`.
-/// `Global Comix` becomes `global-comix`, which is its mapping file's stem.
+///
+/// `shipped_mapping_path` used to be its other caller, until D66 deleted it
+/// along with the per-marketplace files. `branch_for` is what is left.
 pub fn file_slug(name: &str) -> String {
     let rough: String = name
         .chars()
@@ -435,27 +408,22 @@ pub fn file_slug(name: &str) -> String {
     rough.split('-').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("-")
 }
 
-/// `data/mappings/<stem>.tsv` for a marketplace whose rows ship, else `None`.
-/// Matched on the slug, so `Global Comix`, `global comix` and `global-comix`
-/// are one marketplace.
-pub fn shipped_mapping_path(marketplace: &str) -> Option<String> {
-    let wanted = file_slug(marketplace);
-    SHIPPED_MARKETPLACES
-        .iter()
-        .map(|m| file_slug(m))
-        .find(|slug| *slug == wanted)
-        .map(|slug| format!("data/mappings/{slug}.tsv"))
-}
+/// The one shipped table (D63). Embedded, so an installed binary needs nothing
+/// from the working directory.
+///
+/// One file rather than one per marketplace, because the sharding was a fiction
+/// the code never believed: `find_key_collisions` always ran over the joined
+/// table, and `lookup` keyed on a row's bundle rather than its file. The
+/// contribution flow is unconditional as a result — a contribution appends
+/// here, and `include_str!` picks the new rows up at build time with no code
+/// change in the pull request (D66).
+const SHIPPED: &str = include_str!("../../../data/decisions.tsv");
+
 
 /// Every shipped mapping file as one table with a single header. Embedded, so
 /// an installed binary needs nothing from the working directory. Rows stay
 /// sharded by marketplace on disk, so `find_key_collisions` must be checked over
 /// this joined table, not per file.
 pub fn shipped_mappings() -> String {
-    let mut out = format!("{HEADER}\n");
-    for file in SHIPPED_FILES {
-        let body = file.strip_prefix('\u{feff}').unwrap_or(file);
-        out.extend(body.split_inclusive('\n').skip(1));
-    }
-    out
+    SHIPPED.strip_prefix('\u{feff}').unwrap_or(SHIPPED).to_string()
 }

@@ -128,7 +128,6 @@ pub fn mappings(rows: &[MapRow<'_>]) -> comic_renamer_core::mapping::Mappings {
             subtitle: subtitle.map(str::to_string),
             lang: "en".into(),
             volume_count: *volume_count,
-            bundle: String::new(),
         })
         .collect();
     Mappings::load(&to_tsv(&rows), None).unwrap()

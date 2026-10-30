@@ -65,72 +65,50 @@ fn the_marketplace_fixture_is_fully_covered() {
         stems.iter().zip(EXPECTED)
     {
         assert_eq!((*market, *stem), (e_market, e_stem));
+        // Resolved by key alone (D64). The marketplace is still read from the
+        // fixture and still checked against `EXPECTED` above, because the
+        // fixture is organised by marketplace — but it is no longer something
+        // a row carries or a lookup needs.
         let row = m
-            .lookup(&key(stem).unwrap(), market)
+            .lookup(&key(stem).unwrap())
             .unwrap_or_else(|| panic!("{stem} did not resolve"));
         assert_eq!(row.series, series, "{stem}");
         assert_eq!(row.volume, volume, "{stem}");
         assert_eq!(row.issue, issue, "{stem}");
         assert_eq!(row.subtitle.as_deref(), subtitle, "{stem}");
-        assert_eq!(row.bundle, *market, "{stem}");
     }
 }
 
+/// `data/decisions.tsv` is the table, and the only one (D63). This replaces
+/// `every_tsv_in_data_mappings_is_embedded` and
+/// `every_shipped_marketplace_has_a_file_and_the_reverse`: with one
+/// unconditional file there is no hand-kept list to drift from the directory,
+/// which is what both of those existed to catch.
+///
+/// It still guards the thing that mattered — a TSV sitting under `data/` doing
+/// nothing silently — because a second one is a file the embed does not read.
 #[test]
-fn every_tsv_in_data_mappings_is_embedded() {
-    // SHIPPED_FILES is a hand-kept list. A mapping file added to the directory
-    // and not to the list would sit in the repo doing nothing, silently.
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/mappings");
+fn the_decisions_file_is_the_one_that_ships() {
+    let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
     let shipped = all_rows();
-    let mut files = 0;
-    for entry in std::fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.extension().is_none_or(|e| e != "tsv") {
-            continue;
-        }
-        files += 1;
-        for row in parse_tsv(&std::fs::read_to_string(&path).unwrap()).unwrap() {
-            assert!(shipped.contains(&row), "{} is not in SHIPPED_FILES: {}", path.display(), row.key);
-        }
-    }
-    assert!(files >= 3);
-}
 
-/// `SHIPPED_MARKETPLACES` tells `map` which contributions have a file to be
-/// appended to. A marketplace listed with no file sends a contributor to a
-/// `>>` that creates an unembedded TSV, which is exactly what
-/// `every_tsv_in_data_mappings_is_embedded` above refuses — measured
-/// 2026-10-29 by following the printed commands literally. A file with no
-/// marketplace listed is a channel that is silently closed.
-#[test]
-fn every_shipped_marketplace_has_a_file_and_the_reverse() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/mappings");
-
-    let listed: std::collections::BTreeSet<String> =
-        comic_renamer_core::mapping::SHIPPED_MARKETPLACES
-            .iter()
-            .map(|m| comic_renamer_core::mapping::file_slug(m))
-            .collect();
-
-    let on_disk: std::collections::BTreeSet<String> = std::fs::read_dir(&dir)
+    let on_disk: Vec<std::path::PathBuf> = std::fs::read_dir(&data)
         .unwrap()
         .filter_map(|e| {
-            let path = e.unwrap().path();
-            (path.extension()? == "tsv")
-                .then(|| path.file_stem().unwrap().to_string_lossy().into_owned())
+            let p = e.unwrap().path();
+            (p.extension().is_some_and(|x| x == "tsv")).then_some(p)
         })
         .collect();
+    assert_eq!(on_disk.len(), 1, "exactly one shipped table: {on_disk:?}");
+    assert_eq!(on_disk[0].file_name().unwrap(), "decisions.tsv");
 
-    assert_eq!(listed, on_disk, "SHIPPED_MARKETPLACES and data/mappings/ disagree");
-
-    // The path each one resolves to really is the file, and an unshipped
-    // marketplace really does resolve to nothing. Humble is the one that
-    // matters: it is `map`'s default.
-    for m in comic_renamer_core::mapping::SHIPPED_MARKETPLACES {
-        let path = comic_renamer_core::mapping::shipped_mapping_path(m).expect(m);
-        assert!(dir.join(path.strip_prefix("data/mappings/").unwrap()).is_file(), "{m}");
+    let text = std::fs::read_to_string(&on_disk[0]).unwrap();
+    let rows = parse_tsv(&text).unwrap();
+    assert!(!rows.is_empty());
+    for row in &rows {
+        assert!(shipped.contains(row), "{} is not embedded", row.key);
     }
-    assert_eq!(comic_renamer_core::mapping::shipped_mapping_path("Humble"), None);
+    assert_eq!(rows.len(), shipped.len(), "and the embed holds nothing extra");
 }
 
 #[test]

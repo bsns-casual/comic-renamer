@@ -49,17 +49,14 @@ without changing the spec first.**
 7. **Collision comparison is NFC-normalised and case-folded**, never a literal
    path string — `Hellboy/` and `hellboy/` are one directory on APFS and two
    series on a Linux server. Emitted paths are always NFC. (§6.10, D2)
-   **This covers the `bundle` field too**, through `mapping::same_bundle`, and
-   it was broken there until 2026-10-23: every comparison of a bundle was
-   literal, so two rows for one key whose bundles differed only in case passed
-   `find_key_collisions` as two bundles and `lookup` then chose between them on
-   the case the user typed. Five call sites route through `same_bundle` now, and
-   the one that matters least obviously is `commit_session`'s merge — folding
-   the gate without folding that would make a second session on the same folder
-   append a row pair the gate refuses, so the user's own corrections file would
-   stop loading. `xtask seed`'s de-duplication tuple is deliberately still
-   literal: no fixture pair exists to fold, and a generator that produced one
-   now fails at the gate.
+   **The `bundle` half of this invariant retired on 2026-10-30 with the column
+   it guarded** (D64, `docs/specs/2026-10-30-one-decisions-table.md` §2.2).
+   `mapping::same_bundle` and all four of its call sites are gone, because a
+   bundle is no longer part of a row's identity and so there is no bundle
+   comparison left to get wrong. Read §2.2 before concluding that a guard was
+   dropped carelessly: it was broken there once, until 2026-10-23, and each of
+   the four sites gained a key-only test rather than simply losing its old one.
+   **The path half above is untouched and is not negotiable.**
 8. **Dataless detection reads `SF_DATALESS`.** Not `st_blocks == 0`, which
    misclassifies legitimate sparse files. (§6.10, D25)
 9. **Evaluation input is distributor bundles only.** Not scene releases, not
@@ -123,7 +120,8 @@ job's `cargo test --workspace`):
   identical title each time.
 - Every §6.11 per-field rule holds for every shipped row (rebuild §7.3).
 - The frozen key rule, pinned at 2,036 keys (invariant 10).
-- Each file under `data/mappings/` is at most 2 MiB, on every push and PR.
+- `data/decisions.tsv` is at most 4 MiB, on every push and PR (D67). The cap
+  is set by the binary, not the file: the table is `include_str!`-embedded.
 - A PR adds at most 2,500 rows. **This one is PR-only.** `check-mappings` diffs
   against the PR's base, so a direct push to `main` can add any number of rows.
   That is deliberate: the cap bounds contributed data, which arrives as a PR
@@ -146,7 +144,8 @@ same reason.
 docs/specs/      design documents          docs/plans/      implementation plans
 docs/research/   reviews and experiments   fixtures/        test data, filenames only
 corpus/          manifest.json — the pinned corpus. Never the .sqlite itself.
-data/mappings/   the shipped filename→title table, one TSV per marketplace
+data/decisions.tsv    the shipped filename→decision table. One file, one row
+                      per key, no `bundle` column (D63, D64)
 data/overrides.toml   first-party Layer B title overrides
 review/          the reviewed Humble table, decided but not shipped — see its README
 xtask/           cargo xtask measure | seed | check-mappings [base-ref]
@@ -353,9 +352,11 @@ the code or run on 2026-10-24:
 
 ### What ships, and what does not
 
-**Shipped mapping coverage is 12 rows**, in `data/mappings/fanatical.tsv` (5),
-`global-comix.tsv` (2) and `sweet-shop.tsv` (5): titles the maintainer confirmed
-one at a time. `cargo xtask seed` regenerates them from
+**Shipped coverage is 12 rows**, all in `data/decisions.tsv`: titles the
+maintainer confirmed one at a time, from Fanatical (5), Sweet Shop (5) and
+Global Comix (2). The per-marketplace files were merged on 2026-10-30 (D63);
+the marketplace still structures `fixtures/marketplace-ground-truth.tsv`, which
+is where that breakdown now lives. `cargo xtask seed` regenerates them from
 `fixtures/marketplace-ground-truth.tsv`.
 
 **The Humble table is generated and deliberately not shipped.** `cargo xtask seed`
@@ -416,7 +417,7 @@ each of which cost something to find:
   stopwords (`attackontitanbeforefall`, no "the"), and matching against that
   alone reported this very series as unconfirmed: 68 instead of 111.
 - **It never touches the 12 shipped marketplace rows.** Those were confirmed
-  title by title, and a keystroke outranks a lookup (D50, D51). `data/mappings/`
+  title by title, and a keystroke outranks a lookup (D50, D51). `data/decisions.tsv`
   is byte-identical after a regeneration, which is the check that proves it.
 
 A missing corpus is "no guess", not an error (D49): `seed` prints one line and
@@ -769,8 +770,9 @@ shortcut is a decision, and it belongs with the item-4 conversation.
 `review/humble-decisions.tsv` with its own README and the five not-a-comic rows
 beside it. Validated by embedding it as a shipped mapping and running the real
 suite: 606 passed, 0 failed. What remains is the licence question, which gates
-moving it into `data/mappings/` — a `git mv`, one `include_str!` and an array
-size, spelled out in `review/README.md`.
+moving it into `data/decisions.tsv` — now an append and a `git rm`, since D63
+left one embedded file rather than an array. `review/README.md` still describes
+the old shape.
 
 **The artifact's store is no longer the only copy.** If the review is reopened,
 re-dump the collection and re-run `scripts/export-decisions.py`; the export is
@@ -782,7 +784,7 @@ and confirm-what-is-shown) and `cee4822` (D62, the corpus casing). **CI run
 40454635024 is green on all six jobs**, `rust-corpus` in 1m32s among them, so
 the one branch that cannot be unit-tested here has been executed against the
 real release. Locally: 606 passing, 9 ignored, `check-mappings` green,
-`check-review-page.cjs` green, no compiler warnings, `data/mappings/`
+`check-review-page.cjs` green, no compiler warnings, the shipped table
 byte-identical after a regeneration. The docs commit `23b709d` that followed
 was still queued when it was last looked at; it changes no code.
 
@@ -800,7 +802,7 @@ deprecated Node 20 and is being forced onto Node 24, and `ubuntu-latest`
 migrates to Ubuntu 26 from 2026-10-19. Neither fails anything yet.
 
 **The issue column before it** is 19 commits, `b1a9c2f..7428246`, pushed
-2026-10-26. `cargo xtask seed` leaves `data/mappings/` byte-identical except
+2026-10-26. `cargo xtask seed` leaves the shipped table byte-identical except
 the four rows that legitimately improved (`Hammer Head`, `Minotaur`,
 `DIE: Loaded`, `Glarien: Origins` each carried `#1` as subtitle text).
 

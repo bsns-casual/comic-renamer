@@ -62,24 +62,11 @@ pub fn scan(
         preset_by_id(&opts.preset).ok_or_else(|| ScanError::UnknownPreset(opts.preset.clone()))?;
     let mode = opts.mode.unwrap_or(Mode::Move);
 
-    // The source folder's name is the bundle, which breaks ties between rows
-    // sharing a key and seeds the suggestion context. NFC through the one
-    // function `map` records with.
-    //
-    // The tie-break no longer depends on this: `Mappings::lookup` compares
-    // bundles through `mapping::same_bundle`, which is NFC-then-fold, so a
-    // decomposed folder name matches a composed stored bundle at the
-    // comparison -- invariant 7's principle, pinned by
-    // `a_bundles_case_does_not_make_a_second_bundle`. Removing this call
-    // leaves the suite green for that reason, not for want of a test. What
-    // still reads the name un-squashed is the publisher hint, where NFC buys a
-    // better corpus match and nothing more.
-    let folder = crate::mapping::bundle_name(
-        &source_root
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-    );
+    // No folder name is read here any more. It existed only to break ties
+    // between rows sharing a key, and identity is the key alone (D64). The
+    // callers that still need one compute it themselves: `main.rs` for the
+    // suggestion context, where Layer B keys on the folder and the publisher
+    // hint reads it un-squashed.
 
     let mut candidates: Vec<PathBuf> = std::fs::read_dir(&source_root)?
         .flatten()
@@ -107,7 +94,7 @@ pub fn scan(
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let Some(row) = key(&stem).and_then(|k| mappings.lookup(&k, &folder)) else {
+        let Some(row) = key(&stem).and_then(|k| mappings.lookup(&k)) else {
             unmapped.push(path.clone());
             continue;
         };

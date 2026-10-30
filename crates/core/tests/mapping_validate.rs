@@ -12,7 +12,6 @@ fn row(series: &str) -> MappingRow {
         subtitle: None,
         lang: "en".into(),
         volume_count: None,
-        bundle: "humble".into(),
     }
 }
 
@@ -55,13 +54,16 @@ fn allows_cjk_mixed_with_latin() {
     assert!(row("Привет мир").validate().is_ok(), "pure Cyrillic is fine");
 }
 
+/// The `bundle` half of this test went with the column (D64). Nothing stores a
+/// folder name now, so there is no third field to validate — `lang` and
+/// `subtitle` are what `validate` still reaches past the series.
 #[test]
-fn validates_subtitle_and_bundle_too() {
+fn validates_subtitle_and_lang_too() {
     let mut r = row("Fine");
     r.subtitle = Some("=evil".into());
     assert!(r.validate().is_err());
     let mut r = row("Fine");
-    r.bundle = "a\tb".into();
+    r.lang = "a\tb".into();
     assert!(r.validate().is_err());
 }
 
@@ -96,8 +98,8 @@ fn rejects_invisible_characters_in_every_text_field() {
         r.subtitle = Some(format!("a{c}b"));
         assert!(r.validate().is_err(), "U+{:04X} in subtitle", c as u32);
         let mut r = row("Fine");
-        r.bundle = format!("a{c}b");
-        assert!(r.validate().is_err(), "U+{:04X} in bundle", c as u32);
+        r.lang = format!("a{c}b");
+        assert!(r.validate().is_err(), "U+{:04X} in lang", c as u32);
     }
 }
 
@@ -130,8 +132,8 @@ fn rejects_the_invisible_characters_the_old_set_let_through() {
         r.subtitle = Some(format!("a{c}b"));
         assert!(r.validate().is_err(), "U+{:04X} in subtitle", c as u32);
         let mut r = row("Fine");
-        r.bundle = format!("a{c}b");
-        assert!(r.validate().is_err(), "U+{:04X} in bundle", c as u32);
+        r.lang = format!("a{c}b");
+        assert!(r.validate().is_err(), "U+{:04X} in lang", c as u32);
     }
 }
 

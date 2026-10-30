@@ -223,7 +223,6 @@ impl<'a> Detail<'a> {
             subtitle: fields.subtitle.clone(),
             lang: String::new(),
             volume_count: super::table::run_length(&self.candidates, &fields.series),
-            bundle: String::new(),
         };
         self.preset.destination(&row.resolved(), &self.ext).display().to_string()
     }
@@ -678,8 +677,7 @@ mod tests {
                 subtitle: None,
                 lang: String::new(),
                 volume_count: e.approved_row().unwrap().1,
-                bundle: String::new(),
-            }
+                }
             .resolved(),
             &e.extension,
         );

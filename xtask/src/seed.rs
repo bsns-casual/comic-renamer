@@ -1,5 +1,12 @@
-//! `cargo xtask seed` -- writes the marketplace tables into `data/mappings/`
-//! and the Humble candidates to `target/seed/humble.tsv`.
+//! `cargo xtask seed` -- writes the shipped table to `data/decisions.tsv` and
+//! the Humble candidates to `target/seed/humble.tsv`.
+//!
+//! The two have different shapes on purpose since D63/D64. The shipped table is
+//! seven columns, one row per key, no bundle. The Humble intermediate keeps the
+//! old eight-column shape, its row order and its row count, because
+//! `scripts/review-rows.py` reads those eight fields in order and the review
+//! artifact keys 2,204 stored decisions on a row's ordinal here plus its
+//! `(key, bundle)`. See the spec's §2.1.
 //!
 //! Only the marketplace rows ship: the maintainer confirmed each one title by
 //! title. The Humble titles are verified too, but their split into series /
@@ -7,12 +14,12 @@
 //! keystroke (D50, D51), so that file stays out of the tree until the owner
 //! picks a review method.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use comic_renamer_core::corpus::Corpus;
 use comic_renamer_core::mapping::{find_key_collisions, key, to_tsv, MappingRow, MAX_ISSUE};
-use comic_renamer_core::normalize::squash;
+use comic_renamer_core::normalize::{collision_key, squash};
 use comic_renamer_core::title::{is_volume_word, number_value, parse_title};
 
 use xtask::strip_promo;
@@ -36,7 +43,7 @@ fn marketplace_rows(text: &str) -> Result<BTreeMap<String, Vec<MappingRow>>, Str
             // No corpus here. These 12 rows ship, and the maintainer
             // confirmed each one title by title, so a lookup could only
             // overrule a keystroke (D50, D51).
-            .push(build_row(title, stem, market, series, None)?);
+            .push(build_row(title, stem, series, None)?);
     }
     Ok(by_market)
 }
@@ -73,14 +80,14 @@ mod tests {
         assert_eq!((g.volume, g.issue), (None, Some(1)));
 
         // Left to the parser, the colon splits and both become arcs.
-        assert_eq!(build_row("DIE: Loaded #1", "d", "x", None, None).unwrap().series, "DIE");
+        assert_eq!(build_row("DIE: Loaded #1", "d", None, None).unwrap().series, "DIE");
     }
 
     /// A series that is not a prefix of its own title means one of the two is
     /// wrong, and only a human knows which.
     #[test]
     fn a_confirmed_series_that_is_not_a_prefix_is_an_error() {
-        assert!(build_row("DIE: Loaded #1", "d", "x", Some("Glarien"), None).is_err());
+        assert!(build_row("DIE: Loaded #1", "d", Some("Glarien"), None).is_err());
     }
 
     /// The shape the parser cannot see: it cuts at the first colon, so a
@@ -107,13 +114,13 @@ mod tests {
     #[test]
     fn a_corpus_confirmed_stem_keeps_its_colon_and_takes_the_volume() {
         let title = "Attack on Titan: Before the Fall Vol. 9";
-        let guessed = build_row(title, "aotbtf09", "Humble", None, None).unwrap();
+        let guessed = build_row(title, "aotbtf09", None, None).unwrap();
         assert_eq!(guessed.series, "Attack on Titan");
         assert_eq!(guessed.volume, None);
         assert_eq!(guessed.subtitle.as_deref(), Some("Before the Fall Vol. 9"));
 
         let found = Some(("Attack on Titan: Before the Fall".to_string(), 9));
-        let row = build_row(title, "aotbtf09", "Humble", None, found).unwrap();
+        let row = build_row(title, "aotbtf09", None, found).unwrap();
         assert_eq!(row.series, "Attack on Titan: Before the Fall");
         assert_eq!(row.volume, Some(9));
         assert_eq!(row.subtitle, None, "the marker is the volume, not a subtitle");
@@ -124,11 +131,7 @@ mod tests {
     /// (D50, D51), and a lookup must not quietly replace that.
     #[test]
     fn a_humans_ruling_outranks_the_corpus() {
-        let row = build_row(
-            "DIE: Loaded Vol. 2",
-            "dieloaded2",
-            "x",
-            Some("DIE: Loaded"),
+        let row = build_row("DIE: Loaded Vol. 2", "dieloaded2", Some("DIE: Loaded"),
             Some(("Something Else Entirely".to_string(), 2)),
         )
         .unwrap();
@@ -143,13 +146,18 @@ mod tests {
 
 pub fn seed() -> Result<(), String> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    // One table now (D63). The marketplaces still structure the *fixture* --
+    // its first column is the marketplace -- but they no longer structure the
+    // output, so every row joins one file sorted by key.
     let by_market = marketplace_rows(MARKETPLACE)?;
-    for (market, rows) in &by_market {
-        let slug = market.to_lowercase().replace(' ', "-");
-        let path = root.join("data/mappings").join(format!("{slug}.tsv"));
-        std::fs::write(&path, to_tsv(rows)).map_err(|e| format!("{}: {e}", path.display()))?;
-        println!("{:3} rows  {}", rows.len(), path.display());
+    let mut shipped: Vec<MappingRow> = by_market.values().flatten().cloned().collect();
+    shipped.sort_by(|a, b| a.key.cmp(&b.key));
+    if let Some(key) = find_key_collisions(&shipped).into_iter().next() {
+        return Err(format!("two fixture rows share key {key:?}; identity is the key alone (D64)"));
     }
+    let path = root.join("data/decisions.tsv");
+    std::fs::write(&path, to_tsv(&shipped)).map_err(|e| format!("{}: {e}", path.display()))?;
+    println!("{:3} rows  {}", shipped.len(), path.display());
 
     // Optional on purpose: the tables above need none, and a maintainer
     // without the download still gets the parser's guesses (D49).
@@ -180,7 +188,7 @@ pub fn seed() -> Result<(), String> {
         // guessed from the string.
         let found = corpus.as_ref().and_then(|c| corpus_split(&strip_promo(title), c));
         let confirmed = found.is_some();
-        let row = match build_row(title, stem, bundle, None, found) {
+        let row = match build_row(title, stem, None, found) {
             Ok(row) => row,
             Err(e) => {
                 // The error names the title; group by what follows it.
@@ -204,7 +212,13 @@ pub fn seed() -> Result<(), String> {
         };
         let mut row = row;
         let class = settle_casing(&mut row, class, corpus.as_ref());
-        built.push(Built { title: title.to_string(), stem: stem.to_string(), row, class });
+        built.push(Built {
+            title: title.to_string(),
+            stem: stem.to_string(),
+            row,
+            bundle: bundle.to_string(),
+            class,
+        });
     }
 
     let propagated = propagate_within_titles(&mut built)?;
@@ -220,17 +234,17 @@ pub fn seed() -> Result<(), String> {
         // page meant to drive 2,204 decisions should agree with the report.
         sidecar.push(format!(
             "{}\t{}\t{}\t{}\t{}",
-            b.row.key, b.row.bundle, b.stem, b.title, b.class
+            b.row.key, b.bundle, b.stem, b.title, b.class
         ));
-        rows.push(b.row);
+        rows.push((b.row, b.bundle));
     }
     // Exact repeats collapse; a pair that disagrees survives to be counted below.
     let mut seen = HashSet::new();
-    rows.retain(|r| seen.insert(dedup_identity(r)));
-    let collisions = find_key_collisions(&rows);
+    rows.retain(|(r, bundle)| seen.insert(dedup_identity(r, bundle)));
+    let collisions = disagreeing_within_a_bundle(&rows);
     let out = root.join("target/seed/humble.tsv");
     std::fs::create_dir_all(out.parent().unwrap()).map_err(|e| e.to_string())?;
-    std::fs::write(&out, to_tsv(&rows)).map_err(|e| e.to_string())?;
+    std::fs::write(&out, to_tsv_with_bundle(&rows)).map_err(|e| e.to_string())?;
     let classes_out = root.join("target/seed/humble-classes.tsv");
     std::fs::write(&classes_out, sidecar.join("\n") + "\n").map_err(|e| e.to_string())?;
 
@@ -272,12 +286,63 @@ pub fn seed() -> Result<(), String> {
 /// to the row broke that silently — the tuple had been every field, and a
 /// pair differing only by issue folded before the gate ran. No fixture pair
 /// exercises it, which is exactly why it needed a test rather than a reader.
+/// `target/seed/humble.tsv` in the pre-D64 eight-column shape, bundle last.
+///
+/// Deliberately not `mapping::to_tsv`, which now emits seven columns. This file
+/// is the generator's intermediate and the review page's input:
+/// `scripts/review-rows.py` reads exactly these eight fields in order and
+/// `sys.exit`s otherwise, and the review artifact keys its 2,204 stored
+/// decisions on a row's ordinal here plus its `(key, bundle)`. Changing the
+/// shape, the order or the count of these rows orphans all of them (spec §2.1).
+fn to_tsv_with_bundle(rows: &[(MappingRow, String)]) -> String {
+    let n = |v: Option<u32>| v.map(|v| v.to_string()).unwrap_or_default();
+    let mut out =
+        String::from("key\tseries\tvolume\tissue\tsubtitle\tlang\tvolume_count\tbundle\n");
+    for (r, bundle) in rows {
+        out.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            r.key,
+            r.series,
+            n(r.volume),
+            n(r.issue),
+            r.subtitle.as_deref().unwrap_or(""),
+            r.lang,
+            n(r.volume_count),
+            bundle
+        ));
+    }
+    out
+}
+
+/// `(key, bundle)` pairs whose rows disagree on a field — the semantics
+/// `mapping::find_key_collisions` had before D64.
+///
+/// The shipped table's gate is now "a key appears twice", which this file
+/// cannot use: the Humble intermediate is per bundle and 158 of its keys
+/// legitimately appear under more than one, agreeing every time. What would be
+/// a defect here is two rows for one key *in one bundle* that disagree.
+fn disagreeing_within_a_bundle(rows: &[(MappingRow, String)]) -> Vec<(String, String)> {
+    let mut first: HashMap<(&str, String), &MappingRow> = HashMap::new();
+    let mut bad = BTreeSet::new();
+    for (r, bundle) in rows {
+        let slot = first.entry((&r.key, collision_key(bundle))).or_insert(r);
+        if *slot != r {
+            bad.insert((r.key.clone(), bundle.clone()));
+        }
+    }
+    bad.into_iter().collect()
+}
+
 fn dedup_identity(
     r: &MappingRow,
+    bundle: &str,
 ) -> (String, String, String, Option<u32>, Option<u32>, Option<String>) {
     (
         r.key.clone(),
-        r.bundle.clone(),
+        // Still per bundle, because this folds the *generator's* repeats and
+        // its input really does have bundles (spec §2.1). The shipped table's
+        // own one-row-per-key rule is `find_key_collisions`, one line later.
+        bundle.to_string(),
         r.series.clone(),
         r.volume,
         r.issue,
@@ -385,7 +450,7 @@ fn propagate_within_titles(built: &mut [Built]) -> Result<usize, String> {
         .filter(|b| b.class == ISSUE_FROM_FILENAME)
         .map(|b| {
             (
-                (b.row.bundle.clone(), b.title.clone()),
+                (b.bundle.clone(), b.title.clone()),
                 (b.row.series.clone(), b.row.volume, b.row.issue, b.row.subtitle.clone()),
             )
         })
@@ -396,7 +461,7 @@ fn propagate_within_titles(built: &mut [Built]) -> Result<usize, String> {
             continue;
         }
         let Some((series, volume, issue, subtitle)) =
-            derived.get(&(b.row.bundle.clone(), b.title.clone()))
+            derived.get(&(b.bundle.clone(), b.title.clone()))
         else {
             continue;
         };
@@ -417,7 +482,7 @@ fn propagate_within_titles(built: &mut [Built]) -> Result<usize, String> {
 fn flag_disagreeing_siblings(built: &mut [Built]) {
     let mut shapes: BTreeMap<(String, String), BTreeSet<ParsedFields>> = BTreeMap::new();
     for b in built.iter() {
-        shapes.entry((b.row.bundle.clone(), b.title.clone())).or_default().insert((
+        shapes.entry((b.bundle.clone(), b.title.clone())).or_default().insert((
             b.row.series.clone(),
             b.row.volume,
             b.row.issue,
@@ -425,7 +490,7 @@ fn flag_disagreeing_siblings(built: &mut [Built]) {
         ));
     }
     for b in built.iter_mut() {
-        if shapes[&(b.row.bundle.clone(), b.title.clone())].len() > 1 {
+        if shapes[&(b.bundle.clone(), b.title.clone())].len() > 1 {
             b.class = SIBLINGS_DISAGREE;
         }
     }
@@ -437,6 +502,12 @@ struct Built {
     title: String,
     stem: String,
     row: MappingRow,
+    /// The bundle this candidate came from. Not a field of `MappingRow` since
+    /// D64 — the shipped table has no such column — but the generator still
+    /// needs it: sibling detection groups on `(bundle, title)`, and the review
+    /// page identifies its 2,204 stored decisions by `(key, bundle)`, so the
+    /// sidecar and `target/seed/humble.tsv` keep theirs (spec §2.1).
+    bundle: String,
     class: &'static str,
 }
 
@@ -528,10 +599,13 @@ fn corpus_split(title: &str, corpus: &Corpus) -> Option<(String, u32)> {
     (stem.contains(':') && is_series(stem, corpus)).then(|| (stem.to_string(), volume))
 }
 
+/// No `bundle` parameter since D64: the field is gone from `MappingRow`, and
+/// with it the only thing that ever validated a folder name. Nothing stores one
+/// now — `Built` carries the bundle for the generator's own grouping, Layer B
+/// uses it as a map key, and `branch_for` slugifies it.
 fn build_row(
     title: &str,
     stem: &str,
-    bundle: &str,
     confirmed: Option<&str>,
     corpus_series: Option<(String, u32)>,
 ) -> Result<MappingRow, String> {
@@ -600,7 +674,6 @@ fn build_row(
         subtitle,
         lang: LANG.to_string(),
         volume_count: None,
-        bundle: bundle.to_string(),
     };
     row.validate().map_err(|e| format!("{title:?}: {e}"))?;
     Ok(row)
@@ -830,11 +903,7 @@ mod issue_tests {
 
     #[test]
     fn a_derived_issue_strips_the_number_from_the_series() {
-        let row = build_row(
-            "Bee and PuppyCat 1",
-            "beeandpuppycat_issue1_1406925491",
-            "Humble BOOM! Bundle",
-            None,
+        let row = build_row("Bee and PuppyCat 1", "beeandpuppycat_issue1_1406925491", None,
             None,
         )
         .unwrap();
@@ -845,11 +914,7 @@ mod issue_tests {
 
     #[test]
     fn a_derived_issue_strips_the_number_from_the_subtitle_when_that_is_where_it_sits() {
-        let row = build_row(
-            "Protocol: Orphans 4",
-            "protocol_orphans_issue4_1406925491",
-            "Humble BOOM! Bundle",
-            None,
+        let row = build_row("Protocol: Orphans 4", "protocol_orphans_issue4_1406925491", None,
             None,
         )
         .unwrap();
@@ -862,11 +927,7 @@ mod issue_tests {
     fn a_keystroke_still_outranks_the_filename_rule() {
         // D50/D51: the fifth column is a confirmed series and replaces the
         // split whole, so the rule must not reach past it.
-        let row = build_row(
-            "Bee and PuppyCat 1",
-            "beeandpuppycat_issue1_1406925491",
-            "Humble BOOM! Bundle",
-            Some("Bee and PuppyCat 1"),
+        let row = build_row("Bee and PuppyCat 1", "beeandpuppycat_issue1_1406925491", Some("Bee and PuppyCat 1"),
             None,
         )
         .unwrap();
@@ -882,11 +943,7 @@ mod confirmed_issue_tests {
     /// A confirmed series does not make the leftover exempt from D60.
     #[test]
     fn a_confirmed_series_still_gives_up_a_trailing_hash_issue() {
-        let row = build_row(
-            "DIE: Loaded #1",
-            "die-loaded-issue-1",
-            "Sweet Shop",
-            Some("DIE: Loaded"),
+        let row = build_row("DIE: Loaded #1", "die-loaded-issue-1", Some("DIE: Loaded"),
             None,
         )
         .unwrap();
@@ -897,11 +954,7 @@ mod confirmed_issue_tests {
 
     #[test]
     fn a_confirmed_series_keeps_a_real_subtitle_beside_the_issue() {
-        let row = build_row(
-            "Glarien: Origins The Dig #2",
-            "glarien-origins-issue-2",
-            "Sweet Shop",
-            Some("Glarien: Origins"),
+        let row = build_row("Glarien: Origins The Dig #2", "glarien-origins-issue-2", Some("Glarien: Origins"),
             None,
         )
         .unwrap();
@@ -981,7 +1034,6 @@ mod dedup_tests {
             subtitle: None,
             lang: LANG.to_string(),
             volume_count: None,
-            bundle: "B".into(),
         }
     }
 
@@ -992,15 +1044,22 @@ mod dedup_tests {
     /// pair exercises it today, and the next generator change could.
     #[test]
     fn two_rows_differing_only_by_issue_are_not_one_row() {
-        assert_ne!(dedup_identity(&row(Some(1))), dedup_identity(&row(Some(2))));
-        assert_ne!(dedup_identity(&row(None)), dedup_identity(&row(Some(1))));
-        assert_eq!(dedup_identity(&row(Some(1))), dedup_identity(&row(Some(1))));
+        let b = "B";
+        assert_ne!(dedup_identity(&row(Some(1)), b), dedup_identity(&row(Some(2)), b));
+        assert_ne!(dedup_identity(&row(None), b), dedup_identity(&row(Some(1)), b));
+        assert_eq!(dedup_identity(&row(Some(1)), b), dedup_identity(&row(Some(1)), b));
+        // Still per bundle, because this folds the generator's own repeats and
+        // its input really has bundles (spec §2.1).
+        assert_ne!(dedup_identity(&row(Some(1)), "A"), dedup_identity(&row(Some(1)), "B"));
     }
 
-    /// And the gate itself still sees them, which is what makes surviving
-    /// the fold worth anything.
+    /// And a gate still sees them, which is what makes surviving the fold
+    /// worth anything. Two gates now: the generator's own, which is per
+    /// bundle, and the shipped table's, which is per key (D64).
     #[test]
-    fn the_collision_gate_reports_a_pair_that_disagrees_on_the_issue() {
+    fn a_pair_that_disagrees_on_the_issue_is_still_reported() {
+        let pair = [(row(Some(1)), "B".to_string()), (row(Some(2)), "B".to_string())];
+        assert!(!disagreeing_within_a_bundle(&pair).is_empty());
         assert!(!find_key_collisions(&[row(Some(1)), row(Some(2))]).is_empty());
     }
 }
@@ -1018,7 +1077,6 @@ mod shouting_tests {
             subtitle: subtitle.map(str::to_string),
             lang: LANG.to_string(),
             volume_count: None,
-            bundle: "b".into(),
         }
     }
 
@@ -1139,8 +1197,10 @@ mod sibling_tests {
                 subtitle: None,
                 lang: LANG.to_string(),
                 volume_count: None,
-                bundle: "Humble BOOM! Bundle".into(),
             },
+            // Sibling detection groups on `(bundle, title)`, so these helpers
+            // share one bundle: the tests are about titles, not bundles.
+            bundle: "B".to_string(),
             class,
         }
     }

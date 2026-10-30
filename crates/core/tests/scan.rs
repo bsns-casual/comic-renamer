@@ -129,29 +129,30 @@ fn a_zero_byte_source_is_a_row_not_a_fault() {
     assert_eq!(header.required_bytes, 0);
 }
 
+/// This replaces `the_source_folder_name_is_the_bundle_that_breaks_a_tie`,
+/// whose second half asserted the cost D64 exists to remove: "a folder matching
+/// neither bundle gets no guess". Over every decision this project holds that
+/// described 158 of 2,043 keys — all of them agreeing on every field, so there
+/// was never a tie to break, only a folder name to fail to match.
+///
+/// `scan` passes no folder name to `lookup` any more. This is the test for that
+/// site: the same file resolves from any folder.
 #[test]
-fn the_source_folder_name_is_the_bundle_that_breaks_a_tie() {
-    // Two rows share a key; only the bundle says which one this folder wants.
-    let tsv = "key\tseries\tvolume\tissue\tsubtitle\tlang\tvolume_count\tbundle\n\
-               maskomnibus\tThe Mask Omnibus\t\t\t\ten\t\tHumbleDarkHorseAnniversaryBundle\n\
-               maskomnibus\tThe Mask\t\t\t\ten\t\tSomeOtherBundle\n";
+fn a_mapped_file_resolves_whatever_the_folder_is_called() {
+    let tsv = "key\tseries\tvolume\tissue\tsubtitle\tlang\tvolume_count\n\
+               maskomnibus\tThe Mask Omnibus\t\t\t\ten\t\n";
     let m = Mappings::load(tsv, None).unwrap();
     let dest = tempdir().unwrap();
     let parent = tempdir().unwrap();
-    let source = parent.path().join("HumbleDarkHorseAnniversaryBundle");
-    std::fs::create_dir(&source).unwrap();
-    tree_from_names(&source, &["maskomnibus.pdf"]);
 
-    let (_h, rows) = planned(&opts(&source, dest.path()), &m);
-    assert_eq!(rows[0].series, "The Mask Omnibus");
-
-    // A folder matching neither bundle gets no guess.
-    let other = parent.path().join("Downloads");
-    std::fs::create_dir(&other).unwrap();
-    tree_from_names(&other, &["maskomnibus.pdf"]);
-    let outcome = run(&opts(&other, dest.path()), &m).unwrap();
-    assert!(outcome.rows.is_empty());
-    assert_eq!(outcome.unmapped.len(), 1);
+    for folder in ["HumbleDarkHorseAnniversaryBundle", "Downloads", "whatever"] {
+        let source = parent.path().join(folder);
+        std::fs::create_dir(&source).unwrap();
+        tree_from_names(&source, &["maskomnibus.pdf"]);
+        let (_h, rows) = planned(&opts(&source, dest.path()), &m);
+        assert_eq!(rows.len(), 1, "{folder}");
+        assert_eq!(rows[0].series, "The Mask Omnibus", "{folder}");
+    }
 }
 
 #[test]

@@ -1017,8 +1017,8 @@ fn map_with_nothing_unmapped_needs_no_terminal_and_writes_the_plan() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("mappings.tsv"),
-        "key\tseries\tvolume\tissue\tsubtitle\tlang\tvolume_count\tbundle\n\
-         hellboyvol1\tHellboy\t1\t\t\ten\t\t\n",
+        "key\tseries\tvolume\tissue\tsubtitle\tlang\tvolume_count\n\
+         hellboyvol1\tHellboy\t1\t\t\ten\t\n",
     )
     .unwrap();
     let out = map_cmd(&f, config.path()).output().unwrap();

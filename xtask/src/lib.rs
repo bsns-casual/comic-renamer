@@ -7,8 +7,16 @@ use comic_renamer_core::title::{is_volume_word, split_at_boundary};
 /// less: a seeding PR of about 2,200 rows must clear the check it exists to
 /// pass through, or seeding would bypass its own gate.
 pub const MAX_ROWS_PER_PR: usize = 2500;
-/// One mapping file may not exceed 2 MiB (§6.11).
-pub const MAX_MAPPING_FILE_BYTES: usize = 2 * 1024 * 1024;
+/// `data/decisions.tsv` may not exceed 4 MiB (D67, raising §6.11's 2 MiB).
+///
+/// The constraint that sets this is not the file, it is the binary: the table
+/// is `include_str!`-embedded, so it lands in the shipped executable byte for
+/// byte. The release binary is 6.9 MB, and at 93 bytes a row 4 MiB is about
+/// 45,000 decisions — so the cap is "the table may grow to two thirds of the
+/// binary and no further". 8 MiB was proposed and rejected for doubling what
+/// Homebrew downloads to install a rename tool. Past 4 MiB the table should
+/// stop being embedded, which is a different change.
+pub const MAX_MAPPING_FILE_BYTES: usize = 4 * 1024 * 1024;
 
 pub fn rows_per_pr_ok(n: usize) -> bool {
     n <= MAX_ROWS_PER_PR
@@ -147,14 +155,14 @@ mod tests {
 
     #[test]
     fn a_mapping_file_over_two_mebibytes_is_refused() {
-        assert!(file_size_ok(2 * 1024 * 1024));
-        assert!(!file_size_ok(2 * 1024 * 1024 + 1));
+        assert!(file_size_ok(4 * 1024 * 1024));
+        assert!(!file_size_ok(4 * 1024 * 1024 + 1));
         assert!(file_size_ok(comic_renamer_core::mapping::shipped_mappings().len()));
     }
 
     #[test]
     fn added_rows_sums_numstat_and_skips_binary() {
-        let stat = "12\t3\tdata/mappings/a.tsv\n5\t0\tdata/mappings/b.tsv\n-\t-\tx.bin\n";
+        let stat = "12\t3\tdata/decisions.tsv\n5\t0\tdata/other.tsv\n-\t-\tx.bin\n";
         assert_eq!(added_rows(stat), 17);
         assert_eq!(added_rows(""), 0);
     }

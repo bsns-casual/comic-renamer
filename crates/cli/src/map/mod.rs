@@ -2,10 +2,7 @@
 
 use crate::{guesses_for, parse_overrides, OVERRIDES};
 use comic_renamer_core::mapping::shipped_mappings;
-use comic_renamer_core::mapping::{
-    file_slug, key, parse_tsv, shipped_mapping_path, to_tsv, MappingRow, Mappings,
-};
-use comic_renamer_core::mapping::same_bundle;
+use comic_renamer_core::mapping::{file_slug, key, parse_tsv, to_tsv, MappingRow, Mappings};
 use comic_renamer_core::normalize::collision_key;
 use comic_renamer_core::title::ParsedTitle;
 use comic_renamer_core::overrides::Overrides;
@@ -91,7 +88,7 @@ pub fn intra_session_collisions(entries: &[table::Entry], preset: &dyn Preset) -
     for e in entries {
         let Some((fields, count)) = e.approved_row() else { continue };
         // An unkeyable stem is `commit_session`'s error to report.
-        let Some(row) = row_for(&e.stem, fields, count, "", "") else { continue };
+        let Some(row) = row_for(&e.stem, fields, count, "") else { continue };
         let dest = collision_key(&preset.destination(&row.resolved(), &e.extension).to_string_lossy());
         match first.get(&dest) {
             Some(earlier) => found.push((earlier.to_string(), e.stem.clone())),
@@ -103,7 +100,7 @@ pub fn intra_session_collisions(entries: &[table::Entry], preset: &dyn Preset) -
     found
 }
 
-fn row_for(stem: &str, fields: &ParsedTitle, count: Option<u32>, bundle: &str, lang: &str) -> Option<MappingRow> {
+fn row_for(stem: &str, fields: &ParsedTitle, count: Option<u32>, lang: &str) -> Option<MappingRow> {
     Some(MappingRow {
         key: key(stem)?,
         series: fields.series.clone(),
@@ -112,7 +109,6 @@ fn row_for(stem: &str, fields: &ParsedTitle, count: Option<u32>, bundle: &str, l
         subtitle: fields.subtitle.clone(),
         lang: lang.to_string(),
         volume_count: count,
-        bundle: bundle.to_string(),
     })
 }
 
@@ -127,15 +123,18 @@ pub struct Committed {
 /// The approved entries as validated rows, plus the pairs of files that wanted
 /// one key with different titles (neither of a pair is returned). Shared by the
 /// local write and the contribution, so what is contributed is what was saved.
-fn approved_rows(entries: &[table::Entry], bundle: &str, lang: &str) -> Result<(Vec<MappingRow>, Vec<(String, String)>), String> {
+fn approved_rows(entries: &[table::Entry], lang: &str) -> Result<(Vec<MappingRow>, Vec<(String, String)>), String> {
     // Grouped by key, in first-seen order.
     let mut groups: Vec<Vec<(&str, MappingRow)>> = Vec::new();
     for e in entries {
         let Some((fields, count)) = e.approved_row() else { continue };
-        let row = row_for(&e.stem, fields, count, bundle, lang)
+        let row = row_for(&e.stem, fields, count, lang)
             .ok_or_else(|| format!("{:?} has no letters or digits to key a mapping on", e.stem))?;
         row.validate().map_err(|err| format!("{:?}: {err}", e.stem))?;
-        match groups.iter_mut().find(|g| g[0].1.key == row.key && same_bundle(&g[0].1.bundle, &row.bundle)) {
+        // Grouped on the key alone since D64. There is no bundle to agree
+        // about any more, so two files whose names share a key clash whatever
+        // folder they came from.
+        match groups.iter_mut().find(|g| g[0].1.key == row.key) {
             Some(g) => g.push((e.stem.as_str(), row)),
             None => groups.push(vec![(e.stem.as_str(), row)]),
         }
@@ -161,10 +160,10 @@ fn approved_rows(entries: &[table::Entry], bundle: &str, lang: &str) -> Result<(
 /// row is validated first and any failure leaves the file as it was; the file
 /// then lands via a sibling temp file and a rename, so an interrupted write
 /// cannot truncate corrections no other record holds.
-/// `bundle` and `lang` are not on an `Entry`, so the caller supplies them.
+/// `lang` is not on an `Entry`, so the caller supplies it.
 ///
 /// An existing file that does not load aborts: overwriting it would drop the
-/// user's older corrections. A row with the same `(key, bundle)` is replaced.
+/// user's older corrections. A row with the same key is replaced.
 /// Files whose names share a key but whose titles differ are reported and
 /// left out, so the rest of the session is kept.
 // shortcut: no lock around the read-modify-write, so two sessions inside the
@@ -172,8 +171,8 @@ fn approved_rows(entries: &[table::Entry], bundle: &str, lang: &str) -> Result<(
 // (as apply's lockfile does) closes it. The *file* is safe either way now —
 // each writer has its own temp name, so the loser's rows are missing rather
 // than spliced into the winner's.
-pub fn commit_session(entries: &[table::Entry], local: &Path, bundle: &str, lang: &str) -> Result<Committed, String> {
-    let (fresh, clashes) = approved_rows(entries, bundle, lang)?;
+pub fn commit_session(entries: &[table::Entry], local: &Path, lang: &str) -> Result<Committed, String> {
+    let (fresh, clashes) = approved_rows(entries, lang)?;
     if fresh.is_empty() {
         return Ok(Committed { written: 0, clashes });
     }
@@ -184,7 +183,11 @@ pub fn commit_session(entries: &[table::Entry], local: &Path, bundle: &str, lang
     };
     let written = fresh.len();
     for row in fresh {
-        match rows.iter_mut().find(|r| r.key == row.key && same_bundle(&r.bundle, &row.bundle)) {
+        // Replaced in place, never appended (spec §2.3): the user mapped this
+        // filename again and typed something different, and the newer
+        // keystroke wins. An append would put a duplicate key in the file and
+        // `parse_tsv` would then refuse to load the user's own corrections.
+        match rows.iter_mut().find(|r| r.key == row.key) {
             Some(slot) => *slot = row,
             None => rows.push(row),
         }
@@ -222,10 +225,7 @@ const UPSTREAM: &str = "bsns-casual/comic-renamer";
 /// the only thing the user agrees to is the file write and the printout.
 pub struct Contribution {
     pub path: PathBuf,
-    /// Empty when this marketplace has no shipped file to append to, which is
-    /// the whole of how `guidance` tells the two apart.
     pub commands: Vec<String>,
-    pub marketplace: String,
 }
 
 /// The approved rows as a mapping file, and nothing else: no declined row, no
@@ -235,7 +235,7 @@ pub fn contribution_tsv(entries: &[table::Entry], bundle: &str, lang: &str) -> R
     if bundle.contains(['/', '\\']) {
         return Err(format!("{bundle:?} is a path, not a folder name; a contribution never carries one"));
     }
-    let (rows, _) = approved_rows(entries, bundle, lang)?;
+    let (rows, _) = approved_rows(entries, lang)?;
     Ok(to_tsv(&rows))
 }
 
@@ -251,16 +251,11 @@ pub(crate) fn quote(s: &str) -> String {
 /// Writes `tsv` beside the local mappings and returns the commands that open
 /// the pull request. Nothing is executed and no credential is touched: `gh`
 /// owns authentication when the user runs the commands.
-pub fn contribute(tsv: &str, branch: &str, marketplace: &str) -> Result<Contribution, String> {
-    contribute_in(tsv, branch, &config_dir()?.join("contributions"), marketplace)
+pub fn contribute(tsv: &str, branch: &str) -> Result<Contribution, String> {
+    contribute_in(tsv, branch, &config_dir()?.join("contributions"))
 }
 
-fn contribute_in(
-    tsv: &str,
-    branch: &str,
-    dir: &Path,
-    marketplace: &str,
-) -> Result<Contribution, String> {
+fn contribute_in(tsv: &str, branch: &str, dir: &Path) -> Result<Contribution, String> {
     let ok_branch = !branch.is_empty()
         && !branch.starts_with(['-', '.'])
         && branch.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
@@ -274,14 +269,10 @@ fn contribute_in(
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let path = dir.join(format!("{branch}.tsv"));
     std::fs::write(&path, tsv).map_err(|e| format!("{}: {e}", path.display()))?;
-    // No file to append to means no commands. Printing them anyway sent the
-    // contributor to a PR that is red before anyone reads it: a `cp` into
-    // `data/mappings/<branch>.tsv` creates a TSV that nothing embeds, and
-    // `every_tsv_in_data_mappings_is_embedded` refuses it. The rows are still
-    // written, because they are the user's work either way.
-    let Some(target) = shipped_mapping_path(marketplace) else {
-        return Ok(Contribution { path, commands: Vec::new(), marketplace: marketplace.to_string() });
-    };
+    // One target, always (D66). This used to branch on whether the
+    // marketplace had a file to append to, and printed nothing when it did
+    // not — which was Humble, the default. One table removes the question.
+    let target = "data/decisions.tsv";
 
     let repo = UPSTREAM.rsplit('/').next().unwrap();
     let title = format!("data: {n} mapping{} from {branch}", if n == 1 { "" } else { "s" });
@@ -291,15 +282,15 @@ fn contribute_in(
         format!("gh repo fork {UPSTREAM} --clone"),
         format!("cd {repo}"),
         format!("git checkout -b {branch}"),
-        // Appended, header skipped: the marketplace's file already ships with
-        // one, and a second header line is not a row.
+        // Appended, header skipped: the table already ships with one, and a
+        // second header line is not a row.
         format!("tail -n +2 {} >> {target}", quote(&path.to_string_lossy())),
         format!("git add {target}"),
         format!("git commit -m {}", quote(&title)),
         format!("git push -u origin {branch}"),
         format!("gh pr create --repo {UPSTREAM} --title {} --body 'Mappings contributed from comic-renamer map.'", quote(&title)),
     ];
-    Ok(Contribution { path, commands, marketplace: marketplace.to_string() })
+    Ok(Contribution { path, commands })
 }
 
 /// Anything but an explicit yes declines: a contribution is public.
@@ -309,12 +300,7 @@ fn is_yes(answer: &str) -> bool {
 
 /// Offers the contribution after the local save (§6.5). Reads one line from
 /// stdin; the file is written only when the user types yes.
-fn offer_contribution(
-    entries: &[table::Entry],
-    bundle: &str,
-    lang: &str,
-    marketplace: &str,
-) -> Result<(), String> {
+fn offer_contribution(entries: &[table::Entry], bundle: &str, lang: &str) -> Result<(), String> {
     let tsv = contribution_tsv(entries, bundle, lang)?;
     if tsv.lines().count() < 2 {
         return Ok(());
@@ -330,7 +316,7 @@ fn offer_contribution(
         return Ok(());
     }
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let c = contribute(&tsv, &branch_for(bundle, secs), marketplace)?;
+    let c = contribute(&tsv, &branch_for(bundle, secs))?;
     for line in guidance(&c) {
         println!("{line}");
     }
@@ -353,16 +339,7 @@ fn branch_for(bundle: &str, secs: u64) -> String {
 /// which commands an owner skips, because the commands are all the user has.
 fn guidance(c: &Contribution) -> Vec<String> {
     let work = c.path.with_extension("");
-    if c.commands.is_empty() {
-        return vec![
-            format!("Your rows are in {}.", c.path.display()),
-            format!(
-                "Contributions for {} are not open yet: the project ships no mapping file for it, so there is nowhere for these rows to land.",
-                c.marketplace
-            ),
-            "Keep the file — it can be sent once that changes.".to_string(),
-        ];
-    }
+
     vec![
         format!("Your rows are in {}.", c.path.display()),
         "To send them you need `gh` signed in (`gh auth login`).".to_string(),
@@ -376,25 +353,19 @@ fn guidance(c: &Contribution) -> Vec<String> {
     ]
 }
 
-/// The source folder's name as the bundle every approved row will carry.
-/// Asked *before* the session opens: `approved_rows` validates every row
-/// before writing any, so a folder name that cannot be a field used to fail
-/// after the work was done and discard every correction the user had typed —
-/// to an error that blamed a filename.
+/// The source folder's name, NFC-normalised.
 ///
-/// NFC is applied rather than refused, because the bundle is a value derived
-/// from the filesystem and HFS+ hands these back decomposed. Anything
-/// normalising cannot fix is the user's to fix, now, at no cost.
-fn bundle_for(folder: &str) -> Result<String, String> {
-    let bundle = comic_renamer_core::mapping::bundle_name(folder);
-    comic_renamer_core::mapping::validate_bundle(&bundle).map_err(|e| {
-        format!(
-            "the source folder's name cannot be recorded with these mappings: it {e}. \
-             Rename the folder, or move the files into one whose name is at most 120 bytes \
-             and does not start with =, +, - or @."
-        )
-    })?;
-    Ok(bundle)
+/// It used to be validated here, before the session opened, because every
+/// approved row would carry it as a field and a folder name that could not be
+/// one failed after the work was done. Since D64 no row carries it: what reads
+/// it now is Layer B's override lookup, which uses it as a map key, and
+/// `branch_for`, which slugifies it. Neither can be hurt by a long or
+/// oddly-punctuated folder name, so there is nothing left to refuse and this is
+/// infallible.
+///
+/// NFC stays. HFS+ hands these back decomposed, and Layer B's keys are composed.
+fn bundle_for(folder: &str) -> String {
+    comic_renamer_core::mapping::bundle_name(folder)
 }
 
 fn clash_warning(a: &str, b: &str) -> String {
@@ -456,20 +427,19 @@ fn confirmation(
 fn save(
     entries: &[table::Entry],
     local: &Path,
-    bundle: &str,
     lang: &str,
     preset: &dyn Preset,
     ask: impl FnOnce(&str) -> Result<bool, String>,
 ) -> Result<Outcome, String> {
     // The same pure call `commit_session` makes, so the two cannot disagree
     // about which rows are about to be saved.
-    let (rows, clashes) = approved_rows(entries, bundle, lang)?;
+    let (rows, clashes) = approved_rows(entries, lang)?;
     let collisions = intra_session_collisions(entries, preset);
     if !ask(&confirmation(entries, rows.len(), &clashes, &collisions, local))? {
         println!("Nothing was saved.");
         return Ok(Outcome::Quit);
     }
-    let done = commit_session(entries, local, bundle, lang)?;
+    let done = commit_session(entries, local, lang)?;
     // `commit_session` recomputes these from the same entries, so a
     // disagreement would mean the confirmation described a different save
     // from the one that happened.
@@ -517,7 +487,7 @@ pub fn run(
     marketplace: String,
     mode: Mode,
 ) -> Result<(), String> {
-    let folder = bundle_for(&source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())?;
+    let folder = bundle_for(&source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
     let overrides = parse_overrides(OVERRIDES)?;
     let preset_impl = comic_renamer_core::preset::preset_by_id(&preset).ok_or_else(|| format!("unknown preset {preset:?}"))?;
     let opts = ScanOpts { source_root: source, dest_root: dest, preset, mode: Some(mode), lang: lang.clone() };
@@ -593,11 +563,11 @@ fn session(
     let mut t = table::Table::new(folder.to_string(), entries);
     match table::run(&mut t, preset).map_err(|e| e.to_string())? {
         table::Action::Done => {
-            let outcome = save(&t.entries, local, folder, lang, preset, ask_on_stdin)?;
+            let outcome = save(&t.entries, local, lang, preset, ask_on_stdin)?;
             if let Outcome::Done = outcome {
                 // The mappings are already saved; a failed offer must not make
                 // the run report failure.
-                if let Err(e) = offer_contribution(&t.entries, folder, lang, marketplace) {
+                if let Err(e) = offer_contribution(&t.entries, folder, lang) {
                     println!("warning: the contribution was not prepared: {e}");
                 }
             }
@@ -660,17 +630,20 @@ mod tests {
     /// rather than add a second one -- a pair the loader now refuses, which
     /// would stop the user's own file from loading at all.
     #[test]
-    fn retyping_the_folders_case_corrects_the_row_instead_of_adding_one() {
+    fn a_second_session_corrects_the_row_instead_of_adding_one() {
         let dir = tempfile::TempDir::new().unwrap();
         let local = dir.path().join("mappings.tsv");
-        commit_session(&[approved("a_vol1", "A", Some(1), None)], &local, "Fanatical", "en").unwrap();
+        commit_session(&[approved("a_vol1", "A", Some(1), None)], &local, "en").unwrap();
+        // A different folder entirely, which is the stronger version of the
+        // case-only test this replaces: identity is the key (D64), so the
+        // second session corrects the first row wherever the files came from.
         let done =
-            commit_session(&[approved("a_vol1", "Corrected", Some(1), None)], &local, "fanatical", "en")
+            commit_session(&[approved("a_vol1", "Corrected", Some(1), None)], &local, "en")
                 .unwrap();
         assert_eq!(done.written, 1);
 
         let rows = read_rows(&local);
-        assert_eq!(rows.len(), 1, "one folder is one row, not two: {rows:?}");
+        assert_eq!(rows.len(), 1, "one key is one row, not two: {rows:?}");
         assert_eq!(rows[0].series, "Corrected");
         assert!(
             comic_renamer_core::mapping::Mappings::load(
@@ -682,29 +655,25 @@ mod tests {
         );
     }
 
+    /// `bundle_for` still normalises, because Layer B's override keys are
+    /// composed and HFS+ hands folder names back decomposed. It no longer
+    /// validates: `a_folder_name_that_cannot_be_a_bundle_is_refused_up_front`
+    /// retired with the stored field (D64), since nothing can now be hurt by a
+    /// long or oddly-punctuated folder name — it is a map key and a branch slug.
     #[test]
-    fn an_nfd_folder_name_is_normalised_rather_than_refused() {
-        let nfd = "Cafe\u{301} Comics";
-        let bundle = bundle_for(nfd).unwrap();
-        assert_eq!(bundle, "Caf\u{e9} Comics");
+    fn a_folder_name_is_normalised_and_never_refused() {
+        assert_eq!(bundle_for("Cafe\u{301} Comics"), "Caf\u{e9} Comics");
+        for once_refused in ["-Free Comics", "=Humble", "@bundle", "+extra", &"x".repeat(121)] {
+            assert_eq!(bundle_for(once_refused), once_refused, "passed through now");
+        }
+        assert_eq!(bundle_for(""), "");
+
+        // And a session under such a folder completes, where it used to be
+        // refused before it opened.
         let dir = tempfile::TempDir::new().unwrap();
         let local = dir.path().join("mappings.tsv");
-        let done = commit_session(&[approved("a_vol1", "A", Some(1), None)], &local, &bundle, "en").unwrap();
-        assert_eq!(done.written, 1, "the session survives the folder's own name");
-        assert_eq!(read_rows(&local)[0].bundle, "Caf\u{e9} Comics");
-    }
-
-    /// A folder name normalising cannot fix is reported before the session
-    /// opens, where the user has typed nothing to lose.
-    #[test]
-    fn a_folder_name_that_cannot_be_a_bundle_is_refused_up_front() {
-        for bad in ["-Free Comics", "=Humble", "@bundle", "+extra", &"x".repeat(121)] {
-            let err = bundle_for(bad).unwrap_err();
-            assert!(err.contains("folder"), "{bad:?}: {err}");
-            assert!(err.contains("Rename"), "{bad:?} must say what to do: {err}");
-        }
-        assert!(bundle_for("Humble Comics Bundle: ElfQuest").is_ok());
-        assert!(bundle_for("").is_ok(), "no folder name at all is not an error");
+        let done = commit_session(&[approved("a_vol1", "A", Some(1), None)], &local, "en").unwrap();
+        assert_eq!(done.written, 1);
     }
 
     #[test]
@@ -784,7 +753,6 @@ mod tests {
     fn the_plan_carries_the_rows_the_session_just_approved() {
         let (_dir, opts, plan, config) = unmapped_bundle();
         let local = config.join("mappings.tsv");
-        let bundle = bundle_for(&opts.source_root.file_name().unwrap().to_string_lossy()).unwrap();
         run_with(
             &opts,
             plan.clone(),
@@ -795,7 +763,7 @@ mod tests {
                 assert_eq!(first.unmapped.len(), 1);
                 let stem = first.unmapped[0].file_stem().unwrap().to_string_lossy().into_owned();
                 let e = approved(&stem, "Nothing At All", Some(1), None);
-                assert_eq!(commit_session(&[e], &local, &bundle, "en").unwrap().written, 1);
+                assert_eq!(commit_session(&[e], &local, "en").unwrap().written, 1);
                 Ok(Outcome::Done)
             },
             |_| Ok(()),
@@ -875,7 +843,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let local = dir.path().join("config/mappings.tsv");
         let entries = vec![approved("alpha_vol1", "Alpha", Some(1), None), unapproved("beta_vol1", "Beta")];
-        assert_eq!(commit_session(&entries, &local, "Bundle", "en").unwrap().written, 1);
+        assert_eq!(commit_session(&entries, &local, "en").unwrap().written, 1);
         let text = std::fs::read_to_string(&local).unwrap();
         assert!(text.contains("alphavol1\tAlpha"), "{text}");
         assert!(!text.contains("Beta") && !text.contains("betavol1"), "{text}");
@@ -885,7 +853,7 @@ mod tests {
     fn nothing_approved_writes_no_file() {
         let dir = tempfile::TempDir::new().unwrap();
         let local = dir.path().join("mappings.tsv");
-        assert_eq!(commit_session(&[unapproved("x", "X")], &local, "B", "en").unwrap().written, 0);
+        assert_eq!(commit_session(&[unapproved("x", "X")], &local, "en").unwrap().written, 0);
         assert!(!local.exists());
     }
 
@@ -893,7 +861,7 @@ mod tests {
     fn volume_count_survives_into_the_written_row() {
         let dir = tempfile::TempDir::new().unwrap();
         let local = dir.path().join("mappings.tsv");
-        commit_session(&[approved("lw_vol1", "Lone Wolf", Some(1), Some(128))], &local, "B", "en").unwrap();
+        commit_session(&[approved("lw_vol1", "Lone Wolf", Some(1), Some(128))], &local, "en").unwrap();
         let rows = read_rows(&local);
         assert_eq!(rows[0].volume_count, Some(128));
         // ...and so pads to three digits, not the two-digit floor.
@@ -907,7 +875,7 @@ mod tests {
         let local = dir.path().join("mappings.tsv");
         let mut e = table::Entry::new("x".into(), vec![sug("Lone Wolf", Some(1), None, Some(128))]).with_extension("cbz");
         assert!(e.accept_edit(ParsedTitle { series: "Something Else".into(), volume: Some(1), issue: None, subtitle: None }));
-        commit_session(&[e], &local, "B", "en").unwrap();
+        commit_session(&[e], &local, "en").unwrap();
         assert_eq!(read_rows(&local)[0].volume_count, None);
     }
 
@@ -919,7 +887,6 @@ mod tests {
         commit_session(
             &[approved("old_vol1", "Old", Some(1), Some(30)), approved("older_vol2", "Older", Some(2), None)],
             &local,
-            "B",
             "en",
         )
         .unwrap();
@@ -927,7 +894,7 @@ mod tests {
         assert!(String::from_utf8_lossy(&before).contains("Older"));
         // "=SUM" starts with a spreadsheet formula character, which validate() rejects.
         let entries = vec![approved("good_vol1", "Good", Some(1), None), approved("bad_vol1", "=SUM(A1)", Some(1), None)];
-        let err = commit_session(&entries, &local, "B", "en").unwrap_err();
+        let err = commit_session(&entries, &local, "en").unwrap_err();
         assert!(err.contains("formula"), "{err}");
         assert_eq!(std::fs::read(&local).unwrap(), before, "the file must be byte-identical");
         assert!(!dir.path().join("mappings.tsv.tmp").exists());
@@ -943,7 +910,7 @@ mod tests {
             approved("good_vol1", "Good", Some(1), None),
             approved("hellboy1", "Hellboy Omnibus", Some(1), None),
         ];
-        let done = commit_session(&entries, &local, "B", "en").unwrap();
+        let done = commit_session(&entries, &local, "en").unwrap();
         assert_eq!(done.written, 1);
         assert_eq!(done.clashes, vec![("hellboy-1".to_string(), "hellboy1".to_string())]);
         let text = std::fs::read_to_string(&local).unwrap();
@@ -968,7 +935,7 @@ mod tests {
                 let local = local.clone();
                 s.spawn(move || {
                     let e = approved(&format!("file{i}_vol1"), &format!("Series {i}"), Some(1), None);
-                    commit_session(&[e], &local, "B", "en").unwrap();
+                    commit_session(&[e], &local, "en").unwrap();
                 });
             }
         });
@@ -994,7 +961,7 @@ mod tests {
             approved("hellboy-1", "Hellboy", Some(1), None),
             approved("hellboy1", "Hellboy Omnibus", Some(1), None),
         ];
-        let (rows, clashes) = approved_rows(&entries, "B", "en").unwrap();
+        let (rows, clashes) = approved_rows(&entries, "en").unwrap();
         let collisions = intra_session_collisions(&entries, &Komga);
         let text = confirmation(&entries, rows.len(), &clashes, &collisions, Path::new("/cfg/mappings.tsv"));
         assert!(text.contains("one") && text.contains("Usagi Yojimbo"), "{text}");
@@ -1009,7 +976,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let local = dir.path().join("mappings.tsv");
         let mut shown = None;
-        let out = save(&[approved("a_vol1", "A", Some(1), None)], &local, "B", "en", &Komga, |text| {
+        let out = save(&[approved("a_vol1", "A", Some(1), None)], &local, "en", &Komga, |text| {
             shown = Some(text.to_string());
             Ok(false)
         })
@@ -1027,7 +994,7 @@ mod tests {
             approved("one", "Usagi Yojimbo", None, None),
             approved("two", "usagi yojimbo", None, None),
         ];
-        let out = save(&entries, &local, "B", "en", &Komga, |text| {
+        let out = save(&entries, &local, "en", &Komga, |text| {
             assert!(text.contains("same path"), "{text}");
             assert!(!local.exists(), "the rows were written before the user was asked");
             Ok(true)
@@ -1050,7 +1017,7 @@ mod tests {
         let local = dir.path().join("mappings.tsv");
         let mut e = table::Entry::new("x".into(), vec![sug("Black is the Color", Some(1), None, Some(128))]).with_extension("cbz");
         assert!(e.accept_edit(ParsedTitle { series: "Black Is the Color".into(), volume: Some(1), issue: None, subtitle: None }));
-        commit_session(&[e], &local, "B", "en").unwrap();
+        commit_session(&[e], &local, "en").unwrap();
         assert_eq!(read_rows(&local)[0].volume_count, Some(128));
     }
 
@@ -1058,11 +1025,10 @@ mod tests {
     fn earlier_corrections_are_kept_and_a_repeat_replaces_its_own_row() {
         let dir = tempfile::TempDir::new().unwrap();
         let local = dir.path().join("mappings.tsv");
-        commit_session(&[approved("old_vol1", "Old", Some(1), None)], &local, "B", "en").unwrap();
+        commit_session(&[approved("old_vol1", "Old", Some(1), None)], &local, "en").unwrap();
         commit_session(
             &[approved("new_vol1", "New", Some(1), None), approved("old_vol1", "Older", Some(1), None)],
             &local,
-            "B",
             "en",
         )
         .unwrap();
@@ -1076,7 +1042,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let local = dir.path().join("mappings.tsv");
         std::fs::write(&local, "not a mapping file").unwrap();
-        assert!(commit_session(&[approved("a", "A", Some(1), None)], &local, "B", "en").is_err());
+        assert!(commit_session(&[approved("a", "A", Some(1), None)], &local, "en").is_err());
         assert_eq!(std::fs::read_to_string(&local).unwrap(), "not a mapping file");
         assert!(!dir.path().join("mappings.tsv.tmp").exists());
     }
@@ -1090,7 +1056,7 @@ mod tests {
             approved("hellboy_1", "Hellboy", Some(1), None),
             approved("hellboy1", "Other", Some(1), None),
         ];
-        let done = commit_session(&entries, &local, "B", "en").unwrap();
+        let done = commit_session(&entries, &local, "en").unwrap();
         assert_eq!(done.written, 0);
         assert_eq!(
             done.clashes,
@@ -1103,7 +1069,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let local = dir.path().join("mappings.tsv");
         let entries = vec![approved("hellboy-1", "Hellboy", Some(1), None), approved("hellboy1", "Hellboy", Some(1), None)];
-        assert_eq!(commit_session(&entries, &local, "B", "en").unwrap().written, 1);
+        assert_eq!(commit_session(&entries, &local, "en").unwrap().written, 1);
     }
 
     #[test]
@@ -1169,65 +1135,70 @@ mod tests {
     fn a_contribution_holds_exactly_the_row_fields() {
         let tsv = one_row_tsv();
         assert_eq!(comic_renamer_core::mapping::parse_tsv(&tsv).unwrap().len(), 1);
-        assert_eq!(tsv.lines().nth(1).unwrap().split('\t').count(), 8, "{tsv}");
+        assert_eq!(tsv.lines().nth(1).unwrap().split('\t').count(), 7, "{tsv}");
     }
 
     #[test]
     fn the_contribution_is_a_file_and_commands_for_the_user_to_run() {
         let dir = tempfile::tempdir().unwrap();
-        let c = contribute_in(&one_row_tsv(), "map-b", dir.path(), "Fanatical").unwrap();
+        let c = contribute_in(&one_row_tsv(), "map-b", dir.path()).unwrap();
         assert_eq!(std::fs::read_to_string(&c.path).unwrap(), one_row_tsv());
         assert!(c.commands.iter().any(|l| l.starts_with("gh pr create")), "{:?}", c.commands);
-        // Appended to the marketplace's own shipped file, never a new one
-        // named after the branch: an unembedded TSV in `data/mappings/` fails
-        // `every_tsv_in_data_mappings_is_embedded` on arrival.
+        // Appended to the one shipped table, never a new file named after the
+        // branch: an unembedded TSV under `data/` fails
+        // `the_decisions_file_is_the_one_that_ships` on arrival.
         assert!(
-            c.commands.iter().any(|l| l.contains("data/mappings/fanatical.tsv") && l.starts_with("tail -n +2")),
+            c.commands.iter().any(|l| l.contains("data/decisions.tsv") && l.starts_with("tail -n +2")),
             "{:?}",
             c.commands
         );
         assert!(!c.commands.iter().any(|l| l.contains("data/mappings/map-b.tsv")), "{:?}", c.commands);
     }
 
-    /// Observed 2026-10-29 on a real `map` run: the printed commands copied
-    /// the rows to `data/mappings/map-<bundle>-<secs>.tsv`, and following them
-    /// literally failed `every_tsv_in_data_mappings_is_embedded` — the
-    /// contribution channel produced a pull request that was red before anyone
-    /// read it. Humble has no shipped file to append to, so there is nothing
-    /// honest to print; the rows are still written.
+    /// Observed 2026-10-29 on a real `map` run: the printed commands copied the
+    /// rows to `data/mappings/map-<bundle>-<secs>.tsv`, and following them
+    /// literally failed the embedding guard — the contribution channel produced
+    /// a pull request that was red before anyone read it.
+    ///
+    /// `a_marketplace_with_no_shipped_file_prints_no_commands` lived here and
+    /// retires with the sharding (D66). It existed because Humble, the
+    /// *default* marketplace, had no file to append to and the honest thing was
+    /// to print nothing. One table means there is always a target, so the
+    /// branch, the "not open yet" prose and the `marketplace` field on
+    /// `Contribution` all go. This is what replaces it: the one target is
+    /// always named, whatever the marketplace was.
     #[test]
-    fn a_marketplace_with_no_shipped_file_prints_no_commands() {
+    fn a_contribution_always_has_one_target() {
         let dir = tempfile::tempdir().unwrap();
-        let c = contribute_in(&one_row_tsv(), "map-b", dir.path(), "Humble").unwrap();
+        let c = contribute_in(&one_row_tsv(), "map-b", dir.path()).unwrap();
 
-        // The user's work survives either way.
         assert_eq!(std::fs::read_to_string(&c.path).unwrap(), one_row_tsv());
-        assert!(c.commands.is_empty(), "{:?}", c.commands);
-
-        let prose = guidance(&c).join("\n");
-        assert!(prose.contains("are not open yet"), "{prose}");
-        assert!(prose.contains("Humble"), "{prose}");
-        // No half-instruction: nothing that looks like a command to run.
-        for leak in ["gh pr create", "git push", "data/mappings"] {
-            assert!(!prose.contains(leak), "{leak} leaked into the prose:\n{prose}");
-        }
-
-        // And the slug decides it, not the exact spelling.
-        for spelling in ["global comix", "Global-Comix", "GLOBAL COMIX"] {
-            let c = contribute_in(&one_row_tsv(), "map-b", dir.path(), spelling).unwrap();
-            assert!(
-                c.commands.iter().any(|l| l.contains("data/mappings/global-comix.tsv")),
-                "{spelling}: {:?}",
-                c.commands
-            );
-        }
+        assert!(
+            c.commands.iter().any(|l| l.starts_with("tail -n +2") && l.ends_with("data/decisions.tsv")),
+            "{:?}",
+            c.commands
+        );
+        assert_eq!(
+            c.commands.iter().filter(|l| l.contains("data/")).count(),
+            2,
+            "the append and the add, and no other path: {:?}",
+            c.commands
+        );
+        // Never a *target* named after the branch: that was the 2026-10-29
+        // bug. Checked on the right-hand side of the redirect, because the
+        // left-hand side is the contribution file and is legitimately called
+        // `map-b.tsv` — an earlier version of this assertion looked for the
+        // two strings anywhere in the line and so could never pass.
+        let appended = c.commands.iter().find(|l| l.starts_with("tail -n +2")).expect("an append");
+        let target = appended.rsplit(">>").next().unwrap().trim();
+        assert_eq!(target, "data/decisions.tsv", "{appended}");
     }
 
     #[test]
     fn every_action_that_reaches_a_remote_or_the_filesystem_is_a_printed_command() {
         // The offer promises the user will see these before anything happens.
         let dir = tempfile::tempdir().unwrap();
-        let c = contribute_in(&one_row_tsv(), "map-b", dir.path(), "Fanatical").unwrap();
+        let c = contribute_in(&one_row_tsv(), "map-b", dir.path()).unwrap();
         for needle in ["gh repo fork", "mkdir -p", "git push", "gh pr create"] {
             assert!(c.commands.iter().any(|l| l.contains(needle)), "{needle}: {:?}", c.commands);
         }
@@ -1236,7 +1207,7 @@ mod tests {
     #[test]
     fn no_command_carries_a_token_or_credential() {
         let dir = tempfile::tempdir().unwrap();
-        let c = contribute_in(&one_row_tsv(), "map-b", dir.path(), "Fanatical").unwrap();
+        let c = contribute_in(&one_row_tsv(), "map-b", dir.path()).unwrap();
         for l in &c.commands {
             let l = l.to_lowercase();
             assert!(!l.contains("token") && !l.contains("password") && !l.contains("ghp_"), "{l}");
@@ -1247,7 +1218,7 @@ mod tests {
     fn a_branch_that_could_be_a_flag_or_a_path_is_refused_and_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         for bad in ["", "-x", "../x", "a/b", "a b", ".hidden"] {
-            assert!(contribute_in(&one_row_tsv(), bad, dir.path(), "Fanatical").is_err(), "{bad:?}");
+            assert!(contribute_in(&one_row_tsv(), bad, dir.path()).is_err(), "{bad:?}");
         }
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
@@ -1256,7 +1227,7 @@ mod tests {
     fn an_empty_contribution_is_refused_and_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let header_only = contribution_tsv(&[unapproved("x", "X")], "B", "en").unwrap();
-        assert!(contribute_in(&header_only, "map-b", dir.path(), "Fanatical").is_err());
+        assert!(contribute_in(&header_only, "map-b", dir.path()).is_err());
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
@@ -1328,13 +1299,13 @@ mod tests {
         assert_eq!(branch_for("Humble  Manga!", 7), "map-humble-manga-7");
         assert_ne!(branch_for("Humble Manga", 7), branch_for("Humble Manga", 8));
         assert_eq!(branch_for("\u{6F2B}\u{753B}", 7), "map-bundle-7");
-        assert!(contribute_in(&one_row_tsv(), &branch_for("\u{6F2B}\u{753B}", 7), tempfile::tempdir().unwrap().path(), "Fanatical").is_ok());
+        assert!(contribute_in(&one_row_tsv(), &branch_for("\u{6F2B}\u{753B}", 7), tempfile::tempdir().unwrap().path()).is_ok());
     }
 
     #[test]
     fn the_prose_matches_the_commands_it_introduces() {
         let dir = tempfile::tempdir().unwrap();
-        let c = contribute_in(&one_row_tsv(), "map-b", dir.path(), "Fanatical").unwrap();
+        let c = contribute_in(&one_row_tsv(), "map-b", dir.path()).unwrap();
         // Owners skip exactly the commands that make the fresh clone.
         assert!(c.commands[0].starts_with("mkdir -p") && c.commands[1].starts_with("gh repo fork") && c.commands[2].starts_with("cd "));
         let prose = guidance(&c).join("\n");
@@ -1352,7 +1323,7 @@ mod tests {
         };
         assert!(at("git checkout -b") < at("tail -n +2"));
         assert!(at("tail -n +2") < at("git add"));
-        let target = "data/mappings/fanatical.tsv";
+        let target = "data/decisions.tsv";
         assert!(c.commands[at("tail -n +2")].ends_with(target), "{:?}", c.commands);
         assert_eq!(c.commands[at("git add")], format!("git add {target}"));
     }

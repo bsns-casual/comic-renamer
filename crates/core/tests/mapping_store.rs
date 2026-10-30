@@ -1,17 +1,17 @@
 use comic_renamer_core::mapping::{find_key_collisions, key, MappingRow, Mappings};
 use std::path::Path;
 
-const HEADER: &str = "key\tseries\tvolume\tissue\tsubtitle\tlang\tvolume_count\tbundle\n";
+const HEADER: &str = "key\tseries\tvolume\tissue\tsubtitle\tlang\tvolume_count\n";
 
-fn tsv(rows: &[(&str, &str, &str)]) -> String {
+fn tsv(rows: &[(&str, &str)]) -> String {
     let mut s = HEADER.to_string();
-    for (k, series, bundle) in rows {
-        s.push_str(&format!("{k}\t{series}\t1\t\t\ten\t\t{bundle}\n"));
+    for (k, series) in rows {
+        s.push_str(&format!("{k}\t{series}\t1\t\t\ten\t\n"));
     }
     s
 }
 
-fn row(k: &str, series: &str, bundle: &str) -> MappingRow {
+fn row(k: &str, series: &str) -> MappingRow {
     MappingRow {
         key: k.into(),
         series: series.into(),
@@ -20,7 +20,6 @@ fn row(k: &str, series: &str, bundle: &str) -> MappingRow {
         subtitle: None,
         lang: "en".into(),
         volume_count: None,
-        bundle: bundle.into(),
     }
 }
 
@@ -31,41 +30,53 @@ fn humble_rows() -> Vec<MappingRow> {
         .skip(1)
         .filter_map(|l| {
             let f: Vec<&str> = l.split('\t').collect();
-            Some(row(&key(f.get(2)?)?, f[1], f[0]))
+            Some(row(&key(f.get(2)?)?, f[1]))
         })
         .collect()
 }
 
+/// Identity is the key alone (D64). There is no second argument to match on and
+/// nothing a caller can get wrong.
 #[test]
-fn a_single_row_matches_whatever_the_bundle_is() {
-    let m = Mappings::load(&tsv(&[("alpha", "Alpha", "humble")]), None).unwrap();
-    for bundle in ["humble", "other", ""] {
-        assert_eq!(m.lookup("alpha", bundle).unwrap().series, "Alpha");
-    }
-    assert!(m.lookup("missing", "humble").is_none());
+fn a_key_is_the_whole_identity() {
+    let m = Mappings::load(&tsv(&[("alpha", "Alpha")]), None).unwrap();
+    assert_eq!(m.lookup("alpha").unwrap().series, "Alpha");
+    assert!(m.lookup("missing").is_none());
 }
 
+/// This replaces `two_rows_for_one_key_are_disambiguated_by_bundle` and its
+/// `lookup("alpha", "c").is_none(), "never silently pick"`.
+///
+/// Both are gone for the same reason: there is nothing left to pick between.
+/// The old behaviour was that a key carrying two rows resolved only for a user
+/// whose folder name matched one of them — measured over every decision this
+/// project holds, 158 of 2,043 keys were in that state, agreeing on every field,
+/// and so resolved for the contributor and for nobody else. A second row is now
+/// refused when the layer loads, which is the same refusal moved to where
+/// somebody can act on it.
 #[test]
-fn two_rows_for_one_key_are_disambiguated_by_bundle() {
-    let m = Mappings::load(&tsv(&[("alpha", "One", "a"), ("alpha", "Two", "b")]), None).unwrap();
-    assert_eq!(m.lookup("alpha", "a").unwrap().series, "One");
-    assert_eq!(m.lookup("alpha", "b").unwrap().series, "Two");
-    assert!(m.lookup("alpha", "c").is_none(), "never silently pick");
-    assert!(m.lookup("alpha", "").is_none());
-    assert_eq!(m.len(), 2);
+fn a_second_row_for_one_key_is_refused_at_load_not_disambiguated() {
+    let two = tsv(&[("alpha", "One"), ("alpha", "Two")]);
+    let msg = Mappings::load(&two, None).err().expect("two rows for one key").to_string();
+    assert!(msg.contains("alpha"), "{msg}");
+    assert!(msg.contains("line 3"), "pointing at the row that would be ignored: {msg}");
+    assert!(msg.contains("correct the first row"), "and saying what to do: {msg}");
+
+    // An exact repeat is refused too, where it used to be tolerated: under one
+    // row per key a duplicate is a mistake whatever its fields say, and a
+    // correction is an edit to the existing line.
+    assert!(Mappings::load(&tsv(&[("alpha", "A"), ("alpha", "A")]), None).is_err());
 }
 
 #[test]
 fn local_rows_outrank_shipped_rows() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("local.tsv");
-    std::fs::write(&path, tsv(&[("alpha", "Fixed", "")])).unwrap();
-    // Shipped has two bundles; the local row has neither, and still wins.
-    let shipped = tsv(&[("alpha", "One", "a"), ("alpha", "Two", "b"), ("beta", "Beta", "a")]);
+    std::fs::write(&path, tsv(&[("alpha", "Fixed")])).unwrap();
+    let shipped = tsv(&[("alpha", "One"), ("beta", "Beta")]);
     let m = Mappings::load(&shipped, Some(&path)).unwrap();
-    assert_eq!(m.lookup("alpha", "a").unwrap().series, "Fixed");
-    assert_eq!(m.lookup("alpha", "zzz").unwrap().series, "Fixed");
-    assert_eq!(m.lookup("beta", "a").unwrap().series, "Beta");
+    assert_eq!(m.lookup("alpha").unwrap().series, "Fixed", "the local row wins");
+    assert_eq!(m.lookup("beta").unwrap().series, "Beta", "and does not displace others");
     assert_eq!(m.len(), 2);
 }
 
@@ -82,7 +93,7 @@ fn a_malformed_or_invalid_local_file_is_an_error_naming_its_line() {
     let path = dir.path().join("local.tsv");
     std::fs::write(&path, "not a header\n").unwrap();
     assert!(Mappings::load(&tsv(&[]), Some(&path)).is_err());
-    std::fs::write(&path, tsv(&[("alpha", "Ok", ""), ("beta", "   ", "")])).unwrap();
+    std::fs::write(&path, tsv(&[("alpha", "Ok"), ("beta", "   ")])).unwrap();
     let msg = Mappings::load(&tsv(&[]), Some(&path)).err().unwrap().to_string();
     assert!(msg.contains("line 3"), "{msg}");
     assert!(msg.contains("local"), "{msg}");
@@ -90,41 +101,55 @@ fn a_malformed_or_invalid_local_file_is_an_error_naming_its_line() {
 
 #[test]
 fn load_validates_every_shipped_row() {
-    let msg = Mappings::load(&tsv(&[("alpha", "Ok", ""), ("Bad Key", "X", "")]), None)
+    let msg = Mappings::load(&tsv(&[("alpha", "Ok"), ("Bad Key", "X")]), None)
         .err()
         .unwrap()
         .to_string();
     assert!(msg.contains("line 3"), "{msg}");
-    assert!(Mappings::load(&tsv(&[("alpha", "a\u{200b}b", "")]), None).is_err());
+    assert!(Mappings::load(&tsv(&[("alpha", "a\u{200b}b")]), None).is_err());
 }
 
+/// `collisions_ignore_rows_that_merely_repeat_themselves` was here and it
+/// asserted the ground-truth fixture held none. It does hold them — **177 of
+/// its 2,036 keys appear more than once**, because the fixture is organised by
+/// bundle and one comic is sold in several. The old assertion passed only
+/// because `(key, bundle)` was the identity and repeats agreed on every field.
+///
+/// Under D64 that is exactly what a collision is, so the fixture is the wrong
+/// input for the shipped table's gate and the right input for measuring how
+/// much the old identity was costing. 177 keys here; 158 over the decided
+/// table, where the review collapsed some.
 #[test]
-fn collisions_ignore_rows_that_merely_repeat_themselves() {
+fn the_ground_truth_fixture_repeats_keys_across_bundles() {
     let rows = humble_rows();
-    assert!(rows.len() > 2000, "fixture read: {}", rows.len());
-    assert!(find_key_collisions(&rows).is_empty());
-    // Same key, two bundles, same fields apart from bundle: fine.
-    assert!(find_key_collisions(&[row("k", "S", "a"), row("k", "S", "b")]).is_empty());
-    // Exact repeat: fine.
-    assert!(find_key_collisions(&[row("k", "S", "a"), row("k", "S", "a")]).is_empty());
+    assert_eq!(rows.len(), 2223, "fixture read");
+    let repeated = find_key_collisions(&rows);
+    assert_eq!(repeated.len(), 177, "measured 2026-10-30");
+
+    // Every one of them agrees on every field, which is why `bundle` never
+    // disambiguated anything and why dropping it discards nothing.
+    for k in &repeated {
+        let same: Vec<&MappingRow> = rows.iter().filter(|r| &r.key == k).collect();
+        assert!(same.windows(2).all(|w| w[0] == w[1]), "{k} disagrees: {same:?}");
+    }
 }
 
 #[test]
-fn collisions_report_same_key_and_bundle_with_different_fields() {
-    let mut other = row("k", "S", "a");
+fn collisions_report_every_repeated_key_once() {
+    let mut other = row("k", "S");
     other.volume = Some(2);
-    let rows = [row("k", "S", "a"), other, row("j", "T", "a"), row("j", "U", "b")];
-    assert_eq!(find_key_collisions(&rows), vec![("k".to_string(), "a".to_string())]);
+    let rows = [row("k", "S"), other, row("j", "T"), row("j", "U"), row("m", "M")];
+    assert_eq!(find_key_collisions(&rows), vec!["j".to_string(), "k".to_string()]);
 }
 
 /// `find_key_collisions` existed and was run only by CI, so a file nobody
 /// checked loaded both rows and `lookup` returned the first — a user's later
 /// correction in their own file was ignored with no sign of it.
 #[test]
-fn a_layer_holding_two_disagreeing_rows_for_one_key_fails_to_load() {
-    let both = tsv(&[("alpha", "First", "humble"), ("alpha", "Second", "humble")]);
-    let msg = Mappings::load(&both, None).err().expect("two disagreeing rows").to_string();
-    assert!(msg.contains("alpha") && msg.contains("humble"), "{msg}");
+fn a_layer_holding_two_rows_for_one_key_fails_to_load() {
+    let both = tsv(&[("alpha", "First"), ("alpha", "Second")]);
+    let msg = Mappings::load(&both, None).err().expect("two rows").to_string();
+    assert!(msg.contains("alpha"), "{msg}");
     assert!(msg.contains("line 3"), "the row that would be ignored: {msg}");
 
     let dir = tempfile::tempdir().unwrap();
@@ -132,64 +157,30 @@ fn a_layer_holding_two_disagreeing_rows_for_one_key_fails_to_load() {
     std::fs::write(&path, &both).unwrap();
     let msg = Mappings::load(&tsv(&[]), Some(&path)).err().expect("the local layer").to_string();
     assert!(msg.contains("local mappings"), "{msg}");
-
-    // An exact repeat loses nothing, and two bundles are not a collision.
-    assert!(Mappings::load(&tsv(&[("alpha", "A", "h"), ("alpha", "A", "h")]), None).is_ok());
-    assert!(Mappings::load(&tsv(&[("alpha", "A", "h"), ("alpha", "B", "f")]), None).is_ok());
 }
 
+/// `a_local_row_shadows_its_shipped_siblings` and
+/// `a_bundles_case_does_not_make_a_second_bundle` both lived here and both
+/// retire with the `bundle` column (D64, spec §2.2).
+///
+/// The first described the cost of a local row replacing *every* shipped row
+/// for its key. A key cannot hold several rows now, so the cost does not exist.
+/// The second pinned that `Fanatical` and `fanatical` are one bundle, which was
+/// a real bug fixed on 2026-10-23 — and the field it protected is gone, so
+/// there is no bundle comparison left to get wrong. **Invariant 7's path half
+/// is untouched**: `preset_komga.rs` and `fsops.rs` still pin that collision
+/// comparison over emitted paths is NFC-then-fold, because `Hellboy/` and
+/// `hellboy/` are still one directory on APFS.
+///
+/// What replaces both is `a_second_row_for_one_key_is_refused_at_load_not_disambiguated`
+/// above: the single rule that makes either question unanswerable.
 #[test]
-fn a_local_row_shadows_its_shipped_siblings() {
-    // Deliberate cost of "local outranks shipped": a local row replaces EVERY shipped
-    // row for its key. If shipped holds A and B and the user corrects only A, the
-    // lookup for B returns the local row, not shipped B. Merging instead would ignore
-    // the correction whenever the bundle matched a shipped row, and that is silent;
-    // an orphaned sibling surfaces in the plan. Multi-row keys do not exist in
-    // shipped data today.
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("local.tsv");
-    std::fs::write(&path, tsv(&[("alpha", "Fixed", "a")])).unwrap();
-    let shipped = tsv(&[("alpha", "One", "a"), ("alpha", "Two", "b")]);
-    let m = Mappings::load(&shipped, Some(&path)).unwrap();
-    assert_eq!(m.lookup("alpha", "a").unwrap().series, "Fixed");
-    // One local row left for the key, so it answers any bundle, B included.
-    assert_eq!(m.lookup("alpha", "b").unwrap().series, "Fixed");
-}
-
-#[test]
-fn a_bundles_case_does_not_make_a_second_bundle() {
-    // One folder, two titles. The gate read these as two legitimate bundles
-    // and passed, and then `lookup` chose between them on the case the user
-    // happened to type.
-    let both = tsv(&[
-        ("alpha", "First", "Fanatical"),
-        ("alpha", "Second", "fanatical"),
-    ]);
-    let msg = Mappings::load(&both, None)
-        .err()
-        .expect("one folder, two titles")
-        .to_string();
-    assert!(msg.contains("alpha"), "{msg}");
-    assert!(msg.contains("line 3"), "and it still points at a line: {msg}");
-
-    // The tie-break folds the same way, so the stored capitalisation stays
-    // display -- the shipped files hold `Fanatical` and `Sweet Shop`.
-    let m = Mappings::load(
-        &tsv(&[("alpha", "A", "Fanatical"), ("alpha", "B", "Sweet Shop")]),
-        None,
-    )
-    .unwrap();
-    assert_eq!(m.lookup("alpha", "fanatical").unwrap().series, "A");
-    assert_eq!(m.lookup("alpha", "SWEET SHOP").unwrap().series, "B");
-
-    // Composition folds with case, because `collision_key` is NFC-then-fold.
-    // HFS+ stored NFD and those folder names survive copies, so the tie-break
-    // has to hold at the comparison rather than trust every caller to have
-    // normalised -- which is what invariant 7 says for paths.
-    let m = Mappings::load(
-        &tsv(&[("alpha", "A", "Caf\u{e9} Comics"), ("alpha", "B", "Sweet Shop")]),
-        None,
-    )
-    .unwrap();
-    assert_eq!(m.lookup("alpha", "Cafe\u{301} comics").unwrap().series, "A");
+fn the_frozen_key_still_decides_identity_over_the_real_fixture() {
+    let rows = humble_rows();
+    assert!(rows.len() > 2000, "the fixture loaded: {}", rows.len());
+    // Every row's key is what `key()` makes of its own stem, which is the one
+    // thing identity now rests on.
+    for r in &rows {
+        assert_eq!(key(&r.key).as_deref(), Some(r.key.as_str()), "{:?}", r.key);
+    }
 }

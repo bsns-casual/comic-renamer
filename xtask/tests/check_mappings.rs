@@ -18,9 +18,9 @@ fn vcs(dir: &Path, args: &[&str]) {
 fn repo(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("xtask-check-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join("data/mappings")).unwrap();
+    std::fs::create_dir_all(dir.join("data")).unwrap();
     vcs(&dir, &["init", "-q", "-b", "main"]);
-    std::fs::write(dir.join("data/mappings/a.tsv"), "key\n").unwrap();
+    std::fs::write(dir.join("data/decisions.tsv"), "key\n").unwrap();
     vcs(&dir, &["add", "."]);
     vcs(&dir, &["commit", "-q", "-m", "base"]);
     vcs(&dir, &["checkout", "-q", "-b", "pr"]);
@@ -29,7 +29,7 @@ fn repo(name: &str) -> PathBuf {
 
 fn add_rows(dir: &Path, file: &str, n: usize) {
     let rows: String = (0..n).map(|i| format!("row{i}\n")).collect();
-    std::fs::write(dir.join("data/mappings").join(file), rows).unwrap();
+    std::fs::write(dir.join("data").join(file), rows).unwrap();
     vcs(dir, &["add", "."]);
     vcs(dir, &["commit", "-q", "-m", "rows"]);
 }
@@ -66,10 +66,12 @@ fn an_unknown_base_ref_fails_rather_than_passing_silently() {
 }
 
 #[test]
-fn a_file_over_two_mebibytes_fails_without_a_base_ref() {
+fn a_file_over_four_mebibytes_fails_without_a_base_ref() {
     let dir = repo("size");
     assert!(run(&dir, &[]).status.success());
-    std::fs::write(dir.join("data/mappings/big.tsv"), vec![b'x'; 2 * 1024 * 1024 + 1]).unwrap();
+    // 4 MiB since D67, and the reason is the binary rather than the file: the
+    // table is `include_str!`-embedded, so every byte here is a byte shipped.
+    std::fs::write(dir.join("data/big.tsv"), vec![b'x'; 4 * 1024 * 1024 + 1]).unwrap();
     let out = run(&dir, &[]);
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("big.tsv"));
