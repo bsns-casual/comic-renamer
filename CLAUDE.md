@@ -513,6 +513,36 @@ formatted, and do not assume CI will catch a style or lint regression.
 
 The compiler itself is warning-free: `cargo test --workspace` prints none.
 
+### CI does not run on a markdown-only change
+
+Added 2026-10-30, because the org was running short of Actions minutes.
+`verify.yml` carries `paths-ignore` for `'**.md'` and `.gitignore` on **both**
+triggers. The cost it was spending: **three of the six jobs are
+`macos-latest`** — `rust`, `mappings` and `rust-corpus`, read from the
+`runs-on` lines — which GitHub bills at **ten times** the Linux rate, and two
+of them download the 34 MB corpus. A repository whose history is mostly docs
+was paying all of that to re-prove something no prose can change.
+
+Four things to know before touching it:
+
+- **A commit touching markdown *and* anything else still runs everything.** The
+  filter skips a run only when every changed path matches, which is why the
+  commit that added the filter ran CI itself: run 41013142054 on `0db891b`, all
+  six green including `rust-corpus` and the volume-gated job.
+- **Nothing load-bearing is filtered.** `data/`, `crates/`, `corpus/`,
+  `fixtures/`, `xtask/`, `scripts/` and `.github/` all still trigger, so
+  `check-mappings`, the row caps and the file-size cap keep their teeth. Do not
+  extend the list to `review/` on the grounds that nothing reads it: the gates
+  are what would catch a mistake there, and `review/` sits exactly where the
+  licence question lives.
+- **`paths-ignore` on `pull_request` means these checks never report at all on
+  a docs-only PR.** Marking any of them a required status check would leave
+  such a PR waiting forever. There is no branch protection and no ruleset on
+  `main` today — checked against the API on 2026-10-30, not assumed. Add
+  protection and this becomes a real trap.
+- `[skip ci]` in a commit message was the alternative and was not chosen: it is
+  per-commit and forgettable, where a path filter cannot be.
+
 ### Packaging, all of it measured
 
 **Nothing the binary needs is read from the working directory.** Both the
