@@ -1139,12 +1139,25 @@ acting on it are worth recording because they narrow the question:
   database right. Nobody here is qualified to settle that and it should not be
   guessed at in this file.
 
-**The repository is still private as of 2026-10-30, held deliberately.** The
-owner asked to go public for Homebrew; making it public publishes
-`review/humble-decisions.tsv` and every Humble title in the tests and docs,
-which is the use D31 does *not* sanction and the thing this very entry gates.
-Clones, forks and code-search indexes outlive a visibility flip, so it waits on
-an explicit go. The tap repo was created separately and holds nothing.
+**The repository went public on 2026-10-30, by the owner's decision with the
+facts in front of him. This entry no longer gates a release.**
+
+What he was told before the flip, because it changes what "going public" meant:
+**git history is published too.** `review/humble-decisions.tsv` exists in 8
+objects since `fabece6`, and `git show fabece6:review/humble-decisions.tsv`
+returns 2,200 lines — so deleting it from HEAD would have achieved nothing. Nor
+was it the only copy: `fixtures/humble-ground-truth.tsv` holds 2,223 more
+titles and `measure` plus a dozen tests depend on it. The "public without the
+Humble table" option this file previously recommended **was never executable**
+without a history rewrite that would invalidate every SHA referenced here while
+still leaving the fixture in place. That recommendation was made without
+checking history; do not repeat it.
+
+So the position is: the Humble-derived titles are world-readable, in HEAD and in
+history, and the terms-of-service question about redistributing them is a risk
+the owner took knowingly rather than a question anyone answered. `data/LICENSE`
+says what a licence can and cannot do about it. If that question is ever
+revisited, the facts above are what it has to start from.
 **1. The licence for publishing Humble-derived titles.** `data/LICENSE` ties
 rule data to the Grand Comics Database under CC BY-SA 4.0. The Humble titles came
 from Humble's order API, and D31 committed them as *test* data, with no URLs,
@@ -1296,11 +1309,11 @@ sha256 filled in. `workflow_dispatch` runs everything but the publish.
 
 What the owner has to do, in order:
 
-1. **Make the repo public**, or at least the release assets — a formula fetches
-   a plain HTTPS tarball. This also decides whether the Humble titles in the
-   tests and docs should be world-readable; D31 sanctions them *in the repo* as
-   test data, and a public repo is arguably a different use. Adjacent to the
-   licence item, not the same one.
+1. ~~**Make the repo public**~~ — **done 2026-10-30.** A formula fetches a plain
+   HTTPS tarball, so this was the blocking step. It also decided the question
+   D31 left open — whether Humble titles in the tests and docs should be
+   world-readable — in the affirmative, knowingly. See the licence entry above
+   for what the owner was told first.
 2. **Tag `v0.1.0`.** The workflow refuses a tag that disagrees with
    `crates/cli/Cargo.toml`.
 3. ~~**Create `bsns-casual/homebrew-tap`**~~ — **done 2026-10-30**, public and
