@@ -1455,6 +1455,18 @@ this machine has a `cargo install`ed binary in `~/.cargo/bin` that brew's
   adversarial seat on 2026-10-30; the corrected reasoning is in that spec's D64.
   Unreachable today — 12 shipped rows, no duplicate keys — and the fix is a
   feature, not a patch.
+- **The corpus download prints nothing while it runs.** `corpus.rs` has no
+  `print!` or `eprint!` anywhere, so a first `map` or `scan` over an unmapped
+  Humble file stops dead for the length of a 33.7 MB fetch (35,341,426 bytes
+  per the manifest, 98 MB unpacked) with no output at all. Measured 2026-10-30
+  against a scratch `XDG_CACHE_HOME`: 1.8 s on a fast connection, which is why
+  this was never noticed here. The README documents the download accurately at
+  its "A `map` or `scan` run with an unmapped Humble file" paragraph — the gap
+  is only that nobody has the README open while a command appears to hang, and
+  `--marketplace <anything but Humble>` skips it. One line of output fixes it;
+  `ensure_corpus` already knows the size from the manifest and returns early
+  when the cache is warm, so the message belongs on the miss path only. Found
+  while writing a testing guide for an outside tester, not by a test.
 - **Only five guesses are ever shown.** `COLLISIONS_SHOWN` is 5 and caps the
   *rows* `suggest_for` prints, so a 2,200-file bundle reports five guesses and
   the rest silently. Deliberate, and it is why the `Popeye` line was the one

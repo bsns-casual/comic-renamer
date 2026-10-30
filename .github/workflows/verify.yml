@@ -1,9 +1,30 @@
 name: verify
 
+# Three of the six jobs below run on `macos-latest`, which bills at ten times
+# the Linux rate, and two of them download the 34 MB corpus. A docs-only commit
+# paid all of that to re-prove something no prose can change, and this
+# repository's history is largely docs commits. So markdown is filtered out.
+#
+# A commit touching markdown AND anything else still runs everything: the
+# filter skips a run only when every changed path matches. Nothing
+# load-bearing is listed -- `data/`, `crates/`, `corpus/`, `fixtures/`,
+# `xtask/`, `scripts/` and `.github/` all still trigger, which is what keeps
+# `check-mappings` and the row caps honest.
+#
+# One thing to know before adding branch protection: `paths-ignore` on
+# `pull_request` means these checks never report at all on a docs-only PR, so
+# marking any of them "required" would leave such a PR waiting forever. There
+# is no protection on `main` today (checked 2026-10-30).
 on:
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
 
 jobs:
   corpus:

@@ -3,9 +3,13 @@
 Rename the comics you bought and downloaded into the layout your library app
 expects.
 
-Buy digital comics from **Humble Bundle**, **Fanatical**, **DriveThruComics**,
-**GlobalComix**, **Sweet Shop** or anywhere similar, and you get a folder of
-files named however that storefront named them. Four from the test data:
+Buy digital comics from [**Humble Bundle**](https://www.humblebundle.com),
+[**Fanatical**](https://www.fanatical.com),
+[**DriveThruComics**](https://www.drivethrucomics.com),
+[**GlobalComix**](https://globalcomix.com),
+[**Sweet Shop**](https://sweetshop.app) or anywhere similar, and you get a
+folder of files named however that storefront named them. Four from the test
+data:
 
 ```
 popeyevolume1_oliveoylandhersweety.cbz
@@ -15,18 +19,44 @@ die-loaded-issue-1.pdf
 ```
 
 Your library app wants a folder per series and filenames that sort. Point it at
-a folder, pick your app, and it reads every filename and shows you the rename it
-proposes. Nothing moves until you approve the plan. It flags the
-files it cannot identify so you can name them yourself.
+a folder and it reads every filename, then shows you the rename it proposes.
+Nothing moves until you approve the plan. It flags the files it cannot identify
+so you can name them yourself.
 
 Use it on comics you bought. It **never downloads a comic**; it reads the names
 of files you already have. The suggestions come from two places: a public
 comics database, which it fetches once and hash-checks, and titles people have
 confirmed by hand.
 
-**Status: `map`, `scan`, `apply`, `undo` and a startup menu work. Komga is the
-only preset.** See [`docs/specs/`](docs/specs/) for the design and
+**Status: `map`, `scan`, `apply`, `undo` and a startup menu work.
+[Komga](https://komga.org) is the only preset.** See
+[`docs/specs/`](docs/specs/) for the design and
 [`docs/research/`](docs/research/) for the measurements behind it.
+
+## Why Komga first
+
+[Komga](https://komga.org) ([source](https://github.com/gotson/komga)) is a
+free, self-hosted comic and manga server you run on a home machine or a NAS and
+read in a browser or any OPDS reader.
+
+It went first because it is the app where renaming does the most work.
+**Komga has no filename parser at all.** For a PDF, which is most of a comic
+bundle, the folder name and the filename are the entire record it has to go on,
+so a good name is not a tidiness preference, it is the whole of the metadata. A
+series takes its name from the leaf folder, which is why the output is a flat
+`<Series>/<Book>.<ext>` and not a nested tree. Book order is positional after a
+natural sort of the filenames, which is why volume numbers are zero-padded and
+why the volume comes before the subtitle: filename order is reading order.
+
+It also passed the test that decides whether a preset is worth shipping. A
+collected edition carries a volume number and no issue number, and that is
+nearly all of this data. Komga shelves such a file as an ordinary book in its
+series. Not every app does, and Kavita is the one that does not — see
+[Before you point it at a Komga library](#before-you-point-it-at-a-komga-library)
+below. All of this was read from Komga's source rather than its documentation,
+and the details are in
+[`docs/specs/2026-10-19-comic-renamer-design.md`](docs/specs/2026-10-19-comic-renamer-design.md)
+at §6.8.1.
 
 ## Install
 
@@ -242,6 +272,31 @@ guess's series is right 62.9% of the time and its full title 48.9% of the time.
 The corpus locates the series for 91.6% of 2,717 held-out filenames.
 `cargo xtask measure` reports these. None is a pass-or-fail threshold: a wrong
 guess costs you some typing, not a misfiled file.
+
+## Feedback and requests
+
+**[Open an issue](https://github.com/bsns-casual/comic-renamer/issues).** Bug
+reports, confusing output, and a name it got wrong are all worth filing. So is
+a plain "this made no sense to me": the code has been tested hard, how it reads
+to someone who did not write it has not.
+
+**Which library app do you use?** This is the most useful thing you can tell
+us, because it decides what gets built next. Komga is the only preset, and the
+others were researched and then parked for want of anyone asking. Thirteen apps
+were looked at: Komga, [Kavita](https://www.kavitareader.com), Panels, Mylar,
+Calibre, Ubooquity, YACReader, ComicRack, Chunky, Paperback, Suwayomi,
+Plex/Kometa and Ampchor.
+
+Two of those come with findings already, so an issue would be picking up work
+rather than starting it. **Kavita** is understood and deliberately unbuilt: the
+Komga layout actively misfiles into it, which
+[Before you point it at a Komga library](#before-you-point-it-at-a-komga-library)
+explains, and writing PDF metadata is the likelier fix than a second layout. **Calibre** may
+not be renameable-toward at all, since it manages its own directory structure
+on import. The rest are open questions.
+
+Say which app, and whether you are renaming collected editions, single issues,
+or manga, since those pull in different directions.
 
 ## Contributing mappings
 
