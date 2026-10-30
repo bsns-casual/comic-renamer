@@ -170,7 +170,7 @@ Phase 1 plan's Task 14 (the gate) is superseded by it; its Task 15 (Homebrew) is
 not, and is still open.
 
 **The rebuild is merged.** 60 commits, fast-forwarded onto `main` and pushed on
-2026-10-24 at `1eb028a`, after five adversarial review seats, a 16-item fix wave
+2026-10-24 at `407fbbd`, after five adversarial review seats, a 16-item fix wave
 and a mutation re-review of that wave. CI run 40061195019 is green.
 
 `scan`, `map`, `apply` and `undo` all run from the CLI. **`map` is the primary
@@ -209,7 +209,7 @@ done   the review's 2,204 decisions are exported and committed to `review/`,
 
 ### Single issues, and the issue column (D59-D61)
 
-Done on `main`, 18 commits ending `8c5254f` on 2026-10-26, planned in
+Done on `main`, 18 commits ending `8609597` on 2026-10-26, planned in
 `docs/plans/2026-10-26-issue-column.md`, 9 tasks. **Not pushed yet.**
 
 **§1.1's first assumption was wrong.** It said "no issue numbers; every file
@@ -476,7 +476,7 @@ count** — see the PR-only caveat above; it was a push to `main`.
 mutation run that reads its fail list off a plain invocation reads a
 *truncated* one — every "and nothing else fails" claim made that way is
 unverified. Use `cargo test --workspace --no-fail-fast`. Found 2026-10-30 by a
-mutation seat whose first three runs under-reported; the claim in `fa06b00`
+mutation seat whose first three runs under-reported; the claim in `6b907ab`
 that reverting either fix "fails its own test and nothing else" was made the
 wrong way and has not been re-checked. "Caught at all" is still sound, because
 that only needs the test to fail.
@@ -714,7 +714,7 @@ when it needs a terminal.
 
 **Two commits of fixes came out of it**, both pushed to `main`, both green:
 
-- `fa06b00` — `scan`'s guess line joined every candidate's series with no
+- `6b907ab` — `scan`'s guess line joined every candidate's series with no
   dedup, so `popeyevolume1_oliveoylandhersweety` printed `Popeye` twenty times
   and `Pop-Eye` once: 230 characters saying one thing. Collapsed at the display
   in `series_line`, **not** in the resolver, because `map`'s picker renders
@@ -723,7 +723,7 @@ when it needs a terminal.
   was unmapped, because the branch keyed on `rows.is_empty()` alone. It now also
   requires `facts.not_ready == 0`, leaving exit 0 to the genuinely empty plan
   `scan` writes for an empty folder. That is *not* D-a.
-- `e21b426` — **the contribution channel produced pull requests that were red
+- `41a385b` — **the contribution channel produced pull requests that were red
   before anyone read them.** The printed commands copied the rows to
   `data/mappings/map-<bundle>-<secs>.tsv`; following them literally fails
   `every_tsv_in_data_mappings_is_embedded`, and `check-mappings` stays green so
@@ -811,13 +811,13 @@ re-dump the collection and re-run `scripts/export-decisions.py`; the export is
 sorted by key and bundle, so a regeneration is a readable diff.
 
 **-1. The casing rule is merged, pushed and green.** Three commits went to
-`main` on 2026-10-27 — `98bab1b` (hide skipped), `71f480b` (the all-caps class
-and confirm-what-is-shown) and `cee4822` (D62, the corpus casing). **CI run
+`main` on 2026-10-27 — `bf4ac06` (hide skipped), `a8d8b47` (the all-caps class
+and confirm-what-is-shown) and `5e5b494` (D62, the corpus casing). **CI run
 40454635024 is green on all six jobs**, `rust-corpus` in 1m32s among them, so
 the one branch that cannot be unit-tested here has been executed against the
 real release. Locally: 606 passing, 9 ignored, `check-mappings` green,
 `check-review-page.cjs` green, no compiler warnings, the shipped table
-byte-identical after a regeneration. The docs commit `23b709d` that followed
+byte-identical after a regeneration. The docs commit `9d097f6` that followed
 was still queued when it was last looked at; it changes no code.
 
 The job most worth reading is `rust-corpus`, for the opposite reason to last
@@ -833,7 +833,7 @@ close. The only annotations are advisory: `actions/checkout@v4` targets the
 deprecated Node 20 and is being forced onto Node 24, and `ubuntu-latest`
 migrates to Ubuntu 26 from 2026-10-19. Neither fails anything yet.
 
-**The issue column before it** is 19 commits, `b1a9c2f..7428246`, pushed
+**The issue column before it** is 19 commits, `747b080..84a0439`, pushed
 2026-10-26. `cargo xtask seed` leaves the shipped table byte-identical except
 the four rows that legitimately improved (`Hammer Head`, `Minotaur`,
 `DIE: Loaded`, `Glarien: Origins` each carried `#1` as subtitle text).
@@ -876,7 +876,7 @@ plan made `undo` delete a library file no run placed. The second needed no
 adversary: a second terminal running `scan` substituted a plan under a
 confirmation already given. Session-scoped undo addresses them with invariant 11
 (D54, D58) and by reading the plan once and executing from that copy. Merged to
-`main` on 2026-10-25 at `55407a3`, and **CI run 40163809503 is green on all six
+`main` on 2026-10-25 at `aad24f6`, and **CI run 40163809503 is green on all six
 jobs** — the first time every job has run on this work.
 
 One note on how it got there, because the shape recurs: the merge went out with
@@ -969,7 +969,7 @@ The original entry follows, for the reasoning.
 
 **D-a (original). `apply`'s exit code for a consented run that places nothing.** A run that
 *can* place nothing is caught before the prompt by `facts.files == 0`, skips the
-mode block, and exits non-zero — and since `fa06b00` that is true of the rowless
+mode block, and exits non-zero — and since `6b907ab` that is true of the rowless
 plan too. A run that passes the typed confirmation and *then* places nothing,
 because every row collided at execution, exits **zero**.
 
@@ -1139,32 +1139,39 @@ acting on it are worth recording because they narrow the question:
   database right. Nobody here is qualified to settle that and it should not be
   guessed at in this file.
 
-**The repository went public on 2026-10-30, by the owner's decision with the
-facts in front of him. This entry no longer gates a release.**
+**The repository went public on 2026-10-30, and the Humble table was then
+excised from history at the owner's instruction.** Sequence, because the order
+is the point:
 
-What he was told before the flip, because it changes what "going public" meant:
-**git history is published too.** `review/humble-decisions.tsv` exists in 8
-objects since `fabece6`, and `git show fabece6:review/humble-decisions.tsv`
-returns 2,200 lines — so deleting it from HEAD would have achieved nothing. Nor
-was it the only copy: `fixtures/humble-ground-truth.tsv` holds 2,223 more
-titles and `measure` plus a dozen tests depend on it. The "public without the
-Humble table" option this file previously recommended **was never executable**
-without a history rewrite that would invalidate every SHA referenced here while
-still leaving the fixture in place. That recommendation was made without
-checking history; do not repeat it.
+1. Public at 05:15, with the decided table in HEAD and in history.
+2. Four minutes later, 0 forks, 0 watchers, 0 stars, and clone traffic of
+   327/2 uniques — which is CI checkouts plus this machine, not third parties.
+3. Made **private** for the rewrite, because a force-push on a public repo
+   leaves the old objects fetchable by SHA until GitHub garbage-collects, so
+   the window would otherwise have stayed open.
+4. `git filter-branch` over all 220 commits removing
+   `review/humble-decisions.tsv` and its sidecar, force-pushed, re-tagged,
+   public again.
 
-So the position is: the Humble-derived titles are world-readable, in HEAD and in
-history, and the terms-of-service question about redistributing them is a risk
-the owner took knowingly rather than a question anyone answered. `data/LICENSE`
-says what a licence can and cannot do about it. If that question is ever
-revisited, the facts above are what it has to start from.
-**1. The licence for publishing Humble-derived titles.** `data/LICENSE` ties
-rule data to the Grand Comics Database under CC BY-SA 4.0. The Humble titles came
-from Humble's order API, and D31 committed them as *test* data, with no URLs,
-prices or account data. Shipping them as the product's dataset in a public
-repository is a different use, and nobody has answered whether it is allowed.
-**This gates release, not development.** Building and reviewing the table locally
-does not wait on it; publishing it does. (D51, rebuild §10)
+**Every commit SHA changed.** CLAUDE.md's twelve SHA references were
+mechanically translated by matching commit subjects old-to-new (220 of 220
+mapped unambiguously) and each one verified to resolve on `main`. **Commit
+messages were not and cannot be** — a message citing another commit by SHA now
+cites a commit that does not exist, and fixing that would require a second
+rewrite that invalidated the SHAs again. Treat any SHA inside a commit message
+dated 2026-10-30 or earlier as pre-rewrite.
+
+What this does and does not achieve: the table is out of this repository and
+out of its history. It was publicly readable for roughly four minutes with no
+evidence of outside access, and `fixtures/humble-ground-truth.tsv` **still
+holds 2,223 Humble titles** and is staying — `cargo xtask measure` and three
+test binaries read it, and D31 sanctions filenames and titles as test data.
+So "no Humble data is public" was never the outcome on offer; "the decided
+2,031-row table is not published" is.
+
+My earlier recommendation of "public without the Humble table" was made without
+checking history and was not executable as stated. Recorded so nobody repeats
+it.
 
 **2. The Humble table review is complete: 2,204 of 2,204 decided**, counted
 from the artifact's store on 2026-10-27 with 0 orphans, 0 malformed rows and 5
@@ -1172,9 +1179,11 @@ marked not-a-comic. 266 of them went through the review pile one at a time; the
 remaining 1,784 were approved as proposed in one batch, at the owner's
 instruction, after the corpus had settled the casing (D62).
 
-**It is in the repo now**, at `review/humble-decisions.tsv` — 2,199 rows,
-2,031 distinct keys, 680 series, 205 KB — with the five not-a-comic rows beside
-it and `review/README.md` carrying the provenance. `scripts/export-decisions.py`
+**It is no longer in the repo**, and not in its history either — removed
+2026-10-30, see the entry above. It was 2,031 rows in the shipped shape (2,199
+before the D64 transformations), 680 series, 205 KB. `review/README.md` records
+what it was, where it can be regenerated from, and the two transformations a
+regenerated export still needs. `scripts/export-decisions.py`
 made it from a dump of the artifact's `decisions` collection; it judges nothing
 and never recomputes a key, because the frozen key rule has one implementation
 and `review-rows.py` already had to delete a Python copy of it.
@@ -1383,7 +1392,7 @@ this machine has a `cargo install`ed binary in `~/.cargo/bin` that brew's
   **Worse than that at 100% unmapped**, measured 2026-10-30: over eight files
   the mapping knows nothing about, `scan` prints the count and five guesses and
   then says `comic-renamer apply comic-renamer-plan.jsonl` — routing the user to
-  a command that, since `fa06b00`, correctly places nothing and exits 1. The
+  a command that, since `6b907ab`, correctly places nothing and exits 1. The
   owner has flagged this and the other spec-versus-code items for a conversation
   rather than a one-line copy fix; do not patch the sentence unilaterally.
 - **Only five guesses are ever shown.** `COLLISIONS_SHOWN` is 5 and caps the
