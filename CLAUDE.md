@@ -712,7 +712,7 @@ disclosure's "Not ready, so left where they are: 1 of 12 rows", typed `MOVE`,
 was already mapped, confirming the narrower claim this file already makes about
 when it needs a terminal.
 
-**Two commits of fixes came out of it**, both pushed to `main`, both green:
+**Three commits of fixes came out of it**, all pushed to `main`, all green:
 
 - `6b907ab` — `scan`'s guess line joined every candidate's series with no
   dedup, so `popeyevolume1_oliveoylandhersweety` printed `Popeye` twenty times
@@ -741,6 +741,18 @@ when it needs a terminal.
   `every_tsv_in_data_mappings_is_embedded` is now
   `the_decisions_file_is_the_one_that_ships`. `file_slug` survives with one
   caller, `branch_for`.
+- `0b04a00` — **`scan` names `map`, and the menu expands `~`** (D-c). Both were
+  listed here as open until 2026-10-30, when running the released binary showed
+  they were not: `scan` ends with `N files still need a name. To give them one:`
+  and the whole `map` command, both roots shell-quoted from the plan header
+  through `map::quote`, now `pub(crate)` rather than reimplemented. **At 100%
+  unmapped `apply` is no longer offered at all**, which was the harm — it
+  routed the user to a command that correctly places nothing and exits 1. The
+  mixed case still prints both lines. `ask_path` expands a leading `~` against
+  `$HOME`, after stripping quotes, so `"~/Comics"` expands too; `~user`, a
+  tilde anywhere but the front, and `~` with no `$HOME` are left alone. Both
+  halves are mutation-checked, and both were re-run against the installed
+  0.1.0 binary on 2026-10-30.
 
 **CI run 40976839595 is green on all six jobs**, `rust-corpus` and the
 volume-gated job among them — so **the full 619 have all been executed** on this
@@ -778,7 +790,7 @@ non-interactive path — the one a re-run or a script uses. `scan` now loads the
 same pair `map`'s `scan_once` does, and a missing file is `None` rather than an
 error. Pinned by `scan_reads_the_users_own_mappings`, the sole guard.
 
-#### Two decisions taken, not yet implemented
+#### One decision taken, not yet implemented
 
 - **Duplicate candidates: dedup upstream, highest `volume_count` wins** (owner,
   2026-10-30). Confirmed on two stems: Popeye returns 21 candidates that
@@ -789,8 +801,6 @@ error. Pinned by `scan_reads_the_users_own_mappings`, the sole guard.
   so `4` and `65` both give two — **the arbitrary pick is invisible below volume
   100.** Highest was chosen as the only option that cannot under-pad a real long
   run.
-- **`ask_path` always expands `~`** (owner, 2026-10-30, settling D-c).
-  `menu.rs:246` strips quotes and does nothing else.
 
 **0. The review is decided, exported and committed.** 2,204 of 2,204, now at
 `review/humble-decisions.tsv` with its own README and the five not-a-comic rows
@@ -1001,9 +1011,9 @@ count must stay derived from `expected()`, never parallel to it, or a crash in
 move mode's one-syscall window produces a record every automatic path reads as
 empty and the next run deletes.
 
-**D-c. Settled 2026-10-30: `ask_path` always expands `~`.** Not yet
-implemented; `menu.rs:246` currently strips quotes and nothing else. The reason
-the gap mattered: a shell expands `~` before `scan` ever sees it, but a menu
+**D-c. Settled 2026-10-30 and implemented: `ask_path` always expands `~`.**
+In `0b04a00`, as `expand_tilde` behind `ask_path`. The reason the gap
+mattered: a shell expands `~` before `scan` ever sees it, but a menu
 prompt does not, and the menu is the entry point for people who do not use
 flags — which is exactly the population that types `~/Comics`.
 
@@ -1445,17 +1455,6 @@ this machine has a `cargo install`ed binary in `~/.cargo/bin` that brew's
   adversarial seat on 2026-10-30; the corrected reasoning is in that spec's D64.
   Unreachable today — 12 shipped rows, no duplicate keys — and the fix is a
   feature, not a patch.
-- **`scan` does not name `map`.** The rebuild's §6.1 says that when `scan` finds
-  unmapped files it "reports the count and names `map`". Run 2026-10-23 on a
-  folder with one unmapped file, `scan` printed the count, listed the file with a
-  guess, and wrote a plan, and the word `map` appears nowhere in the output. The
-  README documents what the code does, not what §6.1 says.
-  **Worse than that at 100% unmapped**, measured 2026-10-30: over eight files
-  the mapping knows nothing about, `scan` prints the count and five guesses and
-  then says `comic-renamer apply comic-renamer-plan.jsonl` — routing the user to
-  a command that, since `6b907ab`, correctly places nothing and exits 1. The
-  owner has flagged this and the other spec-versus-code items for a conversation
-  rather than a one-line copy fix; do not patch the sentence unilaterally.
 - **Only five guesses are ever shown.** `COLLISIONS_SHOWN` is 5 and caps the
   *rows* `suggest_for` prints, so a 2,200-file bundle reports five guesses and
   the rest silently. Deliberate, and it is why the `Popeye` line was the one
