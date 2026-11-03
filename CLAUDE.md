@@ -165,6 +165,15 @@ Dated `YYYY-MM-DD-<topic>.md`.
 
 ## State
 
+**This repo moved on 2026-11-03**, from `~/sites/comic-renamer` to
+`~/bsns-casual/comic-renamer`, beside the shared `bsns-casual/brain` repo. Nothing
+in the code or the build changed — same remote, same branch. The `## Shared context`
+section at the end of this file is the only addition: it `@`-includes Mike's and
+Rob's status files from `brain`, and the product plan now lives at
+`../brain/projects/comic-renamer/plan.md`. One mention of the old path survives, in
+`docs/research/2026-10-19-adversarial-review-findings.md`, and is left alone on
+purpose — it records what was verified at the time.
+
 **Released.** v0.1.0 is tagged and published, the repository is public, and
 `brew install bsns-casual/tap/comic-renamer` works — after `brew trust`, which
 current Homebrew requires of every third-party tap. Design approved, Phase 0
