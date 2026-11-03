@@ -70,8 +70,45 @@ ask_path() {  # question, default
   unescape_path "$raw"
 }
 
+# The closing burst, as in the Figma frames "Step 7 · motion". Raw ANSI codes
+# rather than gum style: 28 gum calls would be slower than the animation.
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  Y=$'\033[33m' R=$'\033[1;31m' C=$'\033[36m' D=$'\033[2m' N=$'\033[0m'
+else
+  Y='' R='' C='' D='' N=''
+fi
+burst() {  # frame 1-4: the word, then its box, then the inner rays, then all of it
+  local f=$1 g="${D}│${N}" k='' word="${R}K A P O W !${N}" r
+  [ -t 1 ] && k=$'\033[K'
+  local box="${Y}|${N}  ${word}  ${Y}|${N}"
+  local r0='' r1='' r2='' r3="        ${word}" r4='' r5='' r6=''
+  if [ "$f" -ge 2 ]; then
+    r2="     ${Y}.--'''''''''''--.${N}"; r3="     $box"; r4="     ${Y}'--...........--'${N}"
+  fi
+  if [ "$f" -ge 3 ]; then
+    r1="         ${Y}\\   |   /${N}"; r5="         ${Y}/   |   \\${N}"
+    r3="  ${Y}--${N} $box ${Y}--${N}"
+  fi
+  if [ "$f" -ge 4 ]; then
+    r0="      ${Y}\\      |      /${N}"; r6="      ${Y}/      |      \\${N}"
+    r1="   ${C}*${N}     ${Y}\\   |   /${N}     ${C}*${N}"
+    r5="   ${C}.${N}     ${Y}/   |   \\${N}     ${C}.${N}"
+  fi
+  for r in "$r0" "$r1" "$r2" "$r3" "$r4" "$r5" "$r6"; do printf '%s%s%s\n' "$g" "$r" "$k"; done
+}
+celebrate() {  # about 0.6s of frames on a terminal, then the last one stays
+  local f
+  if [ -t 1 ]; then
+    printf '\033[?25l'
+    for f in 1 2 3; do burst "$f"; sleep 0.2; printf '\033[7A'; done
+  fi
+  burst 4
+  [ -t 1 ] && printf '\033[?25h'
+  return 0
+}
+
 finished=0
-trap '[ "$finished" = 1 ] || { echo; dim "└  Stopped. Nothing was renamed."; }' EXIT
+trap '[ -t 1 ] && printf "\033[?25h"; [ "$finished" = 1 ] || { echo; dim "└  Stopped. Nothing was renamed."; }' EXIT
 
 # --- the wizard --------------------------------------------------------------
 echo "$(dim '┌')  $(bold comic-renamer)"
@@ -151,8 +188,9 @@ for entry in "${UNKNOWN[@]}"; do
   gap
 done
 
-summary="Renamed $renamed more, skipped $skipped."
-[ "$all_from" -gt 0 ] && summary+=" $((new - all_from + 1)) named by \"Use all remaining guesses\"."
-note "$summary" "✓"
+celebrate
+gap
+echo "$(green '✓')  $((known + renamed)) comics shelved in ${library}. $skipped skipped."
+[ "$all_from" -gt 0 ] && echo "$(dim '│')  $(dim "$((new - all_from + 1)) named by \"Use all remaining guesses\".")"
 finished=1
 echo "$(dim '└')  Undo with: $(bold 'comic-renamer undo')"
