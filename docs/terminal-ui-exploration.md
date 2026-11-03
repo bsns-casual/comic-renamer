@@ -1,8 +1,10 @@
 # Terminal UI exploration — a framework
 
 Status: exploration, back burner (2026-11-03). Nothing here is decided or built.
-Source: the 2026-11-03 call between Mike and Rob (`bsns-casual/brain`,
-`meetings/2026-11-03-nov3.md`, roughly lines 293–325).
+Source: the 2026-11-03 call between Mike and Rob. In `bsns-casual/brain`, see
+`decisions/2026-11-03-comic-renamer-back-burner.md` (this doc is its first
+follow-up), `meetings/2026-11-03-songlink-and-brain-setup.md`, and the raw
+transcript `meetings/2026-11-03-nov3.md`, roughly lines 293–325.
 
 **Recommendation:** sketch in a monospace Figma frame, prove the flow with a
 throwaway `gum` script plus a VHS recording, and build the real thing in Rust
@@ -98,7 +100,8 @@ How this maps onto what exists, and what it must keep:
 - **Copy or move** has to be asked or shown somewhere, since move is the default
   (D23). Ask once, on first run.
 - The end screen is where Mike's contribution idea fits ("send these 3 new names
-  to us?"). Asking for it is a separate decision.
+  to us?"), replacing today's commit-to-the-repo path with a CSV or zip (a "later"
+  follow-up in the back-burner decision). Building it is a separate decision.
 
 Open questions for a tester: is one question per unknown file tolerable at 40
 unknowns? Should the wizard say what happened before the rename (preview by
@@ -109,7 +112,7 @@ default) or after (undo)?
 | | Terminal wizard | Drop-zone desktop app |
 |---|---|---|
 | Who it's for | People already in a terminal, and Homebrew users | Anyone, including people who never open Terminal |
-| Rob's workflow | New: grid sketches, `gum`, VHS | Familiar: Figma, and the build is HTML/CSS |
+| Rob's workflow | New: grid sketches, `gum`, VHS. Figma's repo-to-design import doesn't help here, because there's no web UI to import | Familiar: Figma, and the build is HTML/CSS, so the repo-to-design import Rob tried on 2026-11-03 applies |
 | Build | Add a prompt crate to the existing CLI. Days | Tauri app (Rust core plus web UI), with signing and notarisation. Weeks |
 | Reuse | Calls `crates/core` directly | Calls `crates/core` through Tauri commands |
 | Distribution | `brew install`, already working | DMG, Apple notarisation, a cask |
