@@ -21,6 +21,9 @@ export GUM_CONFIRM_PROMPT_FOREGROUND=6
 export GUM_CONFIRM_SELECTED_FOREGROUND=0 GUM_CONFIRM_SELECTED_BACKGROUND=6
 export GUM_CONFIRM_UNSELECTED_FOREGROUND=7 GUM_CONFIRM_UNSELECTED_BACKGROUND=8
 export GUM_SPIN_SPINNER_FOREGROUND=6
+# gum 2 strips all styling when its output is captured, which every $(green …)
+# below does. Keep it when the script itself is on a terminal, unless NO_COLOR.
+[ -t 1 ] && [ -z "${NO_COLOR:-}" ] && export CLICOLOR_FORCE=1
 
 # --- fake data ---------------------------------------------------------------
 KNOWN=(  # "bundle filename|what the Komga preset would name it"
@@ -92,7 +95,8 @@ source=$(ask_path "Where are the new comics?" "~/Downloads/humble-bundle")
 answered "Where are the new comics?" "$source"
 
 # 4. Found N files. What next?
-gum spin --title "Looking in $source…" -- sleep 1
+# Braces matter: macOS's bash 3.2 reads the first byte of "…" as part of a bare $name.
+gum spin --title "Looking in ${source}…" -- sleep 1
 known=${#KNOWN[@]} new=${#UNKNOWN[@]}
 note "Found $((known + new)) files. $(green "$known known"), $(yellow "$new new to me")."
 
