@@ -630,3 +630,9 @@ Concretely, a minimising instinct will want to:
 Rule of thumb: **minimise the code, never the proof.** If a change makes the
 diff smaller by making a destructive path less observable, it is not a ponytail
 change, it is a regression wearing one.
+
+## Shared context
+
+@../brain/status/mike.md
+@../brain/status/rob.md
+See ../brain/projects/comic-renamer/plan.md for the product plan and decisions.
