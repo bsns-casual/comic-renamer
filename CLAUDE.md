@@ -158,6 +158,8 @@ scripts/         checks and tools, runnable locally:
                  python3 scripts/export-decisions.py <dump> <out.tsv>
                  node scripts/check-review-page.cjs          its path mirror vs komga.rs
                  scripts/review-page.html                    the Humble review page itself
+prototype/       wizard.sh — a throwaway `gum` click-through of the terminal
+                 wizard, fake data only; reads no folders, renames nothing
 .github/         workflows: verify (every PR), corpus-refresh (monthly)
 ```
 
